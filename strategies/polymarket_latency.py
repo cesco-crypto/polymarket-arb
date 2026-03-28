@@ -89,7 +89,11 @@ class PolymarketLatencyStrategy:
             f"Max-Fee: {self.settings.polymarket_max_fee_pct}% | "
             f"Kelly: {self.settings.kelly_fraction} (Half-Kelly)"
         )
-        await telegram.alert_startup(self.settings.paper_capital_usd, self.settings.mode)
+        await telegram.alert_startup(
+            self.settings.paper_capital_usd, self.settings.mode,
+            live=self.settings.live_trading,
+            wallet=self.settings.polymarket_funder,
+        )
 
         # Binance WebSocket starten
         await self.oracle.start()

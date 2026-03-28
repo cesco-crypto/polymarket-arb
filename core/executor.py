@@ -82,12 +82,6 @@ class PolymarketExecutor:
             self._ready = True
             logger.info("Executor: LIVE MODE AKTIV — echte Orders werden platziert!")
 
-            await telegram.send_alert(
-                "🔴 <b>LIVE TRADING AKTIVIERT</b>\n"
-                f"Max Position: ${self.settings.max_live_position_usd}\n"
-                "Jede Order wird via Telegram bestätigt."
-            )
-
             return True
 
         except Exception as e:

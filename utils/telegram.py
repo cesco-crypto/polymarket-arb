@@ -92,13 +92,19 @@ async def close() -> None:
 
 # --- Vorgefertigte Alert-Templates ---
 
-async def alert_startup(capital: float, mode: str) -> None:
-    await send_alert(
-        f"🟢 <b>Bot gestartet</b>\n"
-        f"Modus: {mode}\n"
-        f"Kapital: ${capital:.2f}\n"
-        f"Strategie: Polymarket Latency Arb"
-    )
+async def alert_startup(capital: float, mode: str, live: bool = False, wallet: str = "") -> None:
+    if live:
+        await send_alert(
+            f"🟢 <b>Bot gestartet — LIVE</b>\n"
+            f"Wallet: <code>{wallet[:10]}...{wallet[-6:]}</code>\n"
+            f"Max Trade: $5.00\n"
+            f"Kill Switch: -20%"
+        )
+    else:
+        await send_alert(
+            f"🟢 <b>Bot gestartet — Paper</b>\n"
+            f"Kapital: ${capital:.2f}"
+        )
 
 
 async def alert_shutdown(capital: float, trades: int, pnl: float) -> None:
