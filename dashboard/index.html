@@ -65,6 +65,7 @@
     <span>Signals: <strong id="sig-count">0</strong></span>
     <span>Scanned: <strong id="scan-count" style="color:var(--text-dim)">0</strong></span>
     <span id="clock"></span>
+    <a href="/wallet" style="color:var(--green);text-decoration:none;font-size:11px;padding:3px 10px;border:1px solid var(--green);border-radius:4px;">WALLET</a>
     <a href="/quant-lab" style="color:var(--accent);text-decoration:none;font-size:11px;padding:3px 10px;border:1px solid var(--accent);border-radius:4px;">QUANT LAB</a>
     <span><span id="ws-dot" class="dot dot-r" style="display:inline-block;width:6px;height:6px;margin-right:3px;vertical-align:middle"></span><span id="ws-txt">...</span></span>
   </div>
@@ -131,6 +132,10 @@
   </div>
   <div class="stat">
     <div class="stat-row"><span class="d">Kill Switch</span><span id="kill-switch"><span class="dot dot-g" style="display:inline-block;width:6px;height:6px;vertical-align:middle;margin-right:4px"></span>OFF</span></div>
+  </div>
+  <div class="stat">
+    <div class="stat-row"><span class="d">Mode</span><span id="mode-badge" class="b">PAPER</span></div>
+    <div class="stat-row"><span class="d">Donation (10%)</span><span class="g" id="donation">$0.00</span></div>
   </div>
 </div>
 
@@ -384,6 +389,12 @@ function switchTab(btn, tab) {
     id('avg-pnl').textContent = t.avg_pnl_usd !== undefined ? '$' + t.avg_pnl_usd.toFixed(4) : '—';
 
     const ks = t.kill_switch_active;
+    // Mode + Donation
+    const isLive = d.executor && d.executor.live;
+    id('mode-badge').textContent = isLive ? 'LIVE' : 'PAPER';
+    id('mode-badge').className = isLive ? 'b rd' : 'b y';
+    id('donation').textContent = '$' + (d.donation_usd || 0).toFixed(2);
+
     id('kill-switch').innerHTML = ks
       ? '<span class="dot dot-r" style="display:inline-block;width:6px;height:6px;vertical-align:middle;margin-right:4px"></span><span class="rd b">ACTIVE</span>'
       : '<span class="dot dot-g" style="display:inline-block;width:6px;height:6px;vertical-align:middle;margin-right:4px;animation:none"></span>OFF';

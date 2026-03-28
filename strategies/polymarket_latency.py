@@ -398,6 +398,7 @@ class PolymarketLatencyStrategy:
             "signals_detected": self._signals_detected,
             "scan_cycles": self._scan_cycles,
             "heartbeat": self._heartbeat,
+            "executor": self.executor.stats(),
             "oracle": oracle_status,
             "discovery": discovery_status,
             "recent_signals": list(self._recent_signals),

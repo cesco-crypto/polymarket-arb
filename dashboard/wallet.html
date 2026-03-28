@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wallet — Polymarket Arb</title>
+<style>
+  :root{--bg:#0a0c10;--bg2:#13151c;--bg3:#181b24;--border:#1e2230;--text:#e1e4eb;--dim:#6b7080;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--font:'SF Mono','JetBrains Mono','Cascadia Code',monospace}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:12px}
+  .hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:var(--bg2);border-bottom:1px solid var(--border)}
+  .hdr a{color:var(--dim);text-decoration:none;font-size:11px}.hdr a:hover{color:var(--text)}
+  .logo{font-size:13px;font-weight:700;letter-spacing:1.5px;color:var(--green)}
+  .container{max-width:700px;margin:40px auto;padding:0 20px}
+  .card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:24px;margin-bottom:20px}
+  .card-title{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin-bottom:16px}
+  .balance{font-size:42px;font-weight:700;color:var(--green)}
+  .balance-sub{font-size:12px;color:var(--dim);margin-top:4px}
+  .addr{background:var(--bg3);padding:12px 16px;border-radius:6px;font-size:13px;word-break:break-all;margin:12px 0;display:flex;justify-content:space-between;align-items:center}
+  .addr-copy{cursor:pointer;color:var(--accent);font-size:10px;padding:4px 10px;border:1px solid var(--accent);border-radius:4px}
+  .addr-copy:hover{background:var(--accent);color:white}
+  .info-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:12px}
+  .info-row:last-child{border-bottom:none}
+  .g{color:var(--green)}.rd{color:var(--red)}.y{color:var(--yellow)}.d{color:var(--dim)}.b{font-weight:700}
+  .warn{background:#eab30810;border:1px solid var(--yellow);border-radius:6px;padding:12px;font-size:11px;color:var(--yellow);margin-top:16px}
+  .deposit-box{background:var(--bg3);border:2px dashed var(--green);border-radius:8px;padding:20px;text-align:center;margin:16px 0}
+  .donation-box{background:#22c55e10;border:1px solid var(--green);border-radius:8px;padding:16px;margin-top:16px}
+  .donation-val{font-size:24px;font-weight:700;color:var(--green)}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <span class="logo">WALLET</span>
+  <div style="display:flex;gap:12px">
+    <a href="/">Dashboard</a>
+    <a href="/quant-lab">Quant Lab</a>
+  </div>
+</div>
+
+<div class="container">
+
+  <div class="card">
+    <div class="card-title">Trading Wallet — Polygon (USDC.e)</div>
+    <div class="balance" id="balance">Loading...</div>
+    <div class="balance-sub" id="balance-sub">USDC.e on Polygon</div>
+
+    <div class="addr">
+      <span id="wallet-addr">Loading...</span>
+      <span class="addr-copy" onclick="copyAddr()">Copy</span>
+    </div>
+
+    <div class="info-row"><span class="d">Chain</span><span>Polygon (137)</span></div>
+    <div class="info-row"><span class="d">Token</span><span>USDC.e (Bridged)</span></div>
+    <div class="info-row"><span class="d">Mode</span><span id="mode" class="b">—</span></div>
+    <div class="info-row"><span class="d">Orders Placed</span><span id="orders">0</span></div>
+    <div class="info-row"><span class="d">Total Volume</span><span id="volume">$0.00</span></div>
+    <div class="info-row"><span class="d">Max Trade Size</span><span>$5.00</span></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Deposit (Einzahlen)</div>
+    <div class="deposit-box">
+      <div style="font-size:11px;color:var(--dim);margin-bottom:8px">Sende USDC.e auf Polygon an:</div>
+      <div id="deposit-addr" style="font-size:14px;font-weight:700;word-break:break-all">Loading...</div>
+      <div style="margin-top:12px;font-size:10px;color:var(--dim)">
+        Nur USDC.e (0x2791Bca1...) auf Polygon senden!<br>
+        Native USDC muss zuerst geswappt werden.
+      </div>
+    </div>
+
+    <div class="warn">
+      Auszahlungen sind aus Sicherheitsgründen über das Dashboard deaktiviert.<br>
+      Withdrawals nur über MetaMask / direkte Wallet-Interaktion möglich.
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Donation Tracker (10% der Gewinne)</div>
+    <div class="donation-box">
+      <div class="donation-val" id="donation-amount">$0.00</div>
+      <div style="font-size:10px;color:var(--dim);margin-top:4px">10% aller realisierten Gewinne gehen an Spenden</div>
+    </div>
+    <div class="info-row" style="margin-top:12px"><span class="d">Total PnL</span><span id="total-pnl">$0.00</span></div>
+    <div class="info-row"><span class="d">Davon 10% Spende</span><span class="g" id="donation-pct">$0.00</span></div>
+  </div>
+
+</div>
+
+<script>
+async function loadWallet() {
+  try {
+    const r = await fetch('/api/wallet');
+    const d = await r.json();
+
+    document.getElementById('balance').textContent = '$' + (d.balance || 0).toFixed(2);
+    document.getElementById('wallet-addr').textContent = d.wallet || 'Not connected';
+    document.getElementById('deposit-addr').textContent = d.wallet || '—';
+    document.getElementById('mode').textContent = d.live ? 'LIVE' : 'PAPER';
+    document.getElementById('mode').className = d.live ? 'b' : 'b y';
+    document.getElementById('orders').textContent = d.orders_placed || 0;
+    document.getElementById('volume').textContent = '$' + (d.total_volume || 0).toFixed(2);
+    document.getElementById('donation-amount').textContent = '$' + (d.donation_10pct || 0).toFixed(2);
+    document.getElementById('donation-pct').textContent = '$' + (d.donation_10pct || 0).toFixed(2);
+  } catch(e) {
+    document.getElementById('balance').textContent = 'Error';
+  }
+}
+
+function copyAddr() {
+  const addr = document.getElementById('wallet-addr').textContent;
+  navigator.clipboard.writeText(addr);
+  const btn = document.querySelector('.addr-copy');
+  btn.textContent = 'Copied!';
+  setTimeout(() => btn.textContent = 'Copy', 2000);
+}
+
+loadWallet();
+setInterval(loadWallet, 10000);
+</script>
+</body>
+</html>

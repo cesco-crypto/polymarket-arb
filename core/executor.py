@@ -188,9 +188,29 @@ class PolymarketExecutor:
 
             return ExecutionResult(success=False, error=error_msg)
 
+    async def get_balance(self) -> float:
+        """Holt echte USDC.e Balance von der Blockchain."""
+        if not self._client:
+            return 0.0
+        try:
+            import aiohttp
+            wallet = self._client.get_address()
+            USDCE = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+            addr_padded = wallet[2:].lower().zfill(64)
+            call_data = "0x70a08231" + addr_padded
+            payload = {"jsonrpc": "2.0", "method": "eth_call",
+                       "params": [{"to": USDCE, "data": call_data}, "latest"], "id": 1}
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+                async with s.post("https://polygon.drpc.org", json=payload) as r:
+                    result = await r.json()
+                    return int(result.get("result", "0x0"), 16) / 1e6
+        except Exception:
+            return 0.0
+
     def stats(self) -> dict:
         return {
             "live": self.is_live,
             "orders_placed": self._orders_placed,
             "total_volume_usd": round(self._total_volume_usd, 2),
+            "wallet": self._client.get_address() if self._client else "",
         }

@@ -110,12 +110,21 @@ def _build_payload() -> dict:
     hours, remainder = divmod(uptime, 3600)
     minutes, seconds = divmod(remainder, 60)
 
+    executor = status.get("executor", {})
+    trading = status.get("paper_trading", {})
+
+    # Donation tracker: 10% der Gewinne
+    total_pnl = trading.get("daily_pnl_usd", 0)
+    donation = round(max(0, total_pnl * 0.10), 2)
+
     return {
         "oracle": status.get("oracle", {}),
         "discovery": status.get("discovery", {}),
         "signals": status.get("recent_signals", []),
-        "trading": status.get("paper_trading", {}),
+        "trading": trading,
         "config": status.get("config", {}),
+        "executor": executor,
+        "donation_usd": donation,
         "signals_detected": status.get("signals_detected", 0),
         "scan_cycles": status.get("scan_cycles", 0),
         "heartbeat": status.get("heartbeat", {}),
@@ -162,6 +171,33 @@ async def api_backtest() -> dict:
     with open(grid_file) as f:
         results = json.load(f)
     return {"results": results, "count": len(results)}
+
+
+@app.get("/api/wallet")
+async def api_wallet() -> dict:
+    """Wallet-Balance und Deposit-Info."""
+    if not strategy or not strategy.executor.is_live:
+        return {"live": False, "balance": 0, "wallet": "", "chain": "Polygon"}
+    balance = await strategy.executor.get_balance()
+    stats = strategy.executor.stats()
+    pnl = strategy.paper_trader.daily_pnl_usd()
+    return {
+        "live": True,
+        "balance": round(balance, 2),
+        "wallet": stats.get("wallet", ""),
+        "chain": "Polygon",
+        "token": "USDC.e",
+        "orders_placed": stats.get("orders_placed", 0),
+        "total_volume": stats.get("total_volume_usd", 0),
+        "donation_10pct": round(max(0, pnl * 0.10), 2),
+    }
+
+
+@app.get("/wallet", response_class=HTMLResponse)
+async def wallet_page() -> HTMLResponse:
+    """Wallet Management Page."""
+    html_path = Path(__file__).parent / "wallet.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
 @app.get("/quant-lab", response_class=HTMLResponse)
