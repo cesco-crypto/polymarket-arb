@@ -113,6 +113,17 @@ def _build_payload() -> dict:
     executor = status.get("executor", {})
     trading = status.get("paper_trading", {})
 
+    # Wenn Live-Trading aktiv: Balance async holen
+    if executor.get("live") and strategy and strategy.executor.is_live:
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Wir sind bereits in einer async-Umgebung
+                pass  # Balance wird über /api/wallet Endpoint geholt
+        except Exception:
+            pass
+
     # Donation tracker: 10% der Gewinne
     total_pnl = trading.get("daily_pnl_usd", 0)
     donation = round(max(0, total_pnl * 0.10), 2)

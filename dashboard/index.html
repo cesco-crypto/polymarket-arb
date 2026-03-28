@@ -107,7 +107,7 @@
   <div class="pt">Risk & Kill Switches</div>
   <div class="stat">
     <div class="stat-val" id="capital">$1,000.00</div>
-    <div class="stat-lbl">Paper Capital</div>
+    <div class="stat-lbl" id="capital-lbl">Paper Capital</div>
   </div>
   <div class="stat">
     <div class="stat-val g" id="pnl">+$0.00</div>
@@ -351,13 +351,28 @@ function switchTab(btn, tab) {
     }).join('');
   }
 
+  // Wallet balance cache (fetched separately)
+  let _walletBalance = null;
+  async function fetchWalletBalance() {
+    try {
+      const r = await fetch('/api/wallet');
+      const d = await r.json();
+      if (d.live && d.balance > 0) _walletBalance = d.balance;
+    } catch(e) {}
+  }
+  setInterval(fetchWalletBalance, 10000);
+  fetchWalletBalance();
+
   // --- P4: Risk ---
   function renderRisk(t, cfg) {
-    const cap = t.capital_usd || (cfg.paper_capital_usd || 1000);
-    const init = cfg.paper_capital_usd || 1000;
-    const capC = cap >= init ? 'g' : 'rd';
+    const isLive = lastData?.executor?.live;
+    const cap = isLive && _walletBalance ? _walletBalance : (t.capital_usd || (cfg.paper_capital_usd || 1000));
+    const init = isLive && _walletBalance ? _walletBalance : (cfg.paper_capital_usd || 1000);
+    const lbl = isLive ? 'LIVE CAPITAL' : 'PAPER CAPITAL';
+    const capC = cap >= init * 0.95 ? 'g' : 'rd';
     id('capital').className = 'stat-val ' + capC;
     id('capital').textContent = '$' + cap.toLocaleString('en',{minimumFractionDigits:2});
+    id('capital-lbl').textContent = lbl;
 
     const pnl = t.daily_pnl_usd || 0;
     id('pnl').className = 'stat-val ' + (pnl >= 0 ? 'g' : 'rd');
