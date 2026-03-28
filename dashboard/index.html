@@ -106,8 +106,8 @@
 <div class="p p4">
   <div class="pt">Risk & Kill Switches</div>
   <div class="stat">
-    <div class="stat-val" id="capital">$1,000.00</div>
-    <div class="stat-lbl" id="capital-lbl">Paper Capital</div>
+    <div class="stat-val" id="capital">—</div>
+    <div class="stat-lbl" id="capital-lbl">Loading...</div>
   </div>
   <div class="stat">
     <div class="stat-val g" id="pnl">+$0.00</div>
@@ -351,27 +351,25 @@ function switchTab(btn, tab) {
     }).join('');
   }
 
-  // Wallet balance cache (fetched separately)
-  let _walletBalance = null;
-  async function fetchWalletBalance() {
+  // Wallet balance (fetched from blockchain via /api/wallet)
+  let _wallet = { live: false, balance: 0 };
+  async function fetchWallet() {
     try {
       const r = await fetch('/api/wallet');
-      const d = await r.json();
-      if (d.live && d.balance > 0) _walletBalance = d.balance;
+      _wallet = await r.json();
     } catch(e) {}
   }
-  setInterval(fetchWalletBalance, 10000);
-  fetchWalletBalance();
+  setInterval(fetchWallet, 10000);
+  fetchWallet();
 
   // --- P4: Risk ---
   function renderRisk(t, cfg) {
-    const isLive = lastData?.executor?.live;
-    const cap = isLive && _walletBalance ? _walletBalance : (t.capital_usd || (cfg.paper_capital_usd || 1000));
-    const init = isLive && _walletBalance ? _walletBalance : (cfg.paper_capital_usd || 1000);
-    const lbl = isLive ? 'LIVE CAPITAL' : 'PAPER CAPITAL';
-    const capC = cap >= init * 0.95 ? 'g' : 'rd';
+    const isLive = _wallet.live;
+    const cap = isLive ? _wallet.balance : t.capital_usd;
+    const lbl = isLive ? 'LIVE CAPITAL (USDC.e)' : 'PAPER CAPITAL';
+    const capC = isLive ? (cap >= 70 ? 'g' : cap >= 50 ? 'y' : 'rd') : '';
     id('capital').className = 'stat-val ' + capC;
-    id('capital').textContent = '$' + cap.toLocaleString('en',{minimumFractionDigits:2});
+    id('capital').textContent = '$' + (cap || 0).toLocaleString('en',{minimumFractionDigits:2});
     id('capital-lbl').textContent = lbl;
 
     const pnl = t.daily_pnl_usd || 0;
@@ -404,10 +402,9 @@ function switchTab(btn, tab) {
     id('avg-pnl').textContent = t.avg_pnl_usd !== undefined ? '$' + t.avg_pnl_usd.toFixed(4) : '—';
 
     const ks = t.kill_switch_active;
-    // Mode + Donation
-    const isLive = d.executor && d.executor.live;
-    id('mode-badge').textContent = isLive ? 'LIVE' : 'PAPER';
-    id('mode-badge').className = isLive ? 'b rd' : 'b y';
+    // Mode + Donation (from wallet fetch, not WS payload)
+    id('mode-badge').textContent = _wallet.live ? 'LIVE' : 'PAPER';
+    id('mode-badge').className = _wallet.live ? 'b rd' : 'b y';
     id('donation').textContent = '$' + (d.donation_usd || 0).toFixed(2);
 
     id('kill-switch').innerHTML = ks
