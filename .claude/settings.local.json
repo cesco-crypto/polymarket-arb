@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(python3 -c \":*)",
+      "Bash(pip3 install:*)",
+      "Bash(python3 -m venv venv)",
+      "Bash(source venv/bin/activate)",
+      "Bash(python -c \":*)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(./venv/bin/python -c \":*)",
+      "Bash(kill 4846)",
+      "Bash(gh auth:*)"
+    ]
+  }
+}
