@@ -150,6 +150,25 @@ async def api_status() -> dict:
     return _build_payload() if strategy else {"error": "not initialized"}
 
 
+@app.get("/api/backtest")
+async def api_backtest() -> dict:
+    """Backtest Grid Search Ergebnisse für Quant Lab."""
+    import json
+    grid_file = Path(__file__).parent.parent / "data" / "backtest" / "grid_results.json"
+    if not grid_file.exists():
+        return {"error": "No backtest data. Run: python backtest_engine.py"}
+    with open(grid_file) as f:
+        results = json.load(f)
+    return {"results": results, "count": len(results)}
+
+
+@app.get("/quant-lab", response_class=HTMLResponse)
+async def quant_lab() -> HTMLResponse:
+    """Quant Research & Backtesting Lab."""
+    html_path = Path(__file__).parent / "quant_lab.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Quant Lab — Polymarket Arb</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root{--bg:#0a0c10;--bg2:#13151c;--bg3:#181b24;--border:#1e2230;--text:#e1e4eb;--dim:#6b7080;--mid:#9298a8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--font:'SF Mono','JetBrains Mono','Cascadia Code',monospace}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:12px}
+  .hdr{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;background:var(--bg2);border-bottom:1px solid var(--border)}
+  .hdr a{color:var(--dim);text-decoration:none;font-size:11px}.hdr a:hover{color:var(--text)}
+  .logo{font-size:13px;font-weight:700;letter-spacing:1.5px;color:var(--accent)}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--border);min-height:calc(100vh - 38px)}
+  .p{background:var(--bg2);padding:16px;overflow:auto}
+  .p-full{grid-column:1/3}
+  .pt{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin-bottom:12px}
+  .kpi-row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  .kpi{background:var(--bg3);padding:10px 16px;border-radius:6px;min-width:120px}
+  .kpi-val{font-size:20px;font-weight:700}.kpi-lbl{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+  .g{color:var(--green)}.rd{color:var(--red)}.y{color:var(--yellow)}
+  table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}
+  th{text-align:left;padding:4px 8px;font-size:9px;text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--border)}
+  td{padding:4px 8px;border-bottom:1px solid var(--border)}
+  .r{text-align:right}.b{font-weight:700}
+  .empty{text-align:center;padding:40px;color:var(--dim)}
+  .loading{text-align:center;padding:60px;color:var(--dim);font-size:14px}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <div style="display:flex;align-items:center;gap:14px">
+    <span class="logo">QUANT LAB</span>
+    <span style="color:var(--dim);font-size:11px">Backtesting & Parameter Research</span>
+  </div>
+  <div style="display:flex;gap:12px;align-items:center">
+    <a href="/">Dashboard</a>
+    <span style="color:var(--dim);font-size:10px" id="data-status">Loading...</span>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- Heatmap: Win Rate by Threshold x Window -->
+  <div class="p">
+    <div class="pt">Parameter Stability — Win Rate Heatmap (5m BTC)</div>
+    <div id="heatmap-wr" style="height:340px"><div class="loading">Loading backtest data...</div></div>
+  </div>
+
+  <!-- Heatmap: PnL by Threshold x Window -->
+  <div class="p">
+    <div class="pt">Profitability — Net PnL Heatmap ($50/trade, 5m BTC)</div>
+    <div id="heatmap-pnl" style="height:340px"><div class="loading">Loading...</div></div>
+  </div>
+
+  <!-- KPIs + Top Configs -->
+  <div class="p">
+    <div class="pt">Institutional KPIs — Best Configuration</div>
+    <div class="kpi-row" id="kpis">
+      <div class="kpi"><div class="kpi-val g" id="k-wr">—</div><div class="kpi-lbl">Win Rate</div></div>
+      <div class="kpi"><div class="kpi-val" id="k-trades">—</div><div class="kpi-lbl">Trades (6mo)</div></div>
+      <div class="kpi"><div class="kpi-val g" id="k-pnl">—</div><div class="kpi-lbl">Net PnL</div></div>
+      <div class="kpi"><div class="kpi-val" id="k-sharpe">—</div><div class="kpi-lbl">Sharpe</div></div>
+      <div class="kpi"><div class="kpi-val" id="k-dd">—</div><div class="kpi-lbl">Max DD</div></div>
+      <div class="kpi"><div class="kpi-val" id="k-freq">—</div><div class="kpi-lbl">Trades/Day</div></div>
+    </div>
+    <table>
+      <tr><th>#</th><th>Slot</th><th>Mom</th><th class="r">Thr%</th><th class="r">Trades</th><th class="r">WR%</th><th class="r">PnL</th><th class="r">Sharpe</th><th class="r">MaxDD%</th></tr>
+    </table>
+    <table id="top-table"><tr><td colspan="9" class="empty">Loading...</td></tr></table>
+  </div>
+
+  <!-- Momentum vs Win Rate Chart -->
+  <div class="p">
+    <div class="pt">Signal Strength — Momentum Threshold vs Win Rate</div>
+    <div id="mom-chart" style="height:340px"><div class="loading">Loading...</div></div>
+  </div>
+
+  <!-- Mark-out Placeholder -->
+  <div class="p">
+    <div class="pt">Mark-out Analysis — Signal Quality (T+1s to T+60s)</div>
+    <div id="markout-chart" style="height:300px">
+      <div class="empty" style="padding-top:80px">
+        Waiting for live paper trades...<br>
+        <span style="font-size:10px;color:var(--dim)">Mark-out data will populate once the bot executes trades on Render.<br>
+        Each trade records Binance price at T+1s, T+5s, T+10s, T+30s, T+60s.</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Monte Carlo Placeholder -->
+  <div class="p">
+    <div class="pt">Monte Carlo Stress Test — Account Outcome Distribution</div>
+    <div id="monte-carlo" style="height:300px">
+      <div class="empty" style="padding-top:80px">
+        Requires 50+ resolved trades<br>
+        <span style="font-size:10px;color:var(--dim)">Will run 1,000 random permutations of trade history<br>
+        to show probability distribution of account outcomes.</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const PLOTLY_LAYOUT = {
+  paper_bgcolor: '#13151c', plot_bgcolor: '#0a0c10',
+  font: { family: 'SF Mono, JetBrains Mono, monospace', size: 10, color: '#9298a8' },
+  margin: { l: 50, r: 20, t: 30, b: 40 },
+};
+
+async function loadData() {
+  try {
+    const r = await fetch('/api/backtest');
+    const d = await r.json();
+    if (d.error) { document.getElementById('data-status').textContent = d.error; return; }
+    document.getElementById('data-status').textContent = d.count + ' configs loaded';
+    render(d.results);
+  } catch(e) {
+    document.getElementById('data-status').textContent = 'Error: ' + e.message;
+  }
+}
+
+function render(results) {
+  const r5 = results.filter(r => r.slot_min === 5);
+  if (!r5.length) return;
+
+  // Build heatmap data
+  const windows = [...new Set(r5.map(r => r.mom_win_min))].sort((a,b) => a-b);
+  const thresholds = [...new Set(r5.map(r => r.threshold_pct))].sort((a,b) => a-b);
+
+  // Win Rate Heatmap
+  const wrMatrix = thresholds.map(thr =>
+    windows.map(w => {
+      const m = r5.find(r => r.threshold_pct === thr && r.mom_win_min === w);
+      return m ? m.win_rate : 0;
+    })
+  );
+
+  Plotly.newPlot('heatmap-wr', [{
+    z: wrMatrix, x: windows.map(w => w + 'min'), y: thresholds.map(t => t + '%'),
+    type: 'heatmap', colorscale: [[0,'#1a1d27'],[0.5,'#eab308'],[0.8,'#22c55e'],[1,'#00ff88']],
+    zmin: 80, zmax: 100, hovertemplate: 'Window: %{x}<br>Threshold: %{y}<br>Win Rate: %{z:.1f}%<extra></extra>',
+    colorbar: { title: { text: 'WR%', font: { size: 10 } }, tickfont: { size: 9 } },
+  }], { ...PLOTLY_LAYOUT, title: { text: 'Win Rate by Momentum Window x Threshold', font: { size: 11 } },
+    xaxis: { title: 'Momentum Window' }, yaxis: { title: 'Threshold (%)' } });
+
+  // PnL Heatmap
+  const pnlMatrix = thresholds.map(thr =>
+    windows.map(w => {
+      const m = r5.find(r => r.threshold_pct === thr && r.mom_win_min === w);
+      return m ? m.pnl : 0;
+    })
+  );
+
+  Plotly.newPlot('heatmap-pnl', [{
+    z: pnlMatrix, x: windows.map(w => w + 'min'), y: thresholds.map(t => t + '%'),
+    type: 'heatmap', colorscale: [[0,'#2d0f0f'],[0.3,'#1a1d27'],[0.5,'#0a2f1a'],[1,'#00ff88']],
+    hovertemplate: 'Window: %{x}<br>Threshold: %{y}<br>PnL: $%{z:,.0f}<extra></extra>',
+    colorbar: { title: { text: 'PnL $', font: { size: 10 } }, tickfont: { size: 9 } },
+  }], { ...PLOTLY_LAYOUT, title: { text: 'Net PnL ($50/trade, 6 months)', font: { size: 11 } },
+    xaxis: { title: 'Momentum Window' }, yaxis: { title: 'Threshold (%)' } });
+
+  // KPIs from best config
+  const best = [...r5].sort((a,b) => b.pnl - a.pnl)[0];
+  document.getElementById('k-wr').textContent = best.win_rate + '%';
+  document.getElementById('k-trades').textContent = best.trades.toLocaleString();
+  document.getElementById('k-pnl').textContent = '$' + best.pnl.toLocaleString();
+  document.getElementById('k-sharpe').textContent = best.sharpe.toFixed(1);
+  document.getElementById('k-dd').textContent = best.max_dd_pct + '%';
+  document.getElementById('k-freq').textContent = (best.trades / 208).toFixed(0);
+
+  // Top 10 table
+  const top = [...r5].sort((a,b) => b.pnl - a.pnl).slice(0, 10);
+  document.getElementById('top-table').innerHTML = top.map((r, i) => {
+    const wc = r.win_rate >= 90 ? 'g' : r.win_rate >= 85 ? 'y' : 'rd';
+    const pc = r.pnl > 0 ? 'g' : 'rd';
+    return `<tr>
+      <td class="dim">${i+1}</td>
+      <td>${r.slot_min}m</td>
+      <td>${r.mom_win_min}m</td>
+      <td class="r">${r.threshold_pct}%</td>
+      <td class="r">${r.trades.toLocaleString()}</td>
+      <td class="r ${wc} b">${r.win_rate}%</td>
+      <td class="r ${pc} b">$${r.pnl.toLocaleString()}</td>
+      <td class="r">${r.sharpe}</td>
+      <td class="r">${r.max_dd_pct}%</td>
+    </tr>`;
+  }).join('');
+
+  // Momentum vs Win Rate bar chart
+  const momData = thresholds.map(thr => {
+    const configs = r5.filter(r => r.threshold_pct === thr && r.trades > 0);
+    const avgWr = configs.reduce((s, r) => s + r.win_rate, 0) / configs.length;
+    const avgTrades = configs.reduce((s, r) => s + r.trades, 0) / configs.length;
+    return { thr, wr: avgWr, trades: avgTrades };
+  });
+
+  Plotly.newPlot('mom-chart', [
+    {
+      x: momData.map(d => d.thr + '%'), y: momData.map(d => d.wr),
+      type: 'bar', name: 'Win Rate %',
+      marker: { color: momData.map(d => d.wr >= 90 ? '#22c55e' : d.wr >= 85 ? '#eab308' : '#ef4444') },
+      hovertemplate: 'Threshold: %{x}<br>Win Rate: %{y:.1f}%<br><extra></extra>',
+    },
+    {
+      x: momData.map(d => d.thr + '%'), y: momData.map(d => d.trades),
+      type: 'scatter', mode: 'lines+markers', name: 'Avg Trades',
+      yaxis: 'y2', line: { color: '#3b82f6', width: 2 },
+      marker: { size: 6 },
+    }
+  ], {
+    ...PLOTLY_LAYOUT,
+    title: { text: 'Higher Momentum = Higher Win Rate, Fewer Trades', font: { size: 11 } },
+    xaxis: { title: 'Momentum Threshold' },
+    yaxis: { title: 'Win Rate (%)', range: [75, 100] },
+    yaxis2: { title: 'Avg Trades', overlaying: 'y', side: 'right', showgrid: false },
+    legend: { x: 0.02, y: 0.98, font: { size: 9 } },
+    barmode: 'group',
+  });
+}
+
+loadData();
+</script>
+</body>
+</html>

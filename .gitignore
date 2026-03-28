@@ -30,7 +30,11 @@ env/
 Thumbs.db
 
 # Data (generated at runtime)
-data/
+data/*.csv
+data/*.log
+data/backtest/*.parquet
+data/backtest/*.parquet.partial
+data/backtest/*_1m_*.json
 
 # Logs
 logs/
