@@ -10,7 +10,13 @@
       "mcp__Claude_Preview__preview_start",
       "Bash(./venv/bin/python -c \":*)",
       "Bash(kill 4846)",
-      "Bash(gh auth:*)"
+      "Bash(gh auth:*)",
+      "Bash(gh repo:*)",
+      "WebFetch(domain:polymarket-arb-coht.onrender.com)",
+      "Bash(./venv/bin/python backtest_engine.py --months 6 --plot)",
+      "Bash(./venv/bin/pip install:*)",
+      "Bash(curl -s \"https://archive.pmxt.dev/Polymarket/\")",
+      "WebFetch(domain:archive.pmxt.dev)"
     ]
   }
 }

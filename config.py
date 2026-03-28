@@ -94,11 +94,13 @@ class Settings(BaseSettings):
 
     # Momentum-Fenster: Preisänderung über N Sekunden als Signal
     momentum_window_s: float = Field(
-        default=30.0, description="Sekunden für Momentum-Berechnung"
+        default=60.0,
+        description="Sekunden für Momentum-Berechnung (Backtest: 1m optimal für 5m Slots)",
     )
     # Mindest-Momentum für Handelssignal (%)
     min_momentum_pct: float = Field(
-        default=0.15, description="Mindest-Preisbewegung auf Binance für Signal"
+        default=0.10,
+        description="Mindest-Preisbewegung auf Binance für Signal (Backtest: 0.10% = 90.4% WR bei 14K Trades)",
     )
     # Polymarket: minimale erwartete Edge nach Gebühren
     min_edge_pct: float = Field(
