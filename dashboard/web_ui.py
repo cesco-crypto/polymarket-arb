@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import aiohttp
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from loguru import logger
@@ -46,6 +47,9 @@ async def startup() -> None:
     # Dashboard broadcastet Strategy-Status an WebSocket-Clients (1Hz)
     _broadcast_task = asyncio.create_task(_broadcast_loop())
 
+    # Self-Ping Keep-Alive (nur auf Render, verhindert Sleep nach 15 Min)
+    asyncio.create_task(_keep_alive_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
@@ -59,6 +63,25 @@ async def shutdown() -> None:
         except asyncio.CancelledError:
             pass
     logger.info("Dashboard beendet.")
+
+
+async def _keep_alive_loop() -> None:
+    """Pingt sich selbst alle 10 Minuten um Render Free Tier wach zu halten."""
+    import os
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return  # Nur auf Render aktiv, nicht lokal
+
+    await asyncio.sleep(30)
+    logger.info(f"Keep-Alive aktiv: {url}")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                async with session.get(f"{url}/api/status", timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    pass
+            except Exception:
+                pass
+            await asyncio.sleep(600)  # 10 Minuten
 
 
 async def _broadcast_loop() -> None:
