@@ -188,7 +188,8 @@ function switchTab(btn, tab) {
   let ws, rt, lastData;
 
   function connect() {
-    ws = new WebSocket(`ws://${location.host}/ws`);
+    const wsProt = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${wsProt}//${location.host}/ws`);
     ws.onopen = () => { id('ws-dot').className='dot dot-g'; id('ws-txt').textContent='Live'; clearTimeout(rt); };
     ws.onclose = () => { id('ws-dot').className='dot dot-r'; id('ws-txt').textContent='...'; rt=setTimeout(connect,2000); };
     ws.onerror = () => ws.close();
