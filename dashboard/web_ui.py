@@ -117,6 +117,8 @@ def _build_payload() -> dict:
         "trading": status.get("paper_trading", {}),
         "config": status.get("config", {}),
         "signals_detected": status.get("signals_detected", 0),
+        "scan_cycles": status.get("scan_cycles", 0),
+        "heartbeat": status.get("heartbeat", {}),
         "running": status.get("running", False),
         "uptime": f"{hours:02d}:{minutes:02d}:{seconds:02d}",
         "timestamp": datetime.now().isoformat(),

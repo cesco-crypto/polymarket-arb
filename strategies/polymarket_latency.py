@@ -71,7 +71,9 @@ class PolymarketLatencyStrategy:
 
         self._running = False
         self._signals_detected: int = 0
-        self._recent_signals: deque = deque(maxlen=30)  # Letzte N Signal-Evaluations
+        self._recent_signals: deque = deque(maxlen=30)
+        self._scan_cycles: int = 0
+        self._heartbeat: dict = {}  # Live momentum + hurdle data for dashboard
 
     async def run(self) -> None:
         """Startet alle Komponenten und läuft bis zum Shutdown."""
@@ -141,15 +143,19 @@ class PolymarketLatencyStrategy:
 
     async def _check_all_signals(self) -> None:
         """Prüft alle aktiven Polymarket-Fenster auf Signale."""
+        self._scan_cycles += 1
+
         if not self.paper_trader.can_trade():
             return
 
-        # Mark-out Recording: Binance-Preise für offene Positionen aufzeichnen
+        # Mark-out Recording
         for symbol in self.settings.oracle_symbols:
             tick = self.oracle.get_latest(symbol)
             if tick:
                 self.paper_trader.record_markout(tick.mid)
 
+        # Heartbeat: aktuelles Momentum für jedes Asset erfassen
+        hb = {}
         for asset in ["BTC", "ETH"]:
             symbol = f"{asset}/USDT"
 
@@ -162,6 +168,17 @@ class PolymarketLatencyStrategy:
 
             if tick is None or momentum is None:
                 continue
+
+            # Heartbeat: Momentum + Hurdle aufzeichnen (auch wenn zu schwach)
+            hurdle = self.settings.min_momentum_pct
+            hb[asset] = {
+                "price": round(tick.mid, 2),
+                "momentum": round(momentum, 4),
+                "abs_momentum": round(abs(momentum), 4),
+                "hurdle": hurdle,
+                "pct_of_hurdle": round(abs(momentum) / hurdle * 100, 1) if hurdle > 0 else 0,
+                "status": "SIGNAL" if abs(momentum) >= hurdle else "WATCHING",
+            }
 
             # Signal stark genug?
             if abs(momentum) < self.settings.min_momentum_pct:
@@ -176,6 +193,9 @@ class PolymarketLatencyStrategy:
                 self._evaluate_window(
                     asset, direction, momentum, tick.mid, window
                 )
+
+        # Heartbeat aktualisieren
+        self._heartbeat = hb
 
     def _evaluate_window(
         self,
@@ -351,6 +371,8 @@ class PolymarketLatencyStrategy:
             "strategy": "polymarket_latency",
             "running": self._running,
             "signals_detected": self._signals_detected,
+            "scan_cycles": self._scan_cycles,
+            "heartbeat": self._heartbeat,
             "oracle": oracle_status,
             "discovery": discovery_status,
             "recent_signals": list(self._recent_signals),

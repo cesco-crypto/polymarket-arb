@@ -63,6 +63,7 @@
   <div class="hdr-r">
     <span>Uptime: <strong id="uptime">00:00:00</strong></span>
     <span>Signals: <strong id="sig-count">0</strong></span>
+    <span>Scanned: <strong id="scan-count" style="color:var(--text-dim)">0</strong></span>
     <span id="clock"></span>
     <a href="/quant-lab" style="color:var(--accent);text-decoration:none;font-size:11px;padding:3px 10px;border:1px solid var(--accent);border-radius:4px;">QUANT LAB</a>
     <span><span id="ws-dot" class="dot dot-r" style="display:inline-block;width:6px;height:6px;margin-right:3px;vertical-align:middle"></span><span id="ws-txt">...</span></span>
@@ -82,6 +83,10 @@
     <div class="stat-row"><span class="d">Polymarket CLOB</span><span id="pm-status" class="d">...</span></div>
     <div class="stat-row"><span class="d">Active Markets</span><span id="pm-markets">0</span></div>
     <div class="stat-row"><span class="d">Book Freshness</span><span id="pm-fresh" class="d">—</span></div>
+  </div>
+  <div style="margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
+    <div class="pt" style="margin-bottom:6px">Live Pulse — Momentum vs Fee Hurdle</div>
+    <div id="pulse-container"></div>
   </div>
 </div>
 
@@ -209,8 +214,12 @@ function switchTab(btn, tab) {
     id('uptime').textContent = d.uptime || '—';
     id('sig-count').textContent = d.signals_detected || 0;
 
-    // P1: Oracle
+    // Scan counter
+    id('scan-count').textContent = (d.scan_cycles||0).toLocaleString();
+
+    // P1: Oracle + Pulse
     renderOracle(d.oracle || {}, d.discovery || {});
+    renderPulse(d.heartbeat || {});
 
     // P2: Markets
     renderMarkets(d.discovery || {});
@@ -426,6 +435,37 @@ function switchTab(btn, tab) {
         </tr>`;
       }).join('');
     }
+  }
+
+  function renderPulse(hb) {
+    const el = id('pulse-container');
+    const assets = Object.keys(hb);
+    if (!assets.length) { el.innerHTML = '<div class="d" style="font-size:10px">Waiting for data...</div>'; return; }
+    el.innerHTML = assets.map(asset => {
+      const h = hb[asset];
+      const pct = Math.min(100, h.pct_of_hurdle || 0);
+      const barColor = pct >= 100 ? 'var(--green)' : pct >= 70 ? 'var(--yellow)' : 'var(--text-dim)';
+      const momColor = h.status === 'SIGNAL' ? 'g b' : pct >= 70 ? 'y' : 'd';
+      const tag = asset === 'BTC' ? 'tag-btc' : 'tag-eth';
+      return `<div style="margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+          <span class="tag ${tag}" style="font-size:9px">${asset}</span>
+          <span class="${momColor}" style="font-size:11px;font-variant-numeric:tabular-nums">${h.momentum>=0?'+':''}${h.momentum.toFixed(3)}%</span>
+          <span class="d" style="font-size:9px">${h.status==='SIGNAL'?'<span class="g b">SIGNAL!</span>':'need '+h.hurdle+'%'}</span>
+        </div>
+        <div style="position:relative">
+          <div class="bar-bg" style="height:8px">
+            <div class="bar-fill" style="width:${pct}%;background:${barColor};transition:width .4s"></div>
+          </div>
+          <div style="position:absolute;top:0;left:${Math.min(99,100)}%;width:2px;height:8px;background:var(--red);opacity:0.7" title="Fee Hurdle ${h.hurdle}%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-top:1px">
+          <span class="d" style="font-size:8px">0%</span>
+          <span class="d" style="font-size:8px">${pct.toFixed(0)}% of hurdle</span>
+          <span class="d" style="font-size:8px">${h.hurdle}%</span>
+        </div>
+      </div>`;
+    }).join('');
   }
 
   setInterval(() => { id('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
