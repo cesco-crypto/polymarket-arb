@@ -7,10 +7,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import asyncio
+
 from loguru import logger
 
 from config import Settings
 from core.pretrade_calculator import PreTradeResult, TradeDecision
+from utils import telegram
 
 
 @dataclass
@@ -38,6 +41,9 @@ class PaperPosition:
     momentum_at_entry: float
     seconds_to_expiry_at_entry: float
     oracle_price_at_entry: float = 0.0   # Binance-Preis bei Einstieg (für Resolution)
+
+    # Mark-out: Binance-Preis N Sekunden nach Einstieg (für Signal-Qualitäts-Analyse)
+    markout_prices: dict = field(default_factory=dict)  # {seconds: price}
 
     # Auflösung (wird gesetzt wenn Markt abläuft)
     resolved: bool = False
@@ -144,6 +150,14 @@ class PaperTrader:
             f"Ablauf in {seconds_to_expiry:.0f}s"
         )
         self._log_to_csv(position, event="open")
+
+        # Telegram Backup (Persistence für Render ephemeral FS)
+        asyncio.create_task(telegram.alert_trade_log(
+            "open", trade_id, result.asset, result.direction,
+            result.p_market, result.position_usd, fee_usd,
+            momentum_pct, result.p_true, oracle_entry=oracle_price,
+        ))
+
         return position
 
     # --- Trade Resolution ---
@@ -203,7 +217,27 @@ class PaperTrader:
 
         self._log_to_csv(position, event="close")
         self._closed_positions.append(position)
+
+        # Telegram Backup
+        asyncio.create_task(telegram.alert_trade_log(
+            "close", trade_id, position.asset, position.direction,
+            position.entry_price, position.size_usd, position.fee_usd,
+            position.momentum_at_entry, position.p_true_at_entry,
+            pnl=pnl_usd, correct=outcome_correct, capital=self.capital_usd,
+            oracle_entry=position.oracle_price_at_entry, oracle_now=oracle_price_now,
+        ))
+
         del self._positions[trade_id]
+
+    def record_markout(self, oracle_price: float) -> None:
+        """Zeichnet Mark-out Preise für offene Positionen auf (1s, 5s, 10s, 30s, 60s)."""
+        now = time.time()
+        for pos in self._positions.values():
+            age_s = now - pos.entered_at
+            # Mark-out Zeitpunkte (mit 1s Toleranz)
+            for target_s in [1, 5, 10, 30, 60]:
+                if target_s not in pos.markout_prices and abs(age_s - target_s) < 1.5:
+                    pos.markout_prices[target_s] = oracle_price
 
     def check_and_resolve_expired(
         self, oracle_price_now: float
@@ -291,6 +325,11 @@ class PaperTrader:
                 "pnl_usd": round(p.pnl_usd, 4),
                 "outcome_correct": p.outcome_correct,
                 "resolved_at": time.strftime("%H:%M:%S", time.localtime(p.resolved_at)) if p.resolved_at else "",
+                "markout": {
+                    str(k): round((v - p.oracle_price_at_entry) / p.oracle_price_at_entry * 100, 4)
+                    if p.oracle_price_at_entry > 0 else 0
+                    for k, v in p.markout_prices.items()
+                },
             }
             for p in reversed(self._closed_positions[-limit:])
         ]

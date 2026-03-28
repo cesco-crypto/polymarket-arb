@@ -153,3 +153,31 @@ async def alert_kill_switch(pct: float, capital: float) -> None:
         f"Kapital: ${capital:.2f}\n"
         f"Keine weiteren Trades!"
     )
+
+
+async def alert_trade_log(
+    event: str, trade_id: str, asset: str, direction: str,
+    entry: float, size: float, fee: float, momentum: float,
+    p_true: float, pnl: float = 0, correct: bool = False,
+    capital: float = 0, oracle_entry: float = 0, oracle_now: float = 0,
+) -> None:
+    """Persistenter Trade-Log via Telegram (Backup für ephemeral FS)."""
+    if event == "open":
+        await send_alert(
+            f"📋 <b>TRADE LOG: OPEN</b>\n"
+            f"<code>{trade_id}|{asset}|{direction}|"
+            f"entry={entry:.4f}|size=${size:.2f}|fee=${fee:.4f}|"
+            f"mom={momentum:.4f}%|p={p_true:.4f}|"
+            f"oracle={oracle_entry:.2f}</code>",
+            silent=True,
+        )
+    elif event == "close":
+        icon = "W" if correct else "L"
+        await send_alert(
+            f"📋 <b>TRADE LOG: {icon}</b>\n"
+            f"<code>{trade_id}|{asset}|{direction}|"
+            f"pnl=${pnl:+.4f}|entry={entry:.4f}|"
+            f"oracle_entry={oracle_entry:.2f}|oracle_now={oracle_now:.2f}|"
+            f"cap=${capital:.2f}</code>",
+            silent=True,
+        )

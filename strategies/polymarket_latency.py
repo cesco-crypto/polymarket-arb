@@ -144,6 +144,12 @@ class PolymarketLatencyStrategy:
         if not self.paper_trader.can_trade():
             return
 
+        # Mark-out Recording: Binance-Preise für offene Positionen aufzeichnen
+        for symbol in self.settings.oracle_symbols:
+            tick = self.oracle.get_latest(symbol)
+            if tick:
+                self.paper_trader.record_markout(tick.mid)
+
         for asset in ["BTC", "ETH"]:
             symbol = f"{asset}/USDT"
 
