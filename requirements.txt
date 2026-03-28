@@ -9,4 +9,4 @@ pydantic-settings>=2.0
 loguru>=0.7
 fastapi>=0.115
 uvicorn>=0.34
-aiohttp>=3.9
+py-clob-client>=0.34

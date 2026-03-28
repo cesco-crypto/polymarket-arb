@@ -23,6 +23,7 @@ from loguru import logger
 
 from config import Settings
 from core.binance_ws import BinanceWebSocketOracle
+from core.executor import PolymarketExecutor
 from core.market_discovery import MarketDiscovery, MarketWindow
 from core.paper_trader import PaperTrader
 from core.pretrade_calculator import PreTradeCalculator, TradeDecision
@@ -68,6 +69,7 @@ class PolymarketLatencyStrategy:
         self.calculator = PreTradeCalculator(settings)
         self.paper_trader = PaperTrader(settings)
         self.risk_manager = RiskManager(settings)
+        self.executor = PolymarketExecutor(settings)
 
         self._running = False
         self._signals_detected: int = 0
@@ -94,6 +96,16 @@ class PolymarketLatencyStrategy:
 
         # Market Discovery starten (Slug-basiert, ersetzt Gamma-API-Suche)
         await self.discovery.start()
+
+        # Executor initialisieren (Live-Trading nur wenn alle Flags gesetzt)
+        if self.settings.live_trading:
+            live_ok = await self.executor.initialize()
+            if live_ok:
+                logger.info("LIVE TRADING MODUS — Echte Orders auf Polymarket!")
+            else:
+                logger.warning("Live Trading angefordert aber Init fehlgeschlagen → Paper Mode")
+        else:
+            logger.info("Paper Trading Modus (live_trading=False)")
 
         # Warte kurz bis erste Ticks ankommen
         logger.info("Warte auf erste Binance-Ticks + Polymarket-Orderbücher...")
@@ -287,6 +299,19 @@ class PolymarketLatencyStrategy:
                 seconds_to_expiry=seconds_to_expiry,
                 oracle_price=binance_price,
             )
+
+            # LIVE ORDER platzieren (wenn Executor aktiv)
+            if self.executor.is_live:
+                token_id = window.up_token_id if direction == "UP" else window.down_token_id
+                live_size = min(result.position_usd, self.settings.max_live_position_usd)
+                asyncio.create_task(self.executor.place_order(
+                    token_id=token_id,
+                    side="BUY",
+                    price=ask_price,
+                    size_usd=live_size,
+                    asset=asset,
+                    direction=direction,
+                ))
 
             # Telegram Alert
             asyncio.create_task(telegram.alert_signal(

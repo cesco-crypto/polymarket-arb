@@ -135,6 +135,12 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="", description="Telegram Bot Token von @BotFather")
     telegram_chat_id: str = Field(default="", description="Telegram Chat-ID für Alerts")
 
+    # --- Polymarket Live Trading ---
+    polymarket_private_key: str = Field(default="", description="Polygon Wallet Private Key (NIE committen!)")
+    polymarket_funder: str = Field(default="", description="Funder Address (deine Wallet-Adresse)")
+    live_trading: bool = Field(default=False, description="True = echte Orders, False = Paper Only")
+    max_live_position_usd: float = Field(default=5.0, description="Max $5 pro Trade für $100 Account")
+
     model_config = {"env_prefix": "", "env_file": ".env", "extra": "ignore"}
 
 
