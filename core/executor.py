@@ -53,7 +53,8 @@ class PolymarketExecutor:
         self._ready = False
         self._orders_placed = 0
         self._total_volume_usd = 0.0
-        self._pre_signed_orders: dict = {}  # {token_id: signed_order} Pre-Signing Cache
+        self._pre_signed_orders: dict = {}
+        self._last_exec_latency_ms: float = 0.0  # Letzte Signal-to-Post Latenz
 
     async def initialize(self) -> bool:
         """Initialisiert CLOB Client mit L1 Auth und leitet L2 Credentials ab."""
@@ -180,6 +181,7 @@ class PolymarketExecutor:
                 order = self._client.post_order(signed_order)
 
             latency_ms = (time.perf_counter() - t0) * 1000
+            self._last_exec_latency_ms = latency_ms
 
             order_id = order.get("orderID", order.get("id", "unknown"))
             self._orders_placed += 1
@@ -248,4 +250,5 @@ class PolymarketExecutor:
             "total_volume_usd": round(self._total_volume_usd, 2),
             "wallet": self._client.get_address() if self._client else "",
             "order_type": self.settings.order_type,
+            "exec_latency_ms": round(self._last_exec_latency_ms, 1),
         }

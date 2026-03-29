@@ -212,6 +212,11 @@ class PolymarketLatencyStrategy:
                 "status": "SIGNAL" if abs(momentum) >= hurdle else "WATCHING",
             }
 
+            # Data Freshness Guard: Skip stale ticks (>300ms Transit = ghost momentum)
+            transit = self.oracle.status().get(symbol, {}).get("transit_p50_ms", 0)
+            if transit > 300:
+                continue  # Signal zu alt — würde Adverse Selection verursachen
+
             # Signal stark genug?
             if abs(momentum) < self.settings.min_momentum_pct:
                 continue

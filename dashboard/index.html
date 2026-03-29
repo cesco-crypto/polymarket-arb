@@ -77,7 +77,7 @@
 <div class="p p1">
   <div class="pt">Oracle vs. Execution Latency</div>
   <table>
-    <tr><th>Feed</th><th>Status</th><th>Price</th><th class="r">P50</th><th class="r">P99</th><th class="r">Ticks</th></tr>
+    <tr><th>Feed</th><th>Status</th><th>Price</th><th class="r">Tick P50</th><th class="r">Transit</th><th class="r">Ticks</th></tr>
   </table>
   <table id="oracle-table"><tr><td colspan="6" class="empty">Connecting...</td></tr></table>
   <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:6px">
@@ -263,14 +263,16 @@ function switchTab(btn, tab) {
     tb.innerHTML = syms.map(s => {
       const o = oracle[s];
       const dotC = o.connected ? 'dot-g' : 'dot-r';
-      const p50c = latC(o.p50_ms); const p99c = latC(o.p99_ms);
+      const p50c = latC(o.p50_ms);
+      const tr = o.transit_p50_ms || 0;
+      const trC = tr < 100 ? 'g' : tr < 300 ? 'y' : 'rd';
       const name = s.replace('/USDT','');
       return `<tr>
         <td><span class="dot ${dotC}" style="display:inline-block;width:5px;height:5px;vertical-align:middle;margin-right:4px"></span>${name}</td>
         <td>${o.connected ? '<span class="g">OK</span>' : '<span class="rd">DOWN</span>'}</td>
         <td class="r b">${o.last_price ? fp(o.last_price) : '—'}</td>
         <td class="r ${p50c}">${o.p50_ms||0}ms</td>
-        <td class="r ${p99c}">${o.p99_ms||0}ms</td>
+        <td class="r ${trC}">${tr.toFixed(0)}ms</td>
         <td class="r d">${(o.tick_count||0).toLocaleString()}</td>
       </tr>`;
     }).join('');

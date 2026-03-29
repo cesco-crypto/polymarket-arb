@@ -105,7 +105,8 @@ class BinanceWebSocketOracle:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._reconnect_delay = 1.0
-        self._on_tick_callback = None  # Event-driven: Callback bei jedem Tick
+        self._on_tick_callback = None
+        self._transit: dict[str, deque] = {}  # Transit Latency pro Symbol
 
         for sym in symbols:
             self._windows[sym] = PriceWindow(symbol=sym)
@@ -171,27 +172,39 @@ class BinanceWebSocketOracle:
 
     def _handle_message(self, symbol: str, msg: dict) -> None:
         """Verarbeitet einen bookTicker-Message."""
-        # Binance bookTicker: {"u":..., "s":"BTCUSDT", "b":"bid", "B":"bidQty", "a":"ask", "A":"askQty"}
         try:
             bid = float(msg["b"])
             ask = float(msg["a"])
             mid = (bid + ask) / 2
+            now = time.time()
+
+            # Transit Latency: Binance Event-Time vs Local Time
+            transit_ms = 0.0
+            server_ts = msg.get("E") or msg.get("T")  # Event timestamp (ms)
+            if server_ts:
+                transit_ms = now * 1000 - float(server_ts)
 
             tick = PriceTick(
                 symbol=symbol,
                 bid=bid,
                 ask=ask,
                 mid=mid,
-                timestamp=time.time(),
+                timestamp=now,
             )
             self._windows[symbol].add(tick)
+
+            # Transit Latency tracken (nur sinnvolle Werte)
+            if 0 < transit_ms < 5000:
+                if symbol not in self._transit:
+                    self._transit[symbol] = deque(maxlen=200)
+                self._transit[symbol].append(transit_ms)
 
             # Event-driven: Callback sofort bei jedem Tick
             if self._on_tick_callback:
                 try:
                     self._on_tick_callback(symbol, tick)
                 except Exception:
-                    pass  # Callback-Fehler dürfen WS nicht crashen
+                    pass
         except (KeyError, ValueError):
             pass
 
@@ -223,6 +236,16 @@ class BinanceWebSocketOracle:
         for sym, w in self._windows.items():
             tick = w.latest()
             p50, p99 = w.latency_percentiles()
+
+            # Transit Latency (Binance Server → uns)
+            transit_p50, transit_p99 = 0.0, 0.0
+            transit_samples = self._transit.get(sym)
+            if transit_samples and len(transit_samples) >= 5:
+                s = sorted(transit_samples)
+                n = len(s)
+                transit_p50 = round(s[n // 2], 1)
+                transit_p99 = round(s[int(n * 0.99)], 1)
+
             result[sym] = {
                 "connected": self.is_fresh(sym),
                 "last_price": tick.mid if tick else None,
@@ -230,5 +253,7 @@ class BinanceWebSocketOracle:
                 "tick_count": w.tick_count(),
                 "p50_ms": p50,
                 "p99_ms": p99,
+                "transit_p50_ms": transit_p50,
+                "transit_p99_ms": transit_p99,
             }
         return result
