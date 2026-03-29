@@ -193,8 +193,11 @@
     <table id="open-body"><tr><td colspan="7" class="empty">No open positions</td></tr></table>
   </div>
   <div id="tab-closed" class="tab-panel">
+    <div id="markout-summary" style="margin-bottom:4px">
+      <div class="d" style="font-size:9px">Mark-out Analysis: waiting for trades...</div>
+    </div>
     <table>
-      <tr><th>ID</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th>Time</th></tr>
+      <tr><th>ID</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th></tr>
     </table>
     <table id="closed-body"><tr><td colspan="9" class="empty">No resolved trades yet</td></tr></table>
   </div>
@@ -464,10 +467,39 @@ function switchTab(btn, tab) {
     const cb = id('closed-body');
     if (!closed.length) { cb.innerHTML = '<tr><td colspan="9" class="empty">No resolved trades yet</td></tr>'; }
     else {
+      // Mark-out Summary (Aggregate über alle Trades)
+      const moData = closed.filter(p => p.markout && Object.keys(p.markout).length > 0);
+      if (moData.length > 0) {
+        const moAvg = {};
+        for (const sec of ['1','5','10','30','60']) {
+          const vals = moData.filter(p => p.markout[sec] !== undefined).map(p => p.markout[sec]);
+          if (vals.length > 0) moAvg[sec] = vals.reduce((a,b) => a+b, 0) / vals.length;
+        }
+        const moEl = document.getElementById('markout-summary');
+        if (moEl) {
+          let html = '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">';
+          for (const [sec, avg] of Object.entries(moAvg)) {
+            const c = avg > 0 ? 'g' : avg < -0.01 ? 'rd' : 'y';
+            const label = avg > 0 ? 'ALPHA' : 'TOXIC';
+            html += `<div style="background:var(--bg3);padding:6px 10px;border-radius:4px;text-align:center;min-width:60px">
+              <div class="${c} b" style="font-size:13px">${avg>=0?'+':''}${avg.toFixed(3)}%</div>
+              <div class="d" style="font-size:8px">T+${sec}s</div>
+              <div class="${c}" style="font-size:7px">${label}</div>
+            </div>`;
+          }
+          html += '</div>';
+          moEl.innerHTML = html;
+        }
+      }
+
       cb.innerHTML = closed.map(p => {
         const icon = p.outcome_correct ? '<span class="g">W</span>' : '<span class="rd">L</span>';
         const pnlC = p.pnl_usd >= 0 ? 'g' : 'rd';
         const dirTag = p.direction==='UP' ? 'tag-up' : 'tag-dn';
+        // Mark-out mini display
+        const mo = p.markout || {};
+        const mo5 = mo['5'] !== undefined ? (mo['5']>=0?'+':'') + mo['5'].toFixed(3)+'%' : '—';
+        const mo5c = mo['5'] > 0 ? 'g' : mo['5'] < 0 ? 'rd' : 'd';
         return `<tr>
           <td class="d">${p.trade_id}</td>
           <td><span class="tag ${p.asset==='BTC'?'tag-btc':'tag-eth'}">${p.asset}</span></td>
@@ -477,7 +509,7 @@ function switchTab(btn, tab) {
           <td class="r ${pnlC} b">$${p.pnl_usd>=0?'+':''}${p.pnl_usd.toFixed(2)}</td>
           <td class="r d">$${p.fee_usd.toFixed(2)}</td>
           <td>${icon}</td>
-          <td class="d">${p.resolved_at||''}</td>
+          <td class="r ${mo5c}" style="font-size:10px">${mo5}</td>
         </tr>`;
       }).join('');
     }
