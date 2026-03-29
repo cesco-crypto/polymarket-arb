@@ -280,9 +280,21 @@ class PolymarketLatencyStrategy:
             return
 
         # Preis-Filter: Nur handeln wenn Markt noch offen ist (nicht schon entschieden)
-        # Bei Ask=0.01 weiss der Markt zu 99% wie es ausgeht — kein Edge möglich
         if ask_price < 0.20 or ask_price > 0.80:
             return
+
+        # Spread-Cost-Check: Wenn Spread zwischen Bid und Ask > 2 Cent,
+        # fressen die Spread-Kosten unseren Edge
+        if direction == "UP":
+            bid = window.up_best_bid
+            ask = ask_price
+        else:
+            bid = window.down_best_bid
+            ask = ask_price
+        if bid > 0 and ask > 0:
+            spread_pct = (ask - bid) / ((ask + bid) / 2) * 100
+            if spread_pct > 3.0:  # Spread > 3% = unprofitabel
+                return
 
         # Partizipations-Check: Order darf max 1% der Marktliquidität sein
         # $5 Order bei $15K Liq = 0.03% → OK
