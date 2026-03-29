@@ -247,6 +247,11 @@ class PolymarketLatencyStrategy:
         if ask_price <= 0 or ask_price >= 1:
             return
 
+        # Preis-Filter: Nur handeln wenn Markt noch offen ist (nicht schon entschieden)
+        # Bei Ask=0.01 weiss der Markt zu 99% wie es ausgeht — kein Edge möglich
+        if ask_price < 0.20 or ask_price > 0.80:
+            return
+
         # Depth-Check: genug Liquidität für unsere Ordergröße?
         min_depth = self.settings.max_order_size_usd if hasattr(self.settings, 'max_order_size_usd') else 50
         if ask_depth_usd > 0 and ask_depth_usd < min_depth:
@@ -259,7 +264,10 @@ class PolymarketLatencyStrategy:
             momentum_pct=momentum_pct,
             polymarket_ask=ask_price,
             seconds_to_expiry=seconds_to_expiry,
-            available_capital_usd=self.paper_trader.capital_usd,
+            available_capital_usd=min(
+                self.paper_trader.capital_usd,
+                self.settings.max_live_position_usd / self.settings.max_position_pct
+            ) if self.executor.is_live else self.paper_trader.capital_usd,
         )
 
         # Signal in History aufnehmen (EXECUTE + ABORT)
@@ -335,19 +343,22 @@ class PolymarketLatencyStrategy:
                 logger.error(f"Resolver Fehler: {e}")
 
     def _resolve_expired_positions(self) -> None:
-        """Löst Positionen auf Basis des Binance-Preises auf.
+        """Löst Positionen auf — NUR mit dem richtigen Asset-Oracle.
 
-        Hinweis: Echte Resolution nutzt Chainlink, nicht Binance.
-        Für Paper Trading ist Binance ein akzeptabler Proxy
-        (Preisdifferenz Binance↔Chainlink < 0.01% in der Regel).
+        KRITISCH: BTC-Preis darf nur BTC-Positionen resolven,
+        ETH-Preis nur ETH-Positionen. Sonst falsche Resolution!
         """
         for symbol in self.settings.oracle_symbols:
             current_tick = self.oracle.get_latest(symbol)
             if current_tick is None:
                 continue
 
+            # Asset-Filter: BTC/USDT → "BTC"
+            asset = symbol.replace("/USDT", "")
+
             resolved = self.paper_trader.check_and_resolve_expired(
                 oracle_price_now=current_tick.mid,
+                asset_filter=asset,
             )
 
             if resolved:

@@ -240,15 +240,20 @@ class PaperTrader:
                     pos.markout_prices[target_s] = oracle_price
 
     def check_and_resolve_expired(
-        self, oracle_price_now: float
+        self, oracle_price_now: float, asset_filter: str = ""
     ) -> list[PaperPosition]:
-        """Prüft und löst alle abgelaufenen Positionen auf."""
+        """Prüft und löst abgelaufene Positionen auf.
+
+        KRITISCH: asset_filter verhindert dass BTC-Preis ETH-Positionen resolvet!
+        """
         resolved = []
         for trade_id in list(self._positions.keys()):
             pos = self._positions[trade_id]
+            if asset_filter and pos.asset != asset_filter:
+                continue
             if pos.is_expired:
                 self.resolve_position(trade_id, oracle_price_now)
-                if trade_id not in self._positions:  # wurde aufgelöst
+                if trade_id not in self._positions:
                     resolved.append(pos)
         return resolved
 

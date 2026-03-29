@@ -122,6 +122,7 @@ class PolymarketExecutor:
             size_usd = max_pos
 
         try:
+            from py_clob_client.clob_types import OrderArgs
             from py_clob_client.order_builder.constants import BUY
 
             # Shares berechnen
@@ -129,15 +130,15 @@ class PolymarketExecutor:
 
             t0 = time.perf_counter()
 
-            # Limit Order erstellen und platzieren
-            order = self._client.create_and_post_order(
-                order_args={
-                    "token_id": token_id,
-                    "price": price,
-                    "size": round(size_shares, 2),
-                    "side": BUY,
-                },
+            # Order signieren und posten (OrderArgs Objekt, nicht dict!)
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=price,
+                size=round(size_shares, 2),
+                side=BUY,
             )
+            signed_order = self._client.create_order(order_args)
+            order = self._client.post_order(signed_order)
 
             latency_ms = (time.perf_counter() - t0) * 1000
 
