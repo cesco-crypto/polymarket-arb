@@ -368,7 +368,7 @@ function switchTab(btn, tab) {
       _wallet = await r.json();
     } catch(e) {}
   }
-  setInterval(fetchWallet, 10000);
+  setInterval(fetchWallet, 30000);
   fetchWallet();
 
   // --- P4: Risk ---
