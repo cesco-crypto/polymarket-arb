@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     polymarket_funder: str = Field(default="", description="Funder Address (deine Wallet-Adresse)")
     live_trading: bool = Field(default=False, description="True = echte Orders, False = Paper Only")
     max_live_position_usd: float = Field(default=5.0, description="Max $5 pro Trade für $100 Account")
-    order_type: str = Field(default="maker", description="maker = Limit Order (Rebate, default) | taker = Market Order (3.15% Fee)")
+    order_type: str = Field(default="taker", description="taker = Market Order (3.15% Fee, Validierungsphase) | maker = Limit Order (Rebate)")
 
     model_config = {"env_prefix": "", "env_file": ".env", "extra": "ignore"}
 
