@@ -64,7 +64,7 @@ class PolymarketLatencyStrategy:
         self.discovery = MarketDiscovery(
             assets=[s.replace("/USDT", "").lower() for s in settings.oracle_symbols],
             timeframes=["5m", "15m"],
-            min_liquidity_usd=5000.0,
+            min_liquidity_usd=15000.0,  # Min $15K Liquidität (verhindert Slippage)
         )
         self.calculator = PreTradeCalculator(settings)
         self.paper_trader = PaperTrader(settings)
