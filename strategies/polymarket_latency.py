@@ -279,10 +279,16 @@ class PolymarketLatencyStrategy:
         if ask_price < 0.20 or ask_price > 0.80:
             return
 
-        # Depth-Check: genug Liquidität für unsere Ordergröße?
-        min_depth = self.settings.max_order_size_usd if hasattr(self.settings, 'max_order_size_usd') else 50
-        if ask_depth_usd > 0 and ask_depth_usd < min_depth:
-            return
+        # Partizipations-Check: Order darf max 1% der Marktliquidität sein
+        # $5 Order bei $15K Liq = 0.03% → OK
+        # $80 Order bei $3.9K Liq = 2% → BLOCK (Slippage-Gefahr)
+        max_participation_pct = 1.0
+        market_liq = window.liquidity_usd
+        if market_liq > 0:
+            max_order_by_liq = market_liq * (max_participation_pct / 100)
+            order_size = self.settings.max_live_position_usd if self.executor.is_live else self.settings.max_order_size_usd
+            if order_size > max_order_by_liq:
+                return  # Order wäre > 1% der Marktliquidität
 
         # PreTrade-Analyse
         result = self.calculator.evaluate(
