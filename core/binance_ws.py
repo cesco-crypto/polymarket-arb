@@ -105,9 +105,14 @@ class BinanceWebSocketOracle:
         self._running = False
         self._tasks: list[asyncio.Task] = []
         self._reconnect_delay = 1.0
+        self._on_tick_callback = None  # Event-driven: Callback bei jedem Tick
 
         for sym in symbols:
             self._windows[sym] = PriceWindow(symbol=sym)
+
+    def set_on_tick(self, callback) -> None:
+        """Registriert Callback der bei JEDEM Tick sofort feuert (event-driven)."""
+        self._on_tick_callback = callback
 
     async def start(self) -> None:
         """Startet WebSocket-Verbindungen für alle Symbole."""
@@ -180,8 +185,15 @@ class BinanceWebSocketOracle:
                 timestamp=time.time(),
             )
             self._windows[symbol].add(tick)
+
+            # Event-driven: Callback sofort bei jedem Tick
+            if self._on_tick_callback:
+                try:
+                    self._on_tick_callback(symbol, tick)
+                except Exception:
+                    pass  # Callback-Fehler dürfen WS nicht crashen
         except (KeyError, ValueError):
-            pass  # Nicht alle Messages sind bookTicker
+            pass
 
     # --- Public Interface ---
 

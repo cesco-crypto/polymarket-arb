@@ -204,6 +204,16 @@ async def api_wallet() -> dict:
     }
 
 
+@app.post("/api/toggle-order-type")
+async def toggle_order_type() -> dict:
+    """Toggle zwischen Maker und Taker Order-Typ."""
+    current = settings.order_type
+    new_type = "maker" if current == "taker" else "taker"
+    settings.order_type = new_type
+    logger.info(f"Order-Typ umgestellt: {current} → {new_type}")
+    return {"order_type": new_type, "previous": current}
+
+
 @app.get("/wallet", response_class=HTMLResponse)
 async def wallet_page() -> HTMLResponse:
     """Wallet Management Page."""

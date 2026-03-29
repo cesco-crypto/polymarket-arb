@@ -130,10 +130,13 @@ class PolymarketExecutor:
 
             t0 = time.perf_counter()
 
-            # Order signieren und posten (OrderArgs Objekt, nicht dict!)
+            # Maker vs Taker: Maker setzt Limit 1 Cent unter Ask (kassiert Rebate)
+            is_maker = self.settings.order_type == "maker"
+            order_price = max(0.01, price - 0.01) if is_maker else price
+
             order_args = OrderArgs(
                 token_id=token_id,
-                price=price,
+                price=order_price,
                 size=round(size_shares, 2),
                 side=BUY,
             )
@@ -208,4 +211,5 @@ class PolymarketExecutor:
             "orders_placed": self._orders_placed,
             "total_volume_usd": round(self._total_volume_usd, 2),
             "wallet": self._client.get_address() if self._client else "",
+            "order_type": self.settings.order_type,
         }

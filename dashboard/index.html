@@ -144,6 +144,10 @@
   </div>
   <div class="stat">
     <div class="stat-row"><span class="d">Mode</span><span id="mode-badge" class="b">PAPER</span></div>
+    <div class="stat-row">
+      <span class="d">Order Type</span>
+      <span id="order-type-btn" style="cursor:pointer;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;border:1px solid var(--border)" onclick="toggleOrderType()">TAKER</span>
+    </div>
     <div class="stat-row"><span class="d">Donation (10%)</span><span class="g" id="donation">$0.00</span></div>
   </div>
 </div>
@@ -418,6 +422,14 @@ function switchTab(btn, tab) {
     id('mode-badge').className = _wallet.live ? 'b rd' : 'b y';
     id('donation').textContent = '$' + (d.donation_usd || 0).toFixed(2);
 
+    // Order Type Toggle
+    const ot = d.executor?.order_type || 'taker';
+    const otBtn = id('order-type-btn');
+    otBtn.textContent = ot.toUpperCase();
+    otBtn.style.background = ot === 'maker' ? 'var(--green)' : 'var(--bg3)';
+    otBtn.style.color = ot === 'maker' ? '#000' : 'var(--text)';
+    otBtn.style.borderColor = ot === 'maker' ? 'var(--green)' : 'var(--border)';
+
     id('kill-switch').innerHTML = ks
       ? '<span class="dot dot-r" style="display:inline-block;width:6px;height:6px;vertical-align:middle;margin-right:4px"></span><span class="rd b">ACTIVE</span>'
       : '<span class="dot dot-g" style="display:inline-block;width:6px;height:6px;vertical-align:middle;margin-right:4px;animation:none"></span>OFF';
@@ -470,6 +482,19 @@ function switchTab(btn, tab) {
       }).join('');
     }
   }
+
+  // Order Type Toggle
+  async function toggleOrderType() {
+    try {
+      const r = await fetch('/api/toggle-order-type', { method: 'POST' });
+      const d = await r.json();
+      const btn = id('order-type-btn');
+      btn.textContent = d.order_type.toUpperCase();
+      btn.style.background = d.order_type === 'maker' ? 'var(--green)' : 'var(--bg3)';
+      btn.style.color = d.order_type === 'maker' ? '#000' : 'var(--text)';
+    } catch(e) {}
+  }
+  window.toggleOrderType = toggleOrderType;
 
   // PnL History + Sparkline
   let pnlHistory = [];

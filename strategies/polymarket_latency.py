@@ -75,7 +75,9 @@ class PolymarketLatencyStrategy:
         self._signals_detected: int = 0
         self._recent_signals: deque = deque(maxlen=30)
         self._scan_cycles: int = 0
-        self._heartbeat: dict = {}  # Live momentum + hurdle data for dashboard
+        self._heartbeat: dict = {}
+        self._tick_event = asyncio.Event()  # Event-driven: gesetzt bei jedem Binance Tick
+        self._last_tick_symbol: str = ""
 
     async def run(self) -> None:
         """Startet alle Komponenten und läuft bis zum Shutdown."""
@@ -95,7 +97,11 @@ class PolymarketLatencyStrategy:
             wallet=self.settings.polymarket_funder,
         )
 
-        # Binance WebSocket starten
+        # Binance WebSocket starten + Event-driven Callback registrieren
+        def on_tick(symbol, tick):
+            self._last_tick_symbol = symbol
+            self._tick_event.set()
+        self.oracle.set_on_tick(on_tick)
         await self.oracle.start()
 
         # Market Discovery starten (Slug-basiert, ersetzt Gamma-API-Suche)
@@ -146,16 +152,26 @@ class PolymarketLatencyStrategy:
     # --- Signal Loop ---
 
     async def _signal_loop(self) -> None:
-        """Hauptloop: Prüft alle 500ms auf Arbitrage-Signale."""
-        logger.info("Signal-Loop gestartet")
+        """Event-driven: Reagiert sofort auf jeden Binance-Tick statt 500ms Sleep.
+
+        Alte Architektur: await asyncio.sleep(0.5) → 250ms durchschnittliche Verzögerung
+        Neue Architektur: await self._tick_event → <5ms Reaktionszeit
+        """
+        logger.info("Signal-Loop gestartet (EVENT-DRIVEN)")
 
         while self._running:
             try:
+                # Warte auf nächsten Binance Tick (max 2s Timeout als Safety)
+                try:
+                    await asyncio.wait_for(self._tick_event.wait(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    pass  # Kein Tick in 2s → prüfe trotzdem (Heartbeat)
+                self._tick_event.clear()
+
                 await self._check_all_signals()
             except Exception as e:
                 logger.error(f"Signal-Loop Fehler: {e}")
-
-            await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)  # Nur bei Fehler warten
 
     async def _check_all_signals(self) -> None:
         """Prüft alle aktiven Polymarket-Fenster auf Signale."""
