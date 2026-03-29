@@ -53,6 +53,7 @@ class PolymarketExecutor:
         self._ready = False
         self._orders_placed = 0
         self._total_volume_usd = 0.0
+        self._pre_signed_orders: dict = {}  # {token_id: signed_order} Pre-Signing Cache
 
     async def initialize(self) -> bool:
         """Initialisiert CLOB Client mit L1 Auth und leitet L2 Credentials ab."""
@@ -93,6 +94,34 @@ class PolymarketExecutor:
     def is_live(self) -> bool:
         return self._ready and self._client is not None
 
+    def pre_sign_order(self, token_id: str, price: float, size_usd: float) -> None:
+        """Pre-Signing: Order vorab signieren für minimale Latenz bei Trigger.
+
+        Wird aufgerufen während der Bot auf das nächste Signal wartet.
+        Bei Trigger muss nur noch post_order() mit dem fertigen Digest aufgerufen werden.
+        Spart ~20-50ms EIP-712 Signatur-Berechnung.
+        """
+        if not self.is_live:
+            return
+        try:
+            from py_clob_client.clob_types import OrderArgs
+            from py_clob_client.order_builder.constants import BUY
+
+            is_maker = self.settings.order_type == "maker"
+            order_price = max(0.01, price - 0.01) if is_maker else price
+            size_shares = size_usd / order_price
+
+            order_args = OrderArgs(
+                token_id=token_id,
+                price=order_price,
+                size=round(size_shares, 2),
+                side=BUY,
+            )
+            signed = self._client.create_order(order_args)
+            self._pre_signed_orders[token_id] = signed
+        except Exception as e:
+            logger.debug(f"Pre-Sign Fehler: {e}")
+
     async def place_order(
         self,
         token_id: str,
@@ -130,18 +159,25 @@ class PolymarketExecutor:
 
             t0 = time.perf_counter()
 
-            # Maker vs Taker: Maker setzt Limit 1 Cent unter Ask (kassiert Rebate)
-            is_maker = self.settings.order_type == "maker"
-            order_price = max(0.01, price - 0.01) if is_maker else price
+            # Pre-Signed Order nutzen wenn vorhanden (spart ~20-50ms)
+            pre_signed = self._pre_signed_orders.pop(token_id, None)
 
-            order_args = OrderArgs(
-                token_id=token_id,
-                price=order_price,
-                size=round(size_shares, 2),
-                side=BUY,
-            )
-            signed_order = self._client.create_order(order_args)
-            order = self._client.post_order(signed_order)
+            if pre_signed:
+                order = self._client.post_order(pre_signed)
+                logger.debug(f"Pre-Signed Order verwendet (Latenz-Vorteil)")
+            else:
+                # Maker vs Taker: Maker setzt Limit 1 Cent unter Ask (kassiert Rebate)
+                is_maker = self.settings.order_type == "maker"
+                order_price = max(0.01, price - 0.01) if is_maker else price
+
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    price=order_price,
+                    size=round(size_shares, 2),
+                    side=BUY,
+                )
+                signed_order = self._client.create_order(order_args)
+                order = self._client.post_order(signed_order)
 
             latency_ms = (time.perf_counter() - t0) * 1000
 

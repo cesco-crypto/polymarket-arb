@@ -229,6 +229,17 @@ class PolymarketLatencyStrategy:
         # Heartbeat aktualisieren
         self._heartbeat = hb
 
+        # Pre-Signing: Orders für aktive Fenster vorab signieren (Latenz-Killer)
+        if self.executor.is_live and self._scan_cycles % 20 == 0:  # Alle ~10s
+            for asset_lower in ["btc", "eth"]:
+                windows = self.discovery.get_windows_for_asset(asset_lower.upper())
+                for w in windows[:2]:  # Nur die nächsten 2 Fenster
+                    for tid in [w.up_token_id, w.down_token_id]:
+                        if tid:
+                            self.executor.pre_sign_order(
+                                tid, 0.50, self.settings.max_live_position_usd
+                            )
+
     def _evaluate_window(
         self,
         asset: str,

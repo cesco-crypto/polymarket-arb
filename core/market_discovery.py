@@ -318,7 +318,10 @@ class MarketDiscovery:
     # --- Refresh Loop ---
 
     async def _refresh_loop(self) -> None:
-        """Periodischer Refresh: neue Fenster entdecken, Orderbücher aktualisieren."""
+        """Periodischer Refresh + Watchdog: erkennt Stale Data und erzwingt Reconnect."""
+        _WATCHDOG_TIMEOUT = 120  # 120s ohne Orderbuch-Update = Alarm
+        _last_successful_refresh = time.time()
+
         while self._running:
             try:
                 # 1. Neue Fenster entdecken (Rollover)
@@ -330,7 +333,29 @@ class MarketDiscovery:
                     tasks = [self._refresh_orderbook(w) for w in active]
                     await asyncio.gather(*tasks, return_exceptions=True)
 
-                # 3. Abgelaufene entfernen
+                    # Watchdog: Prüfe ob mindestens ein Orderbuch frisch ist
+                    now = time.time()
+                    any_fresh = any(now - w.orderbook_ts < 10 for w in active)
+                    if any_fresh:
+                        _last_successful_refresh = now
+
+                # 3. Watchdog: Stale Data Detection
+                stale_duration = time.time() - _last_successful_refresh
+                if stale_duration > _WATCHDOG_TIMEOUT:
+                    logger.warning(
+                        f"WATCHDOG: {stale_duration:.0f}s ohne frisches Orderbuch! "
+                        f"Erzwinge Reconnect..."
+                    )
+                    # Session schliessen und neu erstellen
+                    if self._session:
+                        await self._session.close()
+                    self._session = aiohttp.ClientSession(
+                        timeout=aiohttp.ClientTimeout(total=10),
+                        headers={"User-Agent": "polymarket-arb/2.0"},
+                    )
+                    _last_successful_refresh = time.time()
+
+                # 4. Abgelaufene entfernen
                 removed = self._cleanup_expired()
                 if removed:
                     logger.debug(f"Abgelaufene Fenster entfernt: {removed}")
@@ -338,7 +363,7 @@ class MarketDiscovery:
             except Exception as e:
                 logger.error(f"Discovery Refresh Fehler: {e}")
 
-            await asyncio.sleep(3)  # Alle 3s refreshen
+            await asyncio.sleep(3)
 
     def _cleanup_expired(self) -> int:
         """Entfernt abgelaufene Fenster (>30s nach Ablauf)."""
