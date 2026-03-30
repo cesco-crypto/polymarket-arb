@@ -229,12 +229,16 @@ class PaperTrader:
 
         del self._positions[trade_id]
 
-    def record_markout(self, oracle_price: float) -> None:
-        """Zeichnet Mark-out Preise für offene Positionen auf (1s, 5s, 10s, 30s, 60s)."""
+    def record_markout(self, oracle_price: float, asset_filter: str = "") -> None:
+        """Zeichnet Mark-out Preise auf — NUR für Positionen des richtigen Assets.
+
+        KRITISCH: BTC-Preis darf nur BTC-Mark-outs aufzeichnen, nicht ETH!
+        """
         now = time.time()
         for pos in self._positions.values():
+            if asset_filter and pos.asset != asset_filter:
+                continue
             age_s = now - pos.entered_at
-            # Mark-out Zeitpunkte (mit 1s Toleranz)
             for target_s in [1, 5, 10, 30, 60]:
                 if target_s not in pos.markout_prices and abs(age_s - target_s) < 1.5:
                     pos.markout_prices[target_s] = oracle_price

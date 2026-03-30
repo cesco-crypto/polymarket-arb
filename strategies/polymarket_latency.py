@@ -76,8 +76,9 @@ class PolymarketLatencyStrategy:
         self._recent_signals: deque = deque(maxlen=30)
         self._scan_cycles: int = 0
         self._heartbeat: dict = {}
-        self._tick_event = asyncio.Event()  # Event-driven: gesetzt bei jedem Binance Tick
+        self._tick_event = asyncio.Event()
         self._last_tick_symbol: str = ""
+        self._traded_windows: set = set()  # Slug-Set: verhindert Duplicate Trades pro Fenster
 
     async def run(self) -> None:
         """Startet alle Komponenten und läuft bis zum Shutdown."""
@@ -180,11 +181,12 @@ class PolymarketLatencyStrategy:
         if not self.paper_trader.can_trade():
             return
 
-        # Mark-out Recording
+        # Mark-out Recording (Asset-gefiltert: BTC-Preis nur für BTC-Positionen!)
         for symbol in self.settings.oracle_symbols:
             tick = self.oracle.get_latest(symbol)
             if tick:
-                self.paper_trader.record_markout(tick.mid)
+                asset = symbol.replace("/USDT", "")
+                self.paper_trader.record_markout(tick.mid, asset_filter=asset)
 
         # Heartbeat: aktuelles Momentum für jedes Asset erfassen
         hb = {}
@@ -307,6 +309,11 @@ class PolymarketLatencyStrategy:
             if order_size > max_order_by_liq:
                 return  # Order wäre > 1% der Marktliquidität
 
+        # Duplicate Prevention: Nur 1 Trade pro Fenster pro Richtung
+        trade_key = f"{window.slug}_{direction}"
+        if trade_key in self._traded_windows:
+            return
+
         # PreTrade-Analyse
         result = self.calculator.evaluate(
             asset=asset,
@@ -362,17 +369,27 @@ class PolymarketLatencyStrategy:
                 oracle_price=binance_price,
             )
 
+            # Fenster als getraded markieren (Duplicate Prevention)
+            self._traded_windows.add(trade_key)
+
             # LIVE ORDER platzieren (wenn Executor aktiv)
             if self.executor.is_live:
                 token_id = window.up_token_id if direction == "UP" else window.down_token_id
                 live_size = min(result.position_usd, self.settings.max_live_position_usd)
-                asyncio.create_task(self.executor.place_order(
-                    token_id=token_id,
-                    side="BUY",
-                    price=ask_price,
-                    size_usd=live_size,
-                    asset=asset,
-                    direction=direction,
+
+                async def _execute_live_order(tid, ap, sz, a, d):
+                    try:
+                        res = await self.executor.place_order(
+                            token_id=tid, side="BUY", price=ap,
+                            size_usd=sz, asset=a, direction=d,
+                        )
+                        if not res.success:
+                            logger.error(f"LIVE ORDER FAILED: {a} {d} — {res.error}")
+                    except Exception as e:
+                        logger.error(f"LIVE ORDER EXCEPTION: {a} {d} — {e}")
+
+                asyncio.create_task(_execute_live_order(
+                    token_id, ask_price, live_size, asset, direction
                 ))
 
             # Telegram Alert
@@ -412,6 +429,11 @@ class PolymarketLatencyStrategy:
             )
 
             if resolved:
+                # Cleanup traded_windows für aufgelöste Trades
+                for pos in resolved:
+                    for d in ["UP", "DOWN"]:
+                        self._traded_windows.discard(f"{pos.market_condition_id}_{d}")
+
                 stats = self.paper_trader.stats()
                 logger.info(
                     f"Positionen aufgelöst: {len(resolved)} | "
