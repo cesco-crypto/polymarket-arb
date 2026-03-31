@@ -19,6 +19,8 @@ from loguru import logger
 if TYPE_CHECKING:
     from config import Settings
 
+import os
+
 _API_BASE = "https://api.telegram.org/bot{token}/sendMessage"
 
 # Singleton-Session (wird beim ersten Alert erstellt)
@@ -26,18 +28,18 @@ _session: aiohttp.ClientSession | None = None
 _token: str = ""
 _chat_id: str = ""
 _enabled: bool = False
+_instance: str = ""  # FRANKFURT / SINGAPUR
 
 
 def configure(settings: Settings) -> None:
     """Konfiguriert Telegram mit Settings."""
-    global _token, _chat_id, _enabled
+    global _token, _chat_id, _enabled, _instance
     _token = settings.telegram_bot_token
     _chat_id = settings.telegram_chat_id
     _enabled = bool(_token and _chat_id)
+    _instance = os.environ.get("INSTANCE_LABEL", "LOCAL")
     if _enabled:
-        logger.info(f"Telegram Alerts aktiviert (Chat-ID: {_chat_id})")
-    else:
-        logger.info("Telegram Alerts deaktiviert (kein Token/Chat-ID in .env)")
+        logger.info(f"Telegram Alerts aktiviert (Chat-ID: {_chat_id}, Instance: {_instance})")
 
 
 async def send_alert(message: str, silent: bool = False) -> bool:
@@ -61,10 +63,13 @@ async def send_alert(message: str, silent: bool = False) -> bool:
                 timeout=aiohttp.ClientTimeout(total=10)
             )
 
+        # Instance-Tag an jede Nachricht anhängen
+        tagged = f"[{_instance}] {message}" if _instance else message
+
         url = _API_BASE.format(token=_token)
         payload = {
             "chat_id": _chat_id,
-            "text": message,
+            "text": tagged,
             "parse_mode": "HTML",
             "disable_notification": silent,
         }
