@@ -209,11 +209,18 @@ async def api_wallet() -> dict:
 @app.get("/api/journal")
 async def api_journal() -> dict:
     """Forensisches Trade Journal — alle Daten, unverlierbar."""
+    from core import db
+    # Primär: Supabase (persistent). Fallback: lokales Journal.
+    db_trades = await db.get_all_trades()
+    if db_trades:
+        db_stats = await db.get_trade_stats()
+        return {"records": db_trades, "stats": db_stats, "count": len(db_trades), "source": "supabase"}
+    # Fallback: lokales Journal
     if not strategy:
         return {"error": "not initialized"}
     records = strategy.journal.get_all_records()
     stats = strategy.journal.stats()
-    return {"records": records, "stats": stats, "count": len(records)}
+    return {"records": records, "stats": stats, "count": len(records), "source": "local"}
 
 
 @app.post("/api/toggle-order-type")

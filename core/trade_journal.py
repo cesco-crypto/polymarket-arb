@@ -26,6 +26,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 from loguru import logger
+from core import db
 from utils import telegram
 
 
@@ -130,18 +131,20 @@ class TradeJournal:
                 logger.warning(f"TradeJournal Load Fehler: {e}")
 
     def record_open(self, rec: TradeRecord) -> None:
-        """Speichert Trade-Open in alle 3 Systeme."""
+        """Speichert Trade-Open in alle 4 Systeme: RAM + JSONL + Telegram + Supabase."""
         rec.event = "open"
         self._records.append(rec)
         self._append_to_file(rec)
         asyncio.create_task(self._send_telegram_open(rec))
+        asyncio.create_task(db.insert_trade(asdict(rec)))
 
     def record_close(self, rec: TradeRecord) -> None:
-        """Speichert Trade-Close in alle 3 Systeme."""
+        """Speichert Trade-Close in alle 4 Systeme: RAM + JSONL + Telegram + Supabase."""
         rec.event = "close"
         self._records.append(rec)
         self._append_to_file(rec)
         asyncio.create_task(self._send_telegram_close(rec))
+        asyncio.create_task(db.insert_trade(asdict(rec)))
 
     def _append_to_file(self, rec: TradeRecord) -> None:
         """Append-only JSONL — eine Zeile pro Event, überlebt keine Deploys aber Render Starter Restarts."""
