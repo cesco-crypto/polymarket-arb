@@ -28,6 +28,7 @@ from core.market_discovery import MarketDiscovery, MarketWindow
 from core.paper_trader import PaperTrader
 from core.pretrade_calculator import PreTradeCalculator, TradeDecision
 from core.risk_manager import RiskManager
+from core.trade_journal import TradeJournal, TradeRecord
 from utils import telegram
 
 
@@ -70,6 +71,7 @@ class PolymarketLatencyStrategy:
         self.paper_trader = PaperTrader(settings)
         self.risk_manager = RiskManager(settings)
         self.executor = PolymarketExecutor(settings)
+        self.journal = TradeJournal()
 
         self._running = False
         self._signals_detected: int = 0
@@ -359,7 +361,7 @@ class PolymarketLatencyStrategy:
                 f"{window.question}"
             )
 
-            self.paper_trader.open_position(
+            pos = self.paper_trader.open_position(
                 result=result,
                 condition_id=window.condition_id,
                 question=window.question,
@@ -368,6 +370,31 @@ class PolymarketLatencyStrategy:
                 seconds_to_expiry=seconds_to_expiry,
                 oracle_price=binance_price,
             )
+
+            # Forensisches Journal: Trade Open
+            if pos:
+                transit = self.oracle.status().get(f"{asset}/USDT", {}).get("transit_p50_ms", 0)
+                bid = window.up_best_bid if direction == "UP" else window.down_best_bid
+                spread = (ask_price - bid) / ((ask_price + bid) / 2) * 100 if bid > 0 else 0
+                self.journal.record_open(TradeRecord(
+                    trade_id=pos.trade_id, asset=asset, direction=direction,
+                    signal_ts=time.time(), entry_ts=pos.entered_at,
+                    window_slug=window.slug, market_question=window.question[:60],
+                    timeframe=window.timeframe,
+                    oracle_price_entry=binance_price,
+                    polymarket_bid=bid, polymarket_ask=ask_price,
+                    executed_price=ask_price,
+                    momentum_pct=momentum_pct, p_true=result.p_true,
+                    p_market=result.p_market, raw_edge_pct=result.raw_edge_pct,
+                    fee_pct=result.fee_pct, net_ev_pct=result.net_ev_pct,
+                    size_usd=result.position_usd, shares=pos.shares,
+                    fee_usd=pos.fee_usd, kelly_fraction=result.kelly_fraction,
+                    transit_latency_ms=transit,
+                    order_type=self.settings.order_type,
+                    seconds_to_expiry=seconds_to_expiry,
+                    market_liquidity_usd=window.liquidity_usd,
+                    spread_pct=round(spread, 2),
+                ))
 
             # Fenster als getraded markieren (Duplicate Prevention)
             self._traded_windows.add(trade_key)
@@ -429,10 +456,33 @@ class PolymarketLatencyStrategy:
             )
 
             if resolved:
-                # Cleanup traded_windows für aufgelöste Trades
                 for pos in resolved:
                     for d in ["UP", "DOWN"]:
                         self._traded_windows.discard(f"{pos.market_condition_id}_{d}")
+
+                    # Forensisches Journal: Trade Close
+                    mo = pos.markout_prices
+                    ref = pos.oracle_price_at_entry
+                    def _mo_pct(ts_key):
+                        v = mo.get(ts_key, 0)
+                        return round((v - ref) / ref * 100, 4) if ref > 0 and v > 0 else 0.0
+
+                    self.journal.record_close(TradeRecord(
+                        trade_id=pos.trade_id, asset=pos.asset, direction=pos.direction,
+                        entry_ts=pos.entered_at, exit_ts=pos.resolved_at or time.time(),
+                        oracle_price_entry=pos.oracle_price_at_entry,
+                        oracle_price_exit=current_tick.mid,
+                        executed_price=pos.entry_price,
+                        momentum_pct=pos.momentum_at_entry,
+                        p_true=pos.p_true_at_entry,
+                        size_usd=pos.size_usd, fee_usd=pos.fee_usd,
+                        outcome_correct=pos.outcome_correct,
+                        pnl_usd=pos.pnl_usd,
+                        pnl_pct=round(pos.pnl_usd / pos.size_usd * 100, 2) if pos.size_usd > 0 else 0,
+                        markout_1s=_mo_pct(1), markout_5s=_mo_pct(5),
+                        markout_10s=_mo_pct(10), markout_30s=_mo_pct(30),
+                        markout_60s=_mo_pct(60),
+                    ))
 
                 stats = self.paper_trader.stats()
                 logger.info(

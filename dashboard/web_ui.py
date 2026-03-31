@@ -204,6 +204,16 @@ async def api_wallet() -> dict:
     }
 
 
+@app.get("/api/journal")
+async def api_journal() -> dict:
+    """Forensisches Trade Journal — alle Daten, unverlierbar."""
+    if not strategy:
+        return {"error": "not initialized"}
+    records = strategy.journal.get_all_records()
+    stats = strategy.journal.stats()
+    return {"records": records, "stats": stats, "count": len(records)}
+
+
 @app.post("/api/toggle-order-type")
 async def toggle_order_type() -> dict:
     """Toggle zwischen Maker und Taker Order-Typ."""
