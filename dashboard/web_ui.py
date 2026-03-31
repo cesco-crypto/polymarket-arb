@@ -7,6 +7,7 @@ The strategy runs its own async loops; the dashboard is a passive observer.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -142,6 +143,7 @@ def _build_payload() -> dict:
         "running": status.get("running", False),
         "uptime": f"{hours:02d}:{minutes:02d}:{seconds:02d}",
         "timestamp": datetime.now().isoformat(),
+        "instance_label": os.environ.get("INSTANCE_LABEL", "LOCAL"),
     }
 
 

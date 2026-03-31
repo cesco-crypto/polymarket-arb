@@ -57,7 +57,7 @@
 <body>
 <div class="hdr">
   <div class="hdr-l">
-    <span class="logo">POLYMARKET LATENCY ARB</span>
+    <span class="logo">POLYMARKET LATENCY ARB <span id="instance-label" style="color:var(--yellow);font-size:10px"></span></span>
     <div id="badge" class="badge badge-on"><div class="dot dot-g"></div><span id="badge-txt">LIVE</span></div>
   </div>
   <div class="hdr-r">
@@ -235,8 +235,9 @@ function switchTab(btn, tab) {
     id('uptime').textContent = d.uptime || '—';
     id('sig-count').textContent = d.signals_detected || 0;
 
-    // Scan counter
+    // Scan counter + Instance Label
     id('scan-count').textContent = (d.scan_cycles||0).toLocaleString();
+    if (d.instance_label) id('instance-label').textContent = d.instance_label;
 
     // P1: Oracle + Pulse
     renderOracle(d.oracle || {}, d.discovery || {});
