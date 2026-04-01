@@ -2,7 +2,7 @@
 
 Liest paper_trades.csv + bot.log aus und berechnet:
 1. Win Rate & EV vs. PreTradeCalculator-Erwartung
-2. Netto-PnL nach 3.15% dynamischer Taker-Gebühr
+2. Netto-PnL nach dynamischer Taker-Gebühr (1.80% Peak ab 30.03.2026)
 3. Momentum-Korrelation (höheres Momentum → höhere Win Rate?)
 4. Drawdown & Kill-Switch Tracking
 
@@ -245,7 +245,7 @@ def print_report(stats: dict) -> None:
     print(f"  Avg p_true:             {stats['avg_p_true']:.3f}")
 
     # --- PnL ---
-    print(header("NETTO-PROFITABILITÄT (nach 3.15% Gebühren)"))
+    print(header("NETTO-PROFITABILITÄT (nach 1.80% Gebühren)"))
     pnl = stats["total_pnl"]
     pnl_color = "\033[92m" if pnl > 0 else "\033[91m"
     print(f"  Total PnL:              {pnl_color}${pnl:+.2f}\033[0m")

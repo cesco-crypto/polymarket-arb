@@ -4,7 +4,7 @@ Kernlogik:
 1. Binance WebSocket liefert BTC/ETH Tick-Daten in Echtzeit (Sub-50ms)
 2. MarketDiscovery findet 5m/15m Märkte via Slug-Berechnung, hält Orderbücher live
 3. Wenn Binance-Momentum stark genug → prüfe ob Polymarket-Orderbuch noch nicht angepasst hat
-4. PreTrade-Kalkulator prüft Edge, 3.15% Gebühren, Half-Kelly Sizing
+4. PreTrade-Kalkulator prüft Edge, 1.80% Gebühren (ab 30.03.2026), Half-Kelly Sizing
 5. Paper Trader loggt den fiktiven Trade
 6. Kill-Switch stoppt bei -20% Tages-Drawdown
 

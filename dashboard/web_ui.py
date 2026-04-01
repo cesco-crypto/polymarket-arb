@@ -247,6 +247,173 @@ async def quant_lab() -> HTMLResponse:
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
+@app.get("/api/backtest/realistic")
+async def api_backtest_realistic() -> dict:
+    """Realistische Backtest-Ergebnisse (kalibriert mit echten Polymarket-Daten)."""
+    import json
+    f = Path(__file__).parent.parent / "data" / "backtest" / "grid_results_realistic.json"
+    if not f.exists():
+        return {"error": "No realistic backtest data. Run: python backtest_engine.py"}
+    with open(f) as fp:
+        results = json.load(fp)
+    return {"results": results, "count": len(results), "mode": "realistic"}
+
+
+@app.get("/api/backtest/compare")
+async def api_backtest_compare() -> dict:
+    """Side-by-side Vergleich: Idealistic vs Realistic."""
+    import json
+    base = Path(__file__).parent.parent / "data" / "backtest"
+    out = {"idealistic": [], "realistic": []}
+    for mode in ["idealistic", "realistic"]:
+        f = base / f"grid_results_{mode}.json"
+        if f.exists():
+            with open(f) as fp:
+                out[mode] = json.load(fp)
+    return out
+
+
+@app.get("/api/monte-carlo")
+async def api_monte_carlo(
+    trades: int = 200, simulations: int = 1000,
+    win_rate: float = 0, avg_win: float = 0, avg_loss: float = 0,
+) -> dict:
+    """Monte Carlo Simulation — 1000 Permutationen des Trade-Outcomes.
+
+    Kann mit expliziten Parametern oder aus Supabase-Daten laufen.
+    """
+    import random as rng
+    rng.seed(42)
+
+    # Wenn keine Parameter → aus Supabase oder Backtest laden
+    if win_rate == 0:
+        from core import db
+        closed = await db.get_closed_trades(500)
+        if closed and len(closed) >= 5:
+            wins = [t for t in closed if t.get("outcome_correct")]
+            losses = [t for t in closed if not t.get("outcome_correct")]
+            win_rate = len(wins) / len(closed)
+            avg_win = sum(t.get("pnl_usd", 0) for t in wins) / max(len(wins), 1)
+            avg_loss = sum(t.get("pnl_usd", 0) for t in losses) / max(len(losses), 1)
+        else:
+            # Fallback: aus realistischem Backtest
+            win_rate = 0.97
+            avg_win = 3.68  # $5 Position bei 0.4965 entry, correct
+            avg_loss = -5.10  # $5 + fees, lost
+
+    # Simulationen
+    equity_curves = []
+    final_capitals = []
+    max_drawdowns = []
+    initial = 80.0
+
+    for _ in range(simulations):
+        capital = initial
+        peak = capital
+        max_dd = 0
+        curve = [capital]
+
+        for _ in range(trades):
+            if rng.random() < win_rate:
+                capital += avg_win
+            else:
+                capital += avg_loss  # avg_loss is negative
+
+            if capital > peak:
+                peak = capital
+            dd = (peak - capital) / peak if peak > 0 else 0
+            if dd > max_dd:
+                max_dd = dd
+
+            curve.append(round(capital, 2))
+
+            if capital <= initial * 0.60:  # -40% kill switch
+                break
+
+        equity_curves.append(curve)
+        final_capitals.append(round(capital, 2))
+        max_drawdowns.append(round(max_dd * 100, 1))
+
+    final_capitals.sort()
+    n = len(final_capitals)
+
+    return {
+        "params": {
+            "trades": trades, "simulations": simulations,
+            "win_rate": round(win_rate, 4),
+            "avg_win": round(avg_win, 4), "avg_loss": round(avg_loss, 4),
+            "initial_capital": initial,
+        },
+        "results": {
+            "median_final": final_capitals[n // 2],
+            "p5": final_capitals[int(n * 0.05)],
+            "p25": final_capitals[int(n * 0.25)],
+            "p75": final_capitals[int(n * 0.75)],
+            "p95": final_capitals[int(n * 0.95)],
+            "min": final_capitals[0],
+            "max": final_capitals[-1],
+            "prob_profit": round(sum(1 for c in final_capitals if c > initial) / n * 100, 1),
+            "prob_ruin": round(sum(1 for c in final_capitals if c <= initial * 0.60) / n * 100, 1),
+            "avg_max_dd": round(sum(max_drawdowns) / len(max_drawdowns), 1),
+        },
+        "distribution": final_capitals,
+        "sample_curves": [equity_curves[i] for i in range(0, simulations, simulations // 10)],
+    }
+
+
+@app.get("/api/markout")
+async def api_markout() -> dict:
+    """Mark-out Analyse — Signal-Qualität über Zeit (T+1s bis T+60s)."""
+    from core import db
+    closed = await db.get_closed_trades(500)
+    if not closed:
+        return {"error": "No closed trades in Supabase", "count": 0}
+
+    # Aggregiere Mark-out Daten
+    horizons = ["markout_1s", "markout_5s", "markout_10s", "markout_30s", "markout_60s"]
+    labels = ["T+1s", "T+5s", "T+10s", "T+30s", "T+60s"]
+
+    # Pro Horizon: avg, median, positive rate
+    agg = {}
+    for h, label in zip(horizons, labels):
+        values = [t.get(h, 0) for t in closed if t.get(h, 0) != 0]
+        if values:
+            values.sort()
+            n = len(values)
+            agg[label] = {
+                "count": n,
+                "mean": round(sum(values) / n, 6),
+                "median": round(values[n // 2], 6),
+                "positive_rate": round(sum(1 for v in values if v > 0) / n * 100, 1),
+                "p25": round(values[int(n * 0.25)], 6),
+                "p75": round(values[int(n * 0.75)], 6),
+            }
+        else:
+            agg[label] = {"count": 0}
+
+    # Per-trade markout data for scatter plot
+    trade_markouts = []
+    for t in closed[:200]:
+        entry = {
+            "trade_id": t.get("trade_id", ""),
+            "asset": t.get("asset", ""),
+            "direction": t.get("direction", ""),
+            "momentum_pct": t.get("momentum_pct", 0),
+            "outcome_correct": t.get("outcome_correct", False),
+            "pnl_usd": t.get("pnl_usd", 0),
+        }
+        for h in horizons:
+            entry[h] = t.get(h, 0)
+        trade_markouts.append(entry)
+
+    return {
+        "aggregated": agg,
+        "trades": trade_markouts,
+        "count": len(closed),
+        "source": "supabase",
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()

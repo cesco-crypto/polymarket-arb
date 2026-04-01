@@ -17,211 +17,286 @@
   .p-full{grid-column:1/3}
   .pt{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim);margin-bottom:12px}
   .kpi-row{display:flex;gap:12px;margin-bottom:12px;flex-wrap:wrap}
-  .kpi{background:var(--bg3);padding:10px 16px;border-radius:6px;min-width:120px}
-  .kpi-val{font-size:20px;font-weight:700}.kpi-lbl{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
-  .g{color:var(--green)}.rd{color:var(--red)}.y{color:var(--yellow)}
+  .kpi{background:var(--bg3);padding:10px 16px;border-radius:6px;min-width:110px}
+  .kpi-val{font-size:18px;font-weight:700}.kpi-lbl{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+  .g{color:var(--green)}.rd{color:var(--red)}.y{color:var(--yellow)}.bl{color:var(--accent)}
   table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px}
   th{text-align:left;padding:4px 8px;font-size:9px;text-transform:uppercase;color:var(--dim);border-bottom:1px solid var(--border)}
   td{padding:4px 8px;border-bottom:1px solid var(--border)}
   .r{text-align:right}.b{font-weight:700}
-  .empty{text-align:center;padding:40px;color:var(--dim)}
-  .loading{text-align:center;padding:60px;color:var(--dim);font-size:14px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:9px;font-weight:700}
+  .badge-g{background:#22c55e22;color:var(--green)}.badge-r{background:#ef444422;color:var(--red)}
+  .badge-y{background:#eab30822;color:var(--yellow)}.badge-b{background:#3b82f622;color:var(--accent)}
+  .loading{text-align:center;padding:40px;color:var(--dim)}
+  .tab-row{display:flex;gap:4px;margin-bottom:12px}
+  .tab{padding:4px 12px;border-radius:4px;background:var(--bg3);color:var(--dim);cursor:pointer;font-size:10px;font-weight:600}
+  .tab.active{background:var(--accent);color:#fff}
 </style>
 </head>
 <body>
 <div class="hdr">
   <div style="display:flex;align-items:center;gap:14px">
     <span class="logo">QUANT LAB</span>
-    <span style="color:var(--dim);font-size:11px">Backtesting & Parameter Research</span>
+    <span class="badge badge-b">v2.0 — Real Data Calibrated</span>
   </div>
   <div style="display:flex;gap:12px;align-items:center">
     <a href="/">Dashboard</a>
-    <span style="color:var(--dim);font-size:10px" id="data-status">Loading...</span>
+    <a href="/wallet">Wallet</a>
+    <span style="color:var(--dim);font-size:10px" id="status">Loading...</span>
   </div>
 </div>
 
 <div class="grid">
 
-  <!-- Heatmap: Win Rate by Threshold x Window -->
+  <!-- 1. REALISTIC vs IDEALISTIC Comparison -->
   <div class="p">
-    <div class="pt">Parameter Stability — Win Rate Heatmap (5m BTC)</div>
-    <div id="heatmap-wr" style="height:340px"><div class="loading">Loading backtest data...</div></div>
+    <div class="pt">Idealistic vs Realistic — Side-by-Side</div>
+    <div id="compare-chart" style="height:360px"><div class="loading">Loading backtest comparison...</div></div>
   </div>
 
-  <!-- Heatmap: PnL by Threshold x Window -->
+  <!-- 2. KPIs + Top Realistic Configs -->
   <div class="p">
-    <div class="pt">Profitability — Net PnL Heatmap ($50/trade, 5m BTC)</div>
-    <div id="heatmap-pnl" style="height:340px"><div class="loading">Loading...</div></div>
-  </div>
-
-  <!-- KPIs + Top Configs -->
-  <div class="p">
-    <div class="pt">Institutional KPIs — Best Configuration</div>
+    <div class="pt">Calibrated Realistic KPIs</div>
     <div class="kpi-row" id="kpis">
-      <div class="kpi"><div class="kpi-val g" id="k-wr">—</div><div class="kpi-lbl">Win Rate</div></div>
-      <div class="kpi"><div class="kpi-val" id="k-trades">—</div><div class="kpi-lbl">Trades (6mo)</div></div>
-      <div class="kpi"><div class="kpi-val g" id="k-pnl">—</div><div class="kpi-lbl">Net PnL</div></div>
-      <div class="kpi"><div class="kpi-val" id="k-sharpe">—</div><div class="kpi-lbl">Sharpe</div></div>
-      <div class="kpi"><div class="kpi-val" id="k-dd">—</div><div class="kpi-lbl">Max DD</div></div>
-      <div class="kpi"><div class="kpi-val" id="k-freq">—</div><div class="kpi-lbl">Trades/Day</div></div>
+      <div class="kpi"><div class="kpi-val g" id="k-wr">--</div><div class="kpi-lbl">Win Rate</div></div>
+      <div class="kpi"><div class="kpi-val g" id="k-pnl">--</div><div class="kpi-lbl">Best PnL</div></div>
+      <div class="kpi"><div class="kpi-val bl" id="k-sharpe">--</div><div class="kpi-lbl">Sharpe</div></div>
+      <div class="kpi"><div class="kpi-val y" id="k-trades">--</div><div class="kpi-lbl">Trades</div></div>
+      <div class="kpi"><div class="kpi-val" id="k-dd">--</div><div class="kpi-lbl">Max DD</div></div>
+      <div class="kpi"><div class="kpi-val g" id="k-daily">--</div><div class="kpi-lbl">$/Day</div></div>
+    </div>
+    <div style="font-size:9px;color:var(--dim);margin-bottom:8px">
+      Calibration: 15.1% opportunity rate, avg entry 0.4965, 0.1% slippage, 85% fill, 20% competition haircut
     </div>
     <table>
-      <tr><th>#</th><th>Slot</th><th>Mom</th><th class="r">Thr%</th><th class="r">Trades</th><th class="r">WR%</th><th class="r">PnL</th><th class="r">Sharpe</th><th class="r">MaxDD%</th></tr>
+      <tr><th>#</th><th>Asset</th><th>Slot</th><th>Mom</th><th class="r">Thr%</th><th class="r">Trades</th><th class="r">WR%</th><th class="r">PnL</th><th class="r">Sharpe</th><th class="r">$/Day</th></tr>
     </table>
-    <table id="top-table"><tr><td colspan="9" class="empty">Loading...</td></tr></table>
+    <table id="top-table"><tr><td colspan="10" class="loading">Loading...</td></tr></table>
   </div>
 
-  <!-- Momentum vs Win Rate Chart -->
+  <!-- 3. Monte Carlo Simulation -->
   <div class="p">
-    <div class="pt">Signal Strength — Momentum Threshold vs Win Rate</div>
-    <div id="mom-chart" style="height:340px"><div class="loading">Loading...</div></div>
-  </div>
-
-  <!-- Mark-out Placeholder -->
-  <div class="p">
-    <div class="pt">Mark-out Analysis — Signal Quality (T+1s to T+60s)</div>
-    <div id="markout-chart" style="height:300px">
-      <div class="empty" style="padding-top:80px">
-        Waiting for live paper trades...<br>
-        <span style="font-size:10px;color:var(--dim)">Mark-out data will populate once the bot executes trades on Render.<br>
-        Each trade records Binance price at T+1s, T+5s, T+10s, T+30s, T+60s.</span>
-      </div>
+    <div class="pt">Monte Carlo Stress Test — 1,000 Simulations</div>
+    <div class="kpi-row" id="mc-kpis">
+      <div class="kpi"><div class="kpi-val g" id="mc-median">--</div><div class="kpi-lbl">Median Final</div></div>
+      <div class="kpi"><div class="kpi-val g" id="mc-prob">--</div><div class="kpi-lbl">P(Profit)</div></div>
+      <div class="kpi"><div class="kpi-val rd" id="mc-ruin">--</div><div class="kpi-lbl">P(Ruin)</div></div>
+      <div class="kpi"><div class="kpi-val y" id="mc-p5">--</div><div class="kpi-lbl">5th %ile</div></div>
+      <div class="kpi"><div class="kpi-val g" id="mc-p95">--</div><div class="kpi-lbl">95th %ile</div></div>
     </div>
+    <div id="mc-chart" style="height:260px"><div class="loading">Running Monte Carlo...</div></div>
   </div>
 
-  <!-- Monte Carlo Placeholder -->
+  <!-- 4. Monte Carlo Distribution -->
   <div class="p">
-    <div class="pt">Monte Carlo Stress Test — Account Outcome Distribution</div>
-    <div id="monte-carlo" style="height:300px">
-      <div class="empty" style="padding-top:80px">
-        Requires 50+ resolved trades<br>
-        <span style="font-size:10px;color:var(--dim)">Will run 1,000 random permutations of trade history<br>
-        to show probability distribution of account outcomes.</span>
-      </div>
+    <div class="pt">Final Capital Distribution — Histogram</div>
+    <div id="mc-hist" style="height:340px"><div class="loading">Loading...</div></div>
+  </div>
+
+  <!-- 5. Win Rate Heatmap (Realistic) -->
+  <div class="p">
+    <div class="pt">Parameter Stability — Realistic Win Rate Heatmap (5m)</div>
+    <div class="tab-row">
+      <div class="tab active" onclick="switchAsset('BTC')">BTC</div>
+      <div class="tab" onclick="switchAsset('ETH')">ETH</div>
     </div>
+    <div id="heatmap-wr" style="height:300px"><div class="loading">Loading...</div></div>
+  </div>
+
+  <!-- 6. Mark-out Analysis -->
+  <div class="p">
+    <div class="pt">Mark-out Analysis — Signal Quality (Supabase Live Data)</div>
+    <div id="markout-chart" style="height:340px"><div class="loading">Loading Supabase data...</div></div>
   </div>
 
 </div>
 
 <script>
-const PLOTLY_LAYOUT = {
-  paper_bgcolor: '#13151c', plot_bgcolor: '#0a0c10',
-  font: { family: 'SF Mono, JetBrains Mono, monospace', size: 10, color: '#9298a8' },
-  margin: { l: 50, r: 20, t: 30, b: 40 },
+const PL = {
+  paper_bgcolor:'#13151c', plot_bgcolor:'#0a0c10',
+  font:{family:'SF Mono,JetBrains Mono,monospace',size:10,color:'#9298a8'},
+  margin:{l:50,r:20,t:30,b:40},
 };
 
-async function loadData() {
-  try {
-    const r = await fetch('/api/backtest');
-    const d = await r.json();
-    if (d.error) { document.getElementById('data-status').textContent = d.error; return; }
-    document.getElementById('data-status').textContent = d.count + ' configs loaded';
-    render(d.results);
-  } catch(e) {
-    document.getElementById('data-status').textContent = 'Error: ' + e.message;
-  }
+let allRealistic = [];
+let currentAsset = 'BTC';
+
+// === LOAD ALL DATA ===
+async function init() {
+  const [compare, mc, markout] = await Promise.all([
+    fetch('/api/backtest/compare').then(r=>r.json()),
+    fetch('/api/monte-carlo?trades=200&simulations=1000').then(r=>r.json()),
+    fetch('/api/markout').then(r=>r.json()).catch(()=>({error:'no data'})),
+  ]);
+
+  document.getElementById('status').textContent = 'Data loaded';
+
+  renderCompare(compare);
+  renderKPIs(compare.realistic || []);
+  renderMonteCarlo(mc);
+  renderMonteCarloHist(mc);
+  renderHeatmap(compare.realistic || [], currentAsset);
+  renderMarkout(markout);
 }
 
-function render(results) {
-  const r5 = results.filter(r => r.slot_min === 5);
-  if (!r5.length) return;
+function renderCompare(data) {
+  const ideal = data.idealistic || [];
+  const real = data.realistic || [];
+  allRealistic = real;
 
-  // Build heatmap data
-  const windows = [...new Set(r5.map(r => r.mom_win_min))].sort((a,b) => a-b);
-  const thresholds = [...new Set(r5.map(r => r.threshold_pct))].sort((a,b) => a-b);
+  // Bar chart: top 10 realistic PnL vs idealistic (scaled)
+  const r5 = real.filter(r=>r.slot_min===5).sort((a,b)=>b.pnl-a.pnl).slice(0,12);
+  const labels = r5.map(r=>`${r.asset} m${r.mom_win_min} t${r.threshold_pct}%`);
 
-  // Win Rate Heatmap
-  const wrMatrix = thresholds.map(thr =>
-    windows.map(w => {
-      const m = r5.find(r => r.threshold_pct === thr && r.mom_win_min === w);
-      return m ? m.win_rate : 0;
-    })
-  );
+  // Find matching idealistic
+  const iPnl = r5.map(r=>{
+    const m = ideal.find(i=>i.asset===r.asset&&i.slot_min===r.slot_min&&i.mom_win_min===r.mom_win_min&&i.threshold_pct===r.threshold_pct);
+    return m ? m.pnl / 1000 : 0; // Scale to $K for readability
+  });
 
-  Plotly.newPlot('heatmap-wr', [{
-    z: wrMatrix, x: windows.map(w => w + 'min'), y: thresholds.map(t => t + '%'),
-    type: 'heatmap', colorscale: [[0,'#1a1d27'],[0.5,'#eab308'],[0.8,'#22c55e'],[1,'#00ff88']],
-    zmin: 80, zmax: 100, hovertemplate: 'Window: %{x}<br>Threshold: %{y}<br>Win Rate: %{z:.1f}%<extra></extra>',
-    colorbar: { title: { text: 'WR%', font: { size: 10 } }, tickfont: { size: 9 } },
-  }], { ...PLOTLY_LAYOUT, title: { text: 'Win Rate by Momentum Window x Threshold', font: { size: 11 } },
-    xaxis: { title: 'Momentum Window' }, yaxis: { title: 'Threshold (%)' } });
+  Plotly.newPlot('compare-chart',[
+    {x:labels, y:r5.map(r=>r.pnl), type:'bar', name:'Realistic $', marker:{color:'#22c55e'}},
+    {x:labels, y:iPnl, type:'bar', name:'Idealistic $K', marker:{color:'#3b82f644'}, yaxis:'y2'},
+  ],{...PL,
+    title:{text:'Realistic PnL ($) vs Idealistic ($K scaled)',font:{size:11}},
+    yaxis:{title:'Realistic PnL ($)'},
+    yaxis2:{title:'Idealistic PnL ($K)',overlaying:'y',side:'right',showgrid:false},
+    barmode:'group',
+    legend:{x:0.01,y:0.98,font:{size:9}},
+  });
+}
 
-  // PnL Heatmap
-  const pnlMatrix = thresholds.map(thr =>
-    windows.map(w => {
-      const m = r5.find(r => r.threshold_pct === thr && r.mom_win_min === w);
-      return m ? m.pnl : 0;
-    })
-  );
+function renderKPIs(results) {
+  if(!results.length) return;
+  const r5 = results.filter(r=>r.slot_min===5&&r.trades>0).sort((a,b)=>b.pnl-a.pnl);
+  if(!r5.length) return;
+  const best = r5[0];
 
-  Plotly.newPlot('heatmap-pnl', [{
-    z: pnlMatrix, x: windows.map(w => w + 'min'), y: thresholds.map(t => t + '%'),
-    type: 'heatmap', colorscale: [[0,'#2d0f0f'],[0.3,'#1a1d27'],[0.5,'#0a2f1a'],[1,'#00ff88']],
-    hovertemplate: 'Window: %{x}<br>Threshold: %{y}<br>PnL: $%{z:,.0f}<extra></extra>',
-    colorbar: { title: { text: 'PnL $', font: { size: 10 } }, tickfont: { size: 9 } },
-  }], { ...PLOTLY_LAYOUT, title: { text: 'Net PnL ($50/trade, 6 months)', font: { size: 11 } },
-    xaxis: { title: 'Momentum Window' }, yaxis: { title: 'Threshold (%)' } });
-
-  // KPIs from best config
-  const best = [...r5].sort((a,b) => b.pnl - a.pnl)[0];
-  document.getElementById('k-wr').textContent = best.win_rate + '%';
-  document.getElementById('k-trades').textContent = best.trades.toLocaleString();
-  document.getElementById('k-pnl').textContent = '$' + best.pnl.toLocaleString();
+  document.getElementById('k-wr').textContent = best.win_rate+'%';
+  document.getElementById('k-pnl').textContent = '$'+best.pnl.toLocaleString();
   document.getElementById('k-sharpe').textContent = best.sharpe.toFixed(1);
-  document.getElementById('k-dd').textContent = best.max_dd_pct + '%';
-  document.getElementById('k-freq').textContent = (best.trades / 208).toFixed(0);
+  document.getElementById('k-trades').textContent = best.trades.toLocaleString();
+  document.getElementById('k-dd').textContent = best.max_dd_pct+'%';
+  document.getElementById('k-daily').textContent = '$'+(best.avg_daily_pnl||0).toFixed(2);
 
-  // Top 10 table
-  const top = [...r5].sort((a,b) => b.pnl - a.pnl).slice(0, 10);
-  document.getElementById('top-table').innerHTML = top.map((r, i) => {
-    const wc = r.win_rate >= 90 ? 'g' : r.win_rate >= 85 ? 'y' : 'rd';
-    const pc = r.pnl > 0 ? 'g' : 'rd';
+  document.getElementById('top-table').innerHTML = r5.slice(0,10).map((r,i)=>{
+    const wc = r.win_rate>=95?'g':r.win_rate>=90?'y':'rd';
+    const pc = r.pnl>0?'g':'rd';
     return `<tr>
-      <td class="dim">${i+1}</td>
-      <td>${r.slot_min}m</td>
-      <td>${r.mom_win_min}m</td>
-      <td class="r">${r.threshold_pct}%</td>
-      <td class="r">${r.trades.toLocaleString()}</td>
-      <td class="r ${wc} b">${r.win_rate}%</td>
-      <td class="r ${pc} b">$${r.pnl.toLocaleString()}</td>
-      <td class="r">${r.sharpe}</td>
-      <td class="r">${r.max_dd_pct}%</td>
+      <td>${i+1}</td><td>${r.asset}</td><td>${r.slot_min}m</td><td>${r.mom_win_min}m</td>
+      <td class="r">${r.threshold_pct}%</td><td class="r">${r.trades.toLocaleString()}</td>
+      <td class="r ${wc} b">${r.win_rate}%</td><td class="r ${pc} b">$${r.pnl.toLocaleString()}</td>
+      <td class="r">${r.sharpe}</td><td class="r">$${(r.avg_daily_pnl||0).toFixed(2)}</td>
     </tr>`;
   }).join('');
+}
 
-  // Momentum vs Win Rate bar chart
-  const momData = thresholds.map(thr => {
-    const configs = r5.filter(r => r.threshold_pct === thr && r.trades > 0);
-    const avgWr = configs.reduce((s, r) => s + r.win_rate, 0) / configs.length;
-    const avgTrades = configs.reduce((s, r) => s + r.trades, 0) / configs.length;
-    return { thr, wr: avgWr, trades: avgTrades };
-  });
+function renderMonteCarlo(mc) {
+  if(mc.error) { document.getElementById('mc-chart').innerHTML=`<div class="loading">${mc.error}</div>`; return; }
 
-  Plotly.newPlot('mom-chart', [
-    {
-      x: momData.map(d => d.thr + '%'), y: momData.map(d => d.wr),
-      type: 'bar', name: 'Win Rate %',
-      marker: { color: momData.map(d => d.wr >= 90 ? '#22c55e' : d.wr >= 85 ? '#eab308' : '#ef4444') },
-      hovertemplate: 'Threshold: %{x}<br>Win Rate: %{y:.1f}%<br><extra></extra>',
-    },
-    {
-      x: momData.map(d => d.thr + '%'), y: momData.map(d => d.trades),
-      type: 'scatter', mode: 'lines+markers', name: 'Avg Trades',
-      yaxis: 'y2', line: { color: '#3b82f6', width: 2 },
-      marker: { size: 6 },
-    }
-  ], {
-    ...PLOTLY_LAYOUT,
-    title: { text: 'Higher Momentum = Higher Win Rate, Fewer Trades', font: { size: 11 } },
-    xaxis: { title: 'Momentum Threshold' },
-    yaxis: { title: 'Win Rate (%)', range: [75, 100] },
-    yaxis2: { title: 'Avg Trades', overlaying: 'y', side: 'right', showgrid: false },
-    legend: { x: 0.02, y: 0.98, font: { size: 9 } },
-    barmode: 'group',
+  const r = mc.results;
+  document.getElementById('mc-median').textContent = '$'+r.median_final;
+  document.getElementById('mc-prob').textContent = r.prob_profit+'%';
+  document.getElementById('mc-ruin').textContent = r.prob_ruin+'%';
+  document.getElementById('mc-p5').textContent = '$'+r.p5;
+  document.getElementById('mc-p95').textContent = '$'+r.p95;
+
+  // Plot sample equity curves
+  const traces = mc.sample_curves.map((curve,i)=>({
+    y:curve, mode:'lines', line:{width:1,color:curve[curve.length-1]>80?'#22c55e44':'#ef444444'},
+    showlegend:false, hoverinfo:'skip',
+  }));
+
+  // Add percentile bands
+  const init = mc.params.initial_capital;
+  traces.push({y:[init,init],x:[0,mc.params.trades],mode:'lines',line:{dash:'dash',color:'#9298a844',width:1},name:'Start $80'});
+  traces.push({y:[init*0.6,init*0.6],x:[0,mc.params.trades],mode:'lines',line:{dash:'dot',color:'#ef444444',width:1},name:'-40% Kill Switch'});
+
+  Plotly.newPlot('mc-chart',traces,{...PL,
+    title:{text:`${mc.params.simulations} Simulations, ${mc.params.trades} Trades (WR=${(mc.params.win_rate*100).toFixed(1)}%)`,font:{size:11}},
+    xaxis:{title:'Trade #'},yaxis:{title:'Capital ($)'},
+    legend:{x:0.01,y:0.98,font:{size:9}},
   });
 }
 
-loadData();
+function renderMonteCarloHist(mc) {
+  if(mc.error) return;
+  const dist = mc.distribution;
+  Plotly.newPlot('mc-hist',[{
+    x:dist, type:'histogram', nbinsx:50,
+    marker:{color:dist.map(d=>d>80?'#22c55e':'#ef4444')},
+    hovertemplate:'Final: $%{x:.0f}<br>Count: %{y}<extra></extra>',
+  }],{...PL,
+    title:{text:'Distribution of Final Capital After 200 Trades',font:{size:11}},
+    xaxis:{title:'Final Capital ($)'},yaxis:{title:'Frequency'},
+    shapes:[{type:'line',x0:80,x1:80,y0:0,y1:1,yref:'paper',line:{color:'#eab30866',dash:'dash',width:2}}],
+    annotations:[{x:80,y:0.95,yref:'paper',text:'Start $80',showarrow:false,font:{size:9,color:'#eab308'}}],
+  });
+}
+
+function renderHeatmap(results, asset) {
+  const r5 = results.filter(r=>r.slot_min===5&&r.asset===asset);
+  if(!r5.length){document.getElementById('heatmap-wr').innerHTML='<div class="loading">No data for '+asset+'</div>';return;}
+
+  const windows = [...new Set(r5.map(r=>r.mom_win_min))].sort((a,b)=>a-b);
+  const thresholds = [...new Set(r5.map(r=>r.threshold_pct))].sort((a,b)=>a-b);
+
+  const matrix = thresholds.map(thr=>
+    windows.map(w=>{const m=r5.find(r=>r.threshold_pct===thr&&r.mom_win_min===w);return m?m.win_rate:0;})
+  );
+
+  Plotly.newPlot('heatmap-wr',[{
+    z:matrix, x:windows.map(w=>w+'min'), y:thresholds.map(t=>t+'%'),
+    type:'heatmap', colorscale:[[0,'#1a1d27'],[0.5,'#eab308'],[0.8,'#22c55e'],[1,'#00ff88']],
+    zmin:85,zmax:100,
+    hovertemplate:'Window: %{x}<br>Threshold: %{y}<br>Win Rate: %{z:.1f}%<extra></extra>',
+    colorbar:{title:{text:'WR%',font:{size:10}},tickfont:{size:9}},
+  }],{...PL,
+    title:{text:asset+' 5m — Realistic Win Rate (calibrated)',font:{size:11}},
+    xaxis:{title:'Momentum Window'},yaxis:{title:'Threshold (%)'},
+  });
+}
+
+function switchAsset(asset) {
+  currentAsset = asset;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  event.target.classList.add('active');
+  renderHeatmap(allRealistic, asset);
+}
+
+function renderMarkout(data) {
+  const el = document.getElementById('markout-chart');
+  if(data.error || !data.count) {
+    el.innerHTML = `<div class="loading" style="padding-top:60px">
+      ${data.count===0?'No trades in Supabase yet':'Error: '+data.error}<br>
+      <span style="font-size:10px;color:var(--dim)">Mark-out data populates when the bot executes paper trades on Render.<br>
+      Each trade records Binance price at T+1s, T+5s, T+10s, T+30s, T+60s.<br>
+      Connect Supabase (SUPABASE_URL + SUPABASE_KEY) to enable.</span>
+    </div>`;
+    return;
+  }
+
+  const agg = data.aggregated;
+  const labels = Object.keys(agg).filter(k=>agg[k].count>0);
+  if(!labels.length){el.innerHTML='<div class="loading">No mark-out data available</div>';return;}
+
+  const means = labels.map(l=>agg[l].mean*100);
+  const posRates = labels.map(l=>agg[l].positive_rate);
+
+  Plotly.newPlot('markout-chart',[
+    {x:labels,y:means,type:'bar',name:'Mean Mark-out (%)',marker:{color:means.map(m=>m>0?'#22c55e':'#ef4444')}},
+    {x:labels,y:posRates,type:'scatter',mode:'lines+markers',name:'% Positive',yaxis:'y2',
+     line:{color:'#3b82f6',width:2},marker:{size:8}},
+  ],{...PL,
+    title:{text:`Signal Quality Decay — ${data.count} Trades from Supabase`,font:{size:11}},
+    xaxis:{title:'Time After Entry'},
+    yaxis:{title:'Mean Mark-out (%)'},
+    yaxis2:{title:'% Positive',overlaying:'y',side:'right',range:[0,100],showgrid:false},
+    legend:{x:0.01,y:0.98,font:{size:9}},
+  });
+}
+
+init();
 </script>
 </body>
 </html>

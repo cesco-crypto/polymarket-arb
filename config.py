@@ -108,8 +108,8 @@ class Settings(BaseSettings):
     )
     # Polymarket: maximale Taker-Gebühr (bei p=0.50)
     polymarket_max_fee_pct: float = Field(
-        default=3.15,
-        description="Max Polymarket-Taker-Gebühr bei p=0.50 (seit Gebühren-Update für Kurzzeit-Kryptomärkte)",
+        default=1.80,
+        description="Max Polymarket-Taker-Gebühr bei p=0.50 (ab 30. März 2026: Crypto 5m/15m = 1.80% Peak)",
     )
     # Fractional Kelly: Anteil des Kelly-Kriteriums (konservativ)
     kelly_fraction: float = Field(
@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     polymarket_funder: str = Field(default="", description="Funder Address (deine Wallet-Adresse)")
     live_trading: bool = Field(default=False, description="True = echte Orders, False = Paper Only")
     max_live_position_usd: float = Field(default=5.0, description="Max $5 pro Trade für $100 Account")
-    order_type: str = Field(default="taker", description="taker = Market Order (3.15% Fee, Validierungsphase) | maker = Limit Order (Rebate)")
+    order_type: str = Field(default="taker", description="taker = Market Order (1.80% Fee, ab 30.03.2026) | maker = Limit Order (Rebate)")
 
     model_config = {"env_prefix": "", "env_file": ".env", "extra": "ignore"}
 

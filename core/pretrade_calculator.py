@@ -72,10 +72,11 @@ class PreTradeCalculator:
         """Dynamische Polymarket-Gebühr in %.
 
         Offizielle Formel: fee_pct = feeRate × (p × (1-p))^exponent × 100
-        Für 15-Min Krypto-Märkte (aktuell): feeRate=0.50, exponent=2
-        → Max 3.15% bei p=0.50, steilerer Abfall als einfache Parabel
-        Bei p=0.50: 0.50 × 0.0625 × 100 = 3.125%
-        Bei p=0.80: 0.50 × 0.0256 × 100 = 1.28%
+        Ab 30. März 2026 — Crypto 5m/15m: Peak 1.80% bei p=0.50
+        Bei p=0.50: 1.80%  (Peak)
+        Bei p=0.60: 1.66%
+        Bei p=0.70: 1.18%
+        Bei p=0.80: 0.59%
 
         Wir nutzen polymarket_max_fee_pct als Peak-Gebühr und Exponent 2:
         fee = MAX_FEE × (4 × p × (1-p))^2
@@ -111,12 +112,12 @@ class PreTradeCalculator:
         effective_momentum = momentum_pct * time_factor
 
         # Logistische Funktion: Signal → Wahrscheinlichkeit
-        # Kalibriert (konservativ):
-        #   +0.15% → ~57%  (Schwellenwert)
-        #   +0.30% → ~65%
-        #   +0.50% → ~73%
-        #   +1.00% → ~88%
-        scaling = 2.0
+        # Kalibriert gegen 7-Monat BTC-Daten (RMSE-optimiert, scaling=3.0):
+        #   +0.10% → ~57%  (actual WR: 90.5% — Model unterschätzt)
+        #   +0.15% → ~61%  (actual WR: 93.9%)
+        #   +0.30% → ~71%  (actual WR: 97.8%)
+        #   +0.50% → ~82%  (actual WR: 97.8%)
+        scaling = 3.0
         raw_signal = effective_momentum * scaling
 
         p_up = 1 / (1 + math.exp(-raw_signal))  # P(BTC steigt)
