@@ -247,6 +247,13 @@ async def quant_lab() -> HTMLResponse:
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
+@app.get("/masterplan", response_class=HTMLResponse)
+async def masterplan() -> HTMLResponse:
+    """Masterplan — 10-Phase Roadmap to Profitable Live Bot."""
+    html_path = Path(__file__).parent / "masterplan.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
 @app.get("/api/backtest/realistic")
 async def api_backtest_realistic() -> dict:
     """Realistische Backtest-Ergebnisse (kalibriert mit echten Polymarket-Daten)."""

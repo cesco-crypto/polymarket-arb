@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MASTERPLAN — Polymarket Latency Arb</title>
+<style>
+  :root{--bg:#0a0c10;--bg2:#13151c;--bg3:#181b24;--bg4:#1e2230;--border:#252938;--text:#e1e4eb;--dim:#6b7080;--mid:#9298a8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--orange:#f97316;--purple:#a855f7;--font:'SF Mono','JetBrains Mono','Cascadia Code',monospace}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:12px;min-height:100vh}
+
+  .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--bg2);border-bottom:1px solid var(--border)}
+  .logo{font-size:15px;font-weight:700;letter-spacing:2px;color:var(--accent)}
+  .hdr-right{display:flex;gap:16px;align-items:center}
+  .hdr a{color:var(--dim);text-decoration:none;font-size:11px}.hdr a:hover{color:var(--text)}
+
+  .progress-bar-outer{width:100%;height:6px;background:var(--bg3);border-bottom:1px solid var(--border)}
+  .progress-bar-inner{height:100%;background:linear-gradient(90deg,var(--green),var(--accent));transition:width 0.5s ease}
+
+  .summary{display:flex;gap:16px;padding:16px 24px;background:var(--bg2);border-bottom:1px solid var(--border);flex-wrap:wrap}
+  .stat{background:var(--bg3);padding:10px 18px;border-radius:8px;min-width:130px}
+  .stat-val{font-size:22px;font-weight:700}.stat-lbl{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-top:2px}
+
+  .phases{padding:24px;max-width:1200px;margin:0 auto}
+
+  .phase{background:var(--bg2);border:1px solid var(--border);border-radius:12px;margin-bottom:16px;overflow:hidden;transition:all 0.3s}
+  .phase.active{border-color:var(--accent);box-shadow:0 0 20px rgba(59,130,246,0.1)}
+  .phase.done{border-color:var(--green);opacity:0.85}
+  .phase.done .phase-header{background:linear-gradient(90deg,#22c55e11,transparent)}
+
+  .phase-header{display:flex;align-items:center;gap:16px;padding:16px 20px;cursor:pointer;user-select:none}
+  .phase-header:hover{background:var(--bg3)}
+
+  .phase-num{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:800;flex-shrink:0}
+  .phase-num.pending{background:var(--bg4);color:var(--dim)}
+  .phase-num.active{background:var(--accent);color:#fff;animation:pulse 2s infinite}
+  .phase-num.done{background:var(--green);color:#fff}
+
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(59,130,246,0.4)}50%{box-shadow:0 0 12px 4px rgba(59,130,246,0.2)}}
+
+  .phase-info{flex:1}
+  .phase-title{font-size:13px;font-weight:700;letter-spacing:0.5px}
+  .phase-subtitle{font-size:10px;color:var(--dim);margin-top:2px}
+
+  .phase-status{font-size:10px;font-weight:700;padding:4px 12px;border-radius:4px}
+  .phase-status.pending{background:var(--bg4);color:var(--dim)}
+  .phase-status.active{background:var(--accent);color:#fff}
+  .phase-status.done{background:var(--green);color:#fff}
+
+  .phase-body{display:none;padding:0 20px 20px 76px;font-size:11px;line-height:1.7}
+  .phase.open .phase-body{display:block}
+
+  .task-list{list-style:none;margin:12px 0}
+  .task{display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)}
+  .task:last-child{border:none}
+  .task-check{width:18px;height:18px;border-radius:4px;border:2px solid var(--border);cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:1px;transition:all 0.2s}
+  .task-check:hover{border-color:var(--accent)}
+  .task-check.checked{background:var(--green);border-color:var(--green)}
+  .task-check.checked::after{content:'\\2713';color:#fff;font-size:11px;font-weight:700}
+  .task.completed .task-text{text-decoration:line-through;color:var(--dim)}
+
+  .task-text{flex:1}
+  .task-owner{font-size:9px;padding:2px 6px;border-radius:3px;font-weight:600;flex-shrink:0}
+  .owner-du{background:#f9731622;color:var(--orange)}
+  .owner-claude{background:#a855f722;color:var(--purple)}
+  .owner-both{background:#3b82f622;color:var(--accent)}
+
+  .tag{display:inline-block;font-size:9px;padding:2px 8px;border-radius:3px;font-weight:600;margin-right:4px}
+  .tag-deliverable{background:#22c55e22;color:var(--green)}
+  .tag-backcheck{background:#eab30822;color:var(--yellow)}
+  .tag-condition{background:#ef444422;color:var(--red)}
+  .tag-timeline{background:#3b82f622;color:var(--accent)}
+
+  .note{background:var(--bg3);border-left:3px solid var(--accent);padding:8px 12px;margin:8px 0;border-radius:0 6px 6px 0;font-size:10px;color:var(--mid)}
+  .note.warn{border-left-color:var(--yellow)}
+  .note.critical{border-left-color:var(--red)}
+
+  .footer{text-align:center;padding:24px;color:var(--dim);font-size:10px;border-top:1px solid var(--border);margin-top:24px}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div style="display:flex;align-items:center;gap:14px">
+    <span class="logo">MASTERPLAN</span>
+    <span style="color:var(--dim);font-size:11px">Polymarket Latency Arb → Profitabler Live-Bot</span>
+  </div>
+  <div class="hdr-right">
+    <a href="/">Dashboard</a>
+    <a href="/quant-lab">Quant Lab</a>
+    <a href="/wallet">Wallet</a>
+    <span style="color:var(--dim);font-size:10px" id="clock"></span>
+  </div>
+</div>
+
+<div class="progress-bar-outer"><div class="progress-bar-inner" id="progress" style="width:0%"></div></div>
+
+<div class="summary">
+  <div class="stat"><div class="stat-val" id="s-completed" style="color:var(--green)">0/10</div><div class="stat-lbl">Phases Done</div></div>
+  <div class="stat"><div class="stat-val" id="s-tasks" style="color:var(--accent)">0/0</div><div class="stat-lbl">Tasks Done</div></div>
+  <div class="stat"><div class="stat-val" id="s-progress" style="color:var(--yellow)">0%</div><div class="stat-lbl">Overall</div></div>
+  <div class="stat"><div class="stat-val" id="s-current" style="color:var(--accent)">--</div><div class="stat-lbl">Current Phase</div></div>
+  <div class="stat"><div class="stat-val" id="s-target" style="color:var(--green)">$79.99</div><div class="stat-lbl">Capital</div></div>
+  <div class="stat"><div class="stat-val" id="s-infra" style="color:var(--orange)">Render</div><div class="stat-lbl">Infrastructure</div></div>
+</div>
+
+<div class="phases" id="phases-container"></div>
+
+<div class="footer">
+  Proof-of-Claude-Alpha — 10% of net profits donated to charity<br>
+  Built with Claude Opus 4.6 | Polymarket Latency Arbitrage Bot
+</div>
+
+<script>
+const PHASES = [
+  {
+    id: 1, title: "INFRASTRUKTUR", subtitle: "QuantVPS Dublin Pro — 0.83ms zu Polymarket CLOB",
+    status: "pending", timeline: "1-2 Tage",
+    tasks: [
+      {text: "QuantVPS Dublin Pro bestellen ($100/mo, 8 Cores, 16GB RAM)", owner: "du", done: false},
+      {text: "SSH Zugang testen + OS Setup (Ubuntu 22.04)", owner: "du", done: false},
+      {text: "Docker + Python 3.11 installieren", owner: "claude", done: false},
+      {text: "Bot-Code auf VPS deployen (git clone + Docker)", owner: "claude", done: false},
+      {text: "Env Vars setzen (Supabase, Telegram, Polymarket Keys)", owner: "both", done: false},
+      {text: "Geoblock-Check: curl https://polymarket.com/api/geoblock", owner: "claude", done: false},
+    ],
+    deliverable: "Bot laeuft auf Dublin, GET /api/geoblock zeigt blocked: false",
+    backcheck: "Latenz messen: ping clob.polymarket.com < 1ms?",
+  },
+  {
+    id: 2, title: "GEOBLOCK VERIFY + LIVE TRADING", subtitle: "Erster erfolgreicher Order auf Polymarket",
+    status: "pending", timeline: "1 Tag",
+    tasks: [
+      {text: "Paper Trading auf Dublin starten (24h Testlauf)", owner: "claude", done: false},
+      {text: "Vergleich: Dublin Paper Trades vs Render Paper Trades", owner: "claude", done: false},
+      {text: "Live Trading Flag aktivieren (LIVE_TRADING=true)", owner: "both", done: false},
+      {text: "Test-Order: $1 BTC UP auf Polymarket (echter Trade!)", owner: "both", done: false},
+      {text: "Verify: Order erscheint auf Polygonscan + Polymarket", owner: "both", done: false},
+    ],
+    deliverable: "Erster ERFOLGREICHER Live Order auf Polymarket von Dublin",
+    backcheck: "Parallel Paper-Trade auf Render zum Vergleich laufen lassen",
+  },
+  {
+    id: 3, title: "DATEN-PIPELINE", subtitle: "pmxt Archive, Data API, Dune, Collector — 50K+ Trades",
+    status: "pending", timeline: "1-2 Wochen (parallel)",
+    tasks: [
+      {text: "pmxt Archive pruefen (https://archive.pmxt.dev) — BTC/ETH Orderbooks", owner: "claude", done: false},
+      {text: "Polymarket Data API: bessere Pagination fuer historische Trades", owner: "claude", done: false},
+      {text: "Dune Analytics: On-Chain Trade-Daten abfragen (Competitor Intelligence)", owner: "claude", done: false},
+      {text: "Eigenen Orderbook-Collector auf Dublin VPS (alle 5s Snapshot → Supabase)", owner: "claude", done: false},
+      {text: "Ziel: 50K+ Trade-Preise + 10K+ Orderbook-Snapshots gesammelt", owner: "claude", done: false},
+    ],
+    deliverable: "10K+ echte Polymarket L2 Orderbook-Snapshots + Trade-Preise",
+    backcheck: "Opportunity Rate (15.1%) gegen groesseres Dataset validieren",
+  },
+  {
+    id: 4, title: "BACKTEST v3 MIT ECHTEN L2-DATEN", subtitle: "Beweisbarer Backtest statt Schaetzungen",
+    status: "pending", timeline: "2-3 Tage",
+    tasks: [
+      {text: "Backtest Engine v3: echte Orderbook-Preise als Entry statt 0.50", owner: "claude", done: false},
+      {text: "Replay historischer Orderbooks gegen Binance-Momentum-Signale", owner: "claude", done: false},
+      {text: "Konfidenzintervalle berechnen (nicht nur Punktschaetzungen)", owner: "claude", done: false},
+      {text: "Ergebnis: 'Bei X Trades ueber Y Tage → Z% Profit (95% CI)'", owner: "claude", done: false},
+    ],
+    deliverable: "Backtest mit Konfidenzintervall basierend auf echten L2-Daten",
+    backcheck: "Vergleich Backtest-Prediction vs tatsaechliche Paper-Trade-Performance",
+  },
+  {
+    id: 5, title: "QUANT LAB LIVE", subtitle: "Echte Daten aus Supabase — Mark-out, Monte Carlo, Equity Curve",
+    status: "pending", timeline: "1 Woche sammeln",
+    tasks: [
+      {text: "200+ Paper Trades auf Dublin gesammelt", owner: "both", done: false},
+      {text: "Mark-out Analyse: Signal-Qualitaet ueber T+1s bis T+60s", owner: "claude", done: false},
+      {text: "Monte Carlo: 1000 Simulationen mit echten Trade-Statistiken", owner: "claude", done: false},
+      {text: "Equity Curve mit Confidence Bands", owner: "claude", done: false},
+      {text: "Dashboard zeigt: echte Win Rate, PnL, Sharpe", owner: "claude", done: false},
+    ],
+    deliverable: "Quant Lab Dashboard mit Live-Daten aus Supabase",
+    backcheck: "Stimmen Live-Resultate mit kalibriertem Backtest ueberein?",
+  },
+  {
+    id: 6, title: "PROBABILITY MODEL KALIBRIEREN", subtitle: "Logistic Scaling validieren gegen echte Trades",
+    status: "pending", timeline: "1-2 Tage",
+    tasks: [
+      {text: "Echte Win Rate pro Momentum-Bucket aus Live-Daten messen", owner: "claude", done: false},
+      {text: "Optimalen Scaling-Faktor berechnen (aktuell 3.0)", owner: "claude", done: false},
+      {text: "Out-of-Sample Validation: Train Woche 1, Test Woche 2", owner: "claude", done: false},
+      {text: "Confidence Bands fuer p_true Schaetzung", owner: "claude", done: false},
+    ],
+    deliverable: "Optimaler Scaling-Faktor + Confidence Bands aus >200 Trades",
+    backcheck: "Out-of-Sample Win Rate innerhalb des Konfidenzintervalls?",
+  },
+  {
+    id: 7, title: "GO-LIVE MIT ECHTEM GELD", subtitle: "$79.99 USDC.e, $5 max/Trade, Kill-Switches aktiv",
+    status: "pending", timeline: "GO/NO-GO Entscheidung",
+    tasks: [
+      {text: "GO/NO-GO Check: Win Rate >65% ueber >100 Paper Trades?", owner: "both", done: false},
+      {text: "Kill-Switches verifiziert: -20% daily, -40% total", owner: "claude", done: false},
+      {text: "Live Trading aktivieren: LIVE_TRADING=true, max $5/Trade", owner: "both", done: false},
+      {text: "Erste 10 echte Trades beobachten", owner: "both", done: false},
+      {text: "PnL positiv nach ersten 10 Trades?", owner: "both", done: false},
+    ],
+    deliverable: "Erste echte profitable Trades auf Polymarket",
+    backcheck: "Vergleich Live-PnL vs Paper-PnL ueber selben Zeitraum",
+    condition: "NUR wenn Phase 5 zeigt >65% Win Rate ueber >100 Paper Trades",
+  },
+  {
+    id: 8, title: "MONITORING — ERSTE 48h LIVE", subtitle: "24/7 Ueberwachung, Telegram Alerts, Kill-Switch Validation",
+    status: "pending", timeline: "48 Stunden",
+    tasks: [
+      {text: "Telegram Alerts fuer jeden Trade (Entry + Exit)", owner: "claude", done: false},
+      {text: "Supabase: alle Trades mit 50+ Feldern gespeichert", owner: "claude", done: false},
+      {text: "Latenz-Metriken: Transit Time <2ms von Dublin?", owner: "claude", done: false},
+      {text: "Fill Rate messen: >80% der Orders gefuellt?", owner: "claude", done: false},
+      {text: "48h ohne Kill-Switch Trigger", owner: "both", done: false},
+    ],
+    deliverable: "48h stabile Live-Performance, positive PnL, alle Daten in Supabase",
+    backcheck: "Latenz-Metriken von Dublin: Transit, Fill Rate, Slippage",
+  },
+  {
+    id: 9, title: "SKALIERUNG", subtitle: "Kapital: $80 → $200 → $500 → $1000+",
+    status: "pending", timeline: "Laufend",
+    tasks: [
+      {text: "200+ Live-Trades mit positiver PnL", owner: "both", done: false},
+      {text: "Sharpe > 2.0 bestaetigt", owner: "claude", done: false},
+      {text: "Monte Carlo: P(Ruin) < 5% bei naechster Stufe", owner: "claude", done: false},
+      {text: "Kapital auf $200 erhoehen", owner: "du", done: false},
+      {text: "Kapital auf $500 erhoehen (nach 500+ Trades)", owner: "du", done: false},
+      {text: "Kapital auf $1000+ (nach 1000+ Trades)", owner: "du", done: false},
+    ],
+    deliverable: "Skalierungsplan mit Kelly-optimierten Position Sizes",
+    backcheck: "Monte Carlo mit echten Live-Daten: P(Ruin) < 5%?",
+    condition: "Sharpe > 2.0, Win Rate > 60%, Max DD < 15%",
+  },
+  {
+    id: 10, title: "RUST EXECUTOR", subtitle: "Sub-0.1ms Order Placement — Python Strategy + Rust Execution",
+    status: "pending", timeline: "2-4 Wochen (Langfrist)",
+    tasks: [
+      {text: "polyfill-rs evaluieren (https://github.com/floor-licker/polyfill-rs)", owner: "claude", done: false},
+      {text: "Rust Executor: HMAC Signing + CLOB Order in <0.1ms", owner: "claude", done: false},
+      {text: "Python → Rust Bridge (FFI oder Unix Socket)", owner: "claude", done: false},
+      {text: "A/B Test: Python vs Rust Executor auf gleichen Signalen", owner: "claude", done: false},
+    ],
+    deliverable: "Hybrid: Python Strategy + Rust Executor",
+    backcheck: "A/B Test zeigt messbaren Latenz-Vorteil?",
+  },
+];
+
+// State: load from localStorage
+const STATE_KEY = 'masterplan_state';
+function loadState() {
+  try { return JSON.parse(localStorage.getItem(STATE_KEY)) || {}; } catch { return {}; }
+}
+function saveState(state) {
+  localStorage.setItem(STATE_KEY, JSON.stringify(state));
+}
+
+let state = loadState();
+
+function render() {
+  const container = document.getElementById('phases-container');
+  container.innerHTML = '';
+
+  let totalTasks = 0, doneTasks = 0, donePhases = 0, currentPhase = '--';
+
+  PHASES.forEach(phase => {
+    const phaseState = state[phase.id] || {};
+    const tasks = phase.tasks.map((t, i) => ({...t, done: phaseState[`task_${i}`] || false}));
+    const phaseDone = tasks.every(t => t.done);
+    const phaseActive = !phaseDone && (phase.id === 1 || state[phase.id - 1] && PHASES[phase.id-2].tasks.every((t,i) => state[phase.id-1][`task_${i}`]));
+
+    totalTasks += tasks.length;
+    doneTasks += tasks.filter(t => t.done).length;
+    if (phaseDone) donePhases++;
+    if (phaseActive && currentPhase === '--') currentPhase = `Phase ${phase.id}`;
+
+    const status = phaseDone ? 'done' : phaseActive ? 'active' : 'pending';
+    const isOpen = phaseState.open !== undefined ? phaseState.open : (phaseActive || false);
+
+    const el = document.createElement('div');
+    el.className = `phase ${status} ${isOpen ? 'open' : ''}`;
+    el.innerHTML = `
+      <div class="phase-header" onclick="togglePhase(${phase.id})">
+        <div class="phase-num ${status}">${phaseDone ? '\\u2713' : phase.id}</div>
+        <div class="phase-info">
+          <div class="phase-title">PHASE ${phase.id}: ${phase.title}</div>
+          <div class="phase-subtitle">${phase.subtitle}</div>
+        </div>
+        <span class="tag tag-timeline">${phase.timeline}</span>
+        <span class="phase-status ${status}">${phaseDone ? 'DONE' : phaseActive ? 'ACTIVE' : 'PENDING'}</span>
+      </div>
+      <div class="phase-body">
+        <ul class="task-list">
+          ${tasks.map((t, i) => `
+            <li class="task ${t.done ? 'completed' : ''}">
+              <div class="task-check ${t.done ? 'checked' : ''}" onclick="event.stopPropagation();toggleTask(${phase.id},${i})"></div>
+              <span class="task-text">${t.text}</span>
+              <span class="task-owner owner-${t.owner}">${t.owner === 'du' ? 'DU' : t.owner === 'claude' ? 'CLAUDE' : 'BEIDE'}</span>
+            </li>
+          `).join('')}
+        </ul>
+        <div style="margin-top:12px">
+          <span class="tag tag-deliverable">DELIVERABLE</span> ${phase.deliverable}
+        </div>
+        ${phase.backcheck ? `<div style="margin-top:6px"><span class="tag tag-backcheck">BACKCHECK</span> ${phase.backcheck}</div>` : ''}
+        ${phase.condition ? `<div class="note critical" style="margin-top:8px"><strong>BEDINGUNG:</strong> ${phase.condition}</div>` : ''}
+      </div>
+    `;
+    container.appendChild(el);
+  });
+
+  // Summary
+  const pct = totalTasks > 0 ? Math.round(doneTasks / totalTasks * 100) : 0;
+  document.getElementById('s-completed').textContent = `${donePhases}/10`;
+  document.getElementById('s-tasks').textContent = `${doneTasks}/${totalTasks}`;
+  document.getElementById('s-progress').textContent = `${pct}%`;
+  document.getElementById('s-current').textContent = currentPhase;
+  document.getElementById('progress').style.width = `${pct}%`;
+
+  // Update infra based on phase 1 completion
+  if (state[1] && PHASES[0].tasks.every((t,i) => state[1][`task_${i}`])) {
+    document.getElementById('s-infra').textContent = 'Dublin';
+    document.getElementById('s-infra').style.color = 'var(--green)';
+  }
+}
+
+function togglePhase(id) {
+  if (!state[id]) state[id] = {};
+  state[id].open = !state[id].open;
+  saveState(state);
+  render();
+}
+
+function toggleTask(phaseId, taskIdx) {
+  if (!state[phaseId]) state[phaseId] = {};
+  const key = `task_${taskIdx}`;
+  state[phaseId][key] = !state[phaseId][key];
+  saveState(state);
+  render();
+}
+
+// Clock
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleTimeString('de-CH');
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+render();
+</script>
+</body>
+</html>
