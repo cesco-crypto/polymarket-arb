@@ -106,6 +106,97 @@
 
 <div class="phases" id="phases-container"></div>
 
+<div class="intel" style="max-width:1200px;margin:0 auto;padding:0 24px 24px">
+  <div class="phase" style="border-color:var(--yellow)">
+    <div class="phase-header" onclick="document.getElementById('intel-body').style.display=document.getElementById('intel-body').style.display==='none'?'block':'none'">
+      <div class="phase-num" style="background:var(--yellow);color:#000">!</div>
+      <div class="phase-info">
+        <div class="phase-title" style="color:var(--yellow)">STRATEGY INTELLIGENCE — Marktanalyse April 2026</div>
+        <div class="phase-subtitle">Unbequeme Wahrheiten + Strategische Pivots fuer maximale Profitabilitaet</div>
+      </div>
+      <span class="tag tag-backcheck">KRITISCH</span>
+    </div>
+    <div id="intel-body" style="padding:0 20px 20px 76px;font-size:11px;line-height:1.8">
+
+      <div style="background:var(--bg3);border-left:3px solid var(--red);padding:12px 16px;border-radius:0 8px 8px 0;margin:12px 0">
+        <div style="font-size:12px;font-weight:700;color:var(--red);margin-bottom:8px">DIE UNBEQUEME WAHRHEIT</div>
+        <div style="margin-bottom:8px">
+          <span style="color:var(--dim)">Medium, Feb 2026:</span><br>
+          <i>"Der Bot der $515K in einem Monat mit 99% Win Rate machte, indem er den Price-Feed-Lag zwischen Binance und Polymarket ausnutzte? <b style="color:var(--red)">Diese Strategie ist tot.</b>"</i>
+        </div>
+        <div style="margin-bottom:8px">
+          <span style="color:var(--dim)">QuantVPS Research:</span><br>
+          <i>"73% der Arbitrage-Profits werden von Sub-100ms Bots gefangen. Arbitrage-Fenster: <b style="color:var(--red)">nur noch 2.7 Sekunden</b> (2024: 12.3s)."</i>
+        </div>
+        <div>
+          <span style="color:var(--dim)">Finance Magnates:</span><br>
+          <i>"Polymarket hat dynamische Taker-Fees eingefuehrt (<b style="color:var(--red)">1.80% Peak bei 0.50</b>) um Latency Arbitrage zu toeten."</i>
+        </div>
+      </div>
+
+      <div style="font-size:12px;font-weight:700;color:var(--yellow);margin:20px 0 10px">STRATEGIE-VERGLEICH 2026 — Was wirklich profitabel ist</div>
+      <table style="width:100%">
+        <tr><th style="text-align:left">Strategie</th><th>Profitabilitaet</th><th>Unsere Position</th><th>Aufwand</th></tr>
+        <tr>
+          <td><span style="color:var(--red)">Pure Latency Arb</span> (alt)</td>
+          <td style="text-align:center"><span class="badge badge-r">STIRBT</span></td>
+          <td style="color:var(--dim)">Aktuell implementiert</td>
+          <td style="color:var(--dim)">Erledigt</td>
+        </tr>
+        <tr>
+          <td><span style="color:var(--yellow)">Last-30s Momentum</span></td>
+          <td style="text-align:center"><span class="badge badge-y">55-60% WR, 20-50% ROI/yr</span></td>
+          <td style="color:var(--green)">Nah an unserer Strategie — kleiner Pivot</td>
+          <td><span class="badge badge-g">1-2 Tage</span></td>
+        </tr>
+        <tr>
+          <td><span style="color:var(--green)">Market Making</span></td>
+          <td style="text-align:center"><span class="badge badge-g">Spread verdienen</span></td>
+          <td style="color:var(--dim)">Braucht mehr Kapital ($1K+)</td>
+          <td><span class="badge badge-y">1-2 Wochen</span></td>
+        </tr>
+        <tr>
+          <td><span style="color:var(--green)">AI Correlation Arb</span></td>
+          <td style="text-align:center"><span class="badge badge-g">8-15%/Monat</span></td>
+          <td style="color:var(--dim)">Braucht Multi-Asset Modelle</td>
+          <td><span class="badge badge-y">2-4 Wochen</span></td>
+        </tr>
+        <tr>
+          <td><span style="color:var(--accent)">News/Event Trading</span></td>
+          <td style="text-align:center"><span class="badge badge-b">HOECHSTE PROFITE</span></td>
+          <td style="color:var(--dim)">Braucht NLP/AI Pipeline</td>
+          <td><span class="badge badge-r">4+ Wochen</span></td>
+        </tr>
+      </table>
+
+      <div style="font-size:12px;font-weight:700;color:var(--green);margin:20px 0 10px">STRATEGISCHER AKTIONSPLAN</div>
+      <div style="background:var(--bg3);border-left:3px solid var(--green);padding:12px 16px;border-radius:0 8px 8px 0;margin:8px 0">
+        <div style="margin-bottom:6px"><span style="color:var(--green);font-weight:700">1. JETZT:</span> Weiter Paper Traden auf Dublin — echte Win Rate + Fill Rate messen</div>
+        <div style="margin-bottom:6px"><span style="color:var(--yellow);font-weight:700">2. PIVOT:</span> Von "reiner Latency Arb" zu "Last-30s Momentum" — Entry nur in letzten 30-60s vor Ablauf, wenn Edge am groessten</div>
+        <div style="margin-bottom:6px"><span style="color:var(--yellow);font-weight:700">3. MULTI-ORACLE:</span> Coinbase als zweites Oracle — Signal nur wenn BEIDE Exchanges gleiche Richtung (weniger Fake-Outs)</div>
+        <div style="margin-bottom:6px"><span style="color:var(--yellow);font-weight:700">4. AI MODEL:</span> Trainiertes Probability Model statt einfacher Logistik-Funktion — lernt aus historischen Trades</div>
+        <div><span style="color:var(--accent);font-weight:700">5. LANGFRIST:</span> Market Making + AI Correlation Arb als zweite/dritte Strategie</div>
+      </div>
+
+      <div style="font-size:12px;font-weight:700;color:var(--accent);margin:20px 0 10px">UNSERE INFRASTRUKTUR-BEWERTUNG</div>
+      <div style="background:var(--bg3);border-left:3px solid var(--accent);padding:12px 16px;border-radius:0 8px 8px 0;margin:8px 0">
+        <div style="margin-bottom:4px"><b>Latenz:</b> 1.26ms zu CLOB — <span style="color:var(--green)">Top 5% aller Polymarket Bots</span></div>
+        <div style="margin-bottom:4px"><b>Benchmark:</b> Sub-100ms = kompetitiv, Sub-1ms = HFT-Profi, 0.52ms = Maximum (QuantVPS)</div>
+        <div style="margin-bottom:4px"><b>Unser Delta:</b> 1.26ms vs 0.52ms = 0.74ms Differenz = <span style="color:var(--green)">0.03% bei 2.7s Fenster — IRRELEVANT</span></div>
+        <div><b>Fazit:</b> Latenz ist NICHT unser Engpass. <span style="color:var(--yellow)">Strategie-Intelligenz ist der Differenziator.</span></div>
+      </div>
+
+      <div style="font-size:9px;color:var(--dim);margin-top:16px">
+        <div style="margin-bottom:4px"><b>Quellen:</b></div>
+        <div>• <a href="https://medium.com/@benjamin.bigdev/unlocking-edges-in-polymarkets-5-minute-crypto-markets-last-second-dynamics-bot-strategies-and-db8efcb5c196" style="color:var(--dim)">Unlocking Edges in 5-Min Crypto Markets (Medium, Feb 2026)</a></div>
+        <div>• <a href="https://www.quantvps.com/blog/how-latency-impacts-polymarket-trading-performance" style="color:var(--dim)">How Latency Impacts Polymarket Bot Performance (QuantVPS)</a></div>
+        <div>• <a href="https://medium.com/illumination/beyond-simple-arbitrage-4-polymarket-strategies-bots-actually-profit-from-in-2026-ddacc92c5b4f" style="color:var(--dim)">4 Strategies Bots Actually Profit From in 2026 (Medium)</a></div>
+        <div>• <a href="https://www.financemagnates.com/cryptocurrency/polymarket-introduces-dynamic-fees-to-curb-latency-arbitrage-in-short-term-crypto-markets/" style="color:var(--dim)">Polymarket Dynamic Fees to Curb Latency Arbitrage (Finance Magnates)</a></div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="footer">
   Proof-of-Claude-Alpha — 10% of net profits donated to charity<br>
   Built with Claude Opus 4.6 | Polymarket Latency Arbitrage Bot
