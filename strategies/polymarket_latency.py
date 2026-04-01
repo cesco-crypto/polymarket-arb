@@ -426,35 +426,45 @@ class PolymarketLatencyStrategy:
                 live_size = min(result.position_usd, self.settings.max_live_position_usd)
 
                 async def _execute_live_order(tid, ap, sz, a, d, trade_id):
+                    t0 = time.time()
                     try:
                         res = await self.executor.place_order(
                             token_id=tid, side="BUY", price=ap,
                             size_usd=sz, asset=a, direction=d,
                         )
+                        latency = (time.time() - t0) * 1000
                         if not res.success:
                             logger.error(f"LIVE ORDER FAILED: {a} {d} — {res.error}")
-                            # Persistiere den Fehler in Supabase für Forensik
+                            await telegram.alert_live_order(
+                                trade_id, a, d, success=False,
+                                price=ap, size=sz, error=str(res.error)[:120],
+                            )
                             from core import db
                             await db.insert_trade({
-                                "event": "live_error",
-                                "trade_id": trade_id,
+                                "event": "live_error", "trade_id": trade_id,
                                 "asset": a, "direction": d,
                                 "live_order_success": False,
                                 "live_error": str(res.error)[:200],
-                                "executed_price": ap,
-                                "size_usd": sz,
+                                "executed_price": ap, "size_usd": sz,
                             })
                         else:
-                            logger.info(f"LIVE ORDER OK: {a} {d} — ID={res.order_id}")
+                            logger.info(f"LIVE ORDER OK: {a} {d} — ID={res.order_id} ({latency:.0f}ms)")
+                            await telegram.alert_live_order(
+                                trade_id, a, d, success=True,
+                                price=ap, size=sz, order_id=str(res.order_id),
+                                latency_ms=latency,
+                            )
                     except Exception as e:
                         logger.error(f"LIVE ORDER EXCEPTION: {a} {d} — {e}")
+                        await telegram.alert_live_order(
+                            trade_id, a, d, success=False,
+                            price=ap, size=sz, error=str(e)[:120],
+                        )
                         from core import db
                         await db.insert_trade({
-                            "event": "live_error",
-                            "trade_id": trade_id,
+                            "event": "live_error", "trade_id": trade_id,
                             "asset": a, "direction": d,
-                            "live_order_success": False,
-                            "live_error": str(e)[:200],
+                            "live_order_success": False, "live_error": str(e)[:200],
                         })
 
                 asyncio.create_task(_execute_live_order(
@@ -462,10 +472,14 @@ class PolymarketLatencyStrategy:
                     pos.trade_id if pos else "unknown",
                 ))
 
-            # Telegram Alert
+            # Telegram Alert (erweitert mit allen Metriken)
+            transit = self.oracle.status().get(f"{asset}/USDT", {}).get("transit_p50_ms", 0)
             asyncio.create_task(telegram.alert_signal(
                 asset, direction, momentum_pct,
                 ask_price, result.net_ev_pct, result.position_usd, window.question,
+                p_true=result.p_true, fee_pct=result.fee_pct, kelly=result.kelly_fraction,
+                liquidity=window.liquidity_usd, spread_pct=round((ask_price - (window.up_best_bid if direction == "UP" else window.down_best_bid)) / max(ask_price, 0.01) * 100, 1),
+                seconds_to_expiry=seconds_to_expiry, transit_ms=transit,
             ))
 
     # --- Position Resolver Loop ---
@@ -538,6 +552,12 @@ class PolymarketLatencyStrategy:
                     asyncio.create_task(telegram.alert_resolved(
                         pos.trade_id, pos.asset, pos.direction,
                         pos.outcome_correct, pos.pnl_usd, stats['capital_usd'],
+                        entry_price=pos.entry_price,
+                        oracle_entry=pos.oracle_price_at_entry,
+                        oracle_exit=current_tick.mid if current_tick else 0,
+                        markout_1s=_mo_pct(1), markout_5s=_mo_pct(5), markout_60s=_mo_pct(60),
+                        fee_usd=pos.fee_usd, size_usd=pos.size_usd,
+                        exec_type="LIVE" if self.executor.is_live else "PAPER",
                     ))
                 # Drawdown-Alert
                 dd = stats.get('drawdown_pct', 0)
@@ -549,12 +569,19 @@ class PolymarketLatencyStrategy:
     # --- Status Loop ---
 
     async def _status_loop(self) -> None:
-        """Periodischer Status-Log (alle 60s)."""
+        """Periodischer Status-Log (alle 60s) + stündlicher Telegram Heartbeat."""
+        heartbeat_counter = 0
         while self._running:
             await asyncio.sleep(60)
+            heartbeat_counter += 1
             try:
                 discovery_status = self.discovery.status()
                 trader_stats = self.paper_trader.stats()
+                oracle_status = self.oracle.status()
+
+                # Binance tick count
+                ticks = sum(v.get("ticks", 0) for v in oracle_status.values())
+
                 logger.info(
                     f"STATUS | "
                     f"Fenster: {discovery_status.get('tradeable', 0)}/{discovery_status.get('total_windows', 0)} | "
@@ -564,6 +591,30 @@ class PolymarketLatencyStrategy:
                     f"PnL: ${trader_stats.get('daily_pnl_usd', 0):+.2f} | "
                     f"Kapital: ${trader_stats.get('capital_usd', 0):.2f}"
                 )
+
+                # Stündlicher Heartbeat via Telegram (alle 60 Minuten)
+                if heartbeat_counter % 60 == 0:
+                    # CLOB Latenz messen
+                    clob_ms = 0
+                    try:
+                        import aiohttp as _aio
+                        t0 = time.time()
+                        async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=5)) as s:
+                            async with s.get("https://clob.polymarket.com/markets?limit=1") as r:
+                                await r.read()
+                        clob_ms = (time.time() - t0) * 1000
+                    except Exception:
+                        pass
+
+                    asyncio.create_task(telegram.alert_heartbeat(
+                        trades=trader_stats.get('trades_closed', 0),
+                        pnl=trader_stats.get('daily_pnl_usd', 0),
+                        capital=trader_stats.get('capital_usd', 0),
+                        windows_total=discovery_status.get('total_windows', 0),
+                        windows_tradeable=discovery_status.get('tradeable', 0),
+                        clob_latency_ms=clob_ms,
+                        binance_ticks=ticks,
+                    ))
             except Exception as e:
                 logger.error(f"Status-Loop Fehler: {e}")
 
