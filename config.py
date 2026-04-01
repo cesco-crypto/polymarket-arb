@@ -94,17 +94,17 @@ class Settings(BaseSettings):
 
     # Momentum-Fenster: Preisänderung über N Sekunden als Signal
     momentum_window_s: float = Field(
-        default=60.0,
-        description="Sekunden für Momentum-Berechnung (Backtest: 1m optimal für 5m Slots)",
+        default=15.0,
+        description="Sekunden für Momentum-Berechnung (v2: 15s statt 60s — schnelleres Signal vor Polymarket-Repricing)",
     )
     # Mindest-Momentum für Handelssignal (%)
     min_momentum_pct: float = Field(
-        default=0.10,
-        description="Mindest-Preisbewegung auf Binance für Signal (Backtest: 0.10% = 90.4% WR bei 14K Trades)",
+        default=0.05,
+        description="Mindest-Preisbewegung auf Binance für Signal (v2: 0.05% statt 0.10% — mehr Trades, schnellere Erkennung)",
     )
     # Polymarket: minimale erwartete Edge nach Gebühren
     min_edge_pct: float = Field(
-        default=2.0, description="Mindest-Edge über Polymarket-Gebühren (%)"
+        default=1.5, description="Mindest-Edge über Polymarket-Gebühren (v2: 1.5% statt 2.0% — niedrigere Schwelle)"
     )
     # Polymarket: maximale Taker-Gebühr (bei p=0.50)
     polymarket_max_fee_pct: float = Field(
@@ -125,10 +125,10 @@ class Settings(BaseSettings):
     )
     # Nur innerhalb dieses Zeitfensters vor Markt-Ablauf handeln
     min_seconds_to_expiry: float = Field(
-        default=30.0, description="Kein Trade wenn < 30s bis Ablauf"
+        default=15.0, description="Kein Trade wenn < 15s bis Ablauf (v2: 15s statt 30s)"
     )
     max_seconds_to_expiry: float = Field(
-        default=240.0, description="Kein Trade wenn > 240s bis Ablauf"
+        default=180.0, description="Kein Trade wenn > 180s bis Ablauf (v2: 180s statt 240s)"
     )
 
     # --- Telegram Alerts ---

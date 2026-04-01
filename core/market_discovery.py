@@ -366,7 +366,7 @@ class MarketDiscovery:
             except Exception as e:
                 logger.error(f"Discovery Refresh Fehler: {e}")
 
-            await asyncio.sleep(3)
+            await asyncio.sleep(0.5)  # v2: 500ms statt 3s — 6x schnelleres Orderbook
 
     def _cleanup_expired(self) -> int:
         """Entfernt abgelaufene Fenster (>30s nach Ablauf)."""

@@ -186,6 +186,43 @@
         <div><b>Fazit:</b> Latenz ist NICHT unser Engpass. <span style="color:var(--yellow)">Strategie-Intelligenz ist der Differenziator.</span></div>
       </div>
 
+      <div style="font-size:12px;font-weight:700;color:var(--purple);margin:20px 0 10px">STRATEGY CHANGELOG — Alle Aenderungen (Rollback jederzeit moeglich)</div>
+      <table style="width:100%">
+        <tr><th style="text-align:left">Version</th><th>Datum</th><th>Aenderung</th><th>Git Commit</th><th>Rollback</th></tr>
+        <tr>
+          <td><span class="badge badge-b">v1.0</span></td>
+          <td style="color:var(--dim)">Initial</td>
+          <td>Pure Latency Arb: 60s Momentum, 0.10% Schwelle, 3s Orderbook Poll</td>
+          <td><code style="font-size:9px">dc59b56</code></td>
+          <td style="color:var(--dim)">Basis</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-g">v1.5</span></td>
+          <td style="color:var(--dim)">01.04.2026</td>
+          <td>Fee 3.15%→1.80%, Scaling 2.0→3.0, Backtest v2.0 Realistic, Crash Fixes</td>
+          <td><code style="font-size:9px">883e10d</code></td>
+          <td><code style="font-size:9px;color:var(--yellow)">git checkout 883e10d</code></td>
+        </tr>
+        <tr style="background:var(--bg3)">
+          <td><span class="badge" style="background:#a855f722;color:var(--purple)">v2.0</span></td>
+          <td style="color:var(--green)">02.04.2026</td>
+          <td>
+            <b style="color:var(--green)">Strategy Pivot:</b><br>
+            • Momentum: 60s → <b>15s</b> (schnelleres Signal)<br>
+            • Schwelle: 0.10% → <b>0.05%</b> (mehr Trades)<br>
+            • Min Edge: 2.0% → <b>1.5%</b> (niedrigere Schwelle)<br>
+            • Orderbook: 3s → <b>500ms</b> Refresh (6x schneller)<br>
+            • Price-First: Skip wenn Ask >15 Cent von 0.50<br>
+            • Expiry: 30-240s → <b>15-180s</b>
+          </td>
+          <td><code style="font-size:9px;color:var(--green)">AKTUELL</code></td>
+          <td><code style="font-size:9px;color:var(--yellow)">git checkout 883e10d</code></td>
+        </tr>
+      </table>
+      <div class="note warn" style="margin-top:8px">
+        <b>Rollback:</b> <code>git checkout 883e10d -- config.py core/market_discovery.py strategies/polymarket_latency.py</code> revertet alle v2.0 Aenderungen auf v1.5.
+      </div>
+
       <div style="font-size:9px;color:var(--dim);margin-top:16px">
         <div style="margin-bottom:4px"><b>Quellen:</b></div>
         <div>• <a href="https://medium.com/@benjamin.bigdev/unlocking-edges-in-polymarkets-5-minute-crypto-markets-last-second-dynamics-bot-strategies-and-db8efcb5c196" style="color:var(--dim)">Unlocking Edges in 5-Min Crypto Markets (Medium, Feb 2026)</a></div>

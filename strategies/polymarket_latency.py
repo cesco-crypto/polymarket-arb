@@ -304,9 +304,11 @@ class PolymarketLatencyStrategy:
         if ask_price <= 0 or ask_price >= 1:
             return
 
-        # Preis-Filter: Nur handeln wenn Markt noch offen ist (nicht schon entschieden)
-        if ask_price < 0.20 or ask_price > 0.80:
-            return
+        # PRICE-FIRST FILTER (v2): Nur handeln wenn Markt NAHE 0.50
+        # Wenn Ask schon bei 0.65+ → Polymarket hat bereits repriced → keine Edge
+        # Dies ist der kritischste Filter: verhindert "zu spät" Trades
+        if abs(ask_price - 0.50) > 0.15:
+            return  # Markt ist >15 Cent von 0.50 entfernt → schon repriced
 
         # Spread-Cost-Check: Wenn Spread zwischen Bid und Ask > 2 Cent,
         # fressen die Spread-Kosten unseren Edge
