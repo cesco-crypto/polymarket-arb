@@ -425,7 +425,7 @@ class PolymarketLatencyStrategy:
                 token_id = window.up_token_id if direction == "UP" else window.down_token_id
                 live_size = min(result.position_usd, self.settings.max_live_position_usd)
 
-                async def _execute_live_order(tid, ap, sz, a, d):
+                async def _execute_live_order(tid, ap, sz, a, d, trade_id):
                     try:
                         res = await self.executor.place_order(
                             token_id=tid, side="BUY", price=ap,
@@ -433,11 +433,33 @@ class PolymarketLatencyStrategy:
                         )
                         if not res.success:
                             logger.error(f"LIVE ORDER FAILED: {a} {d} — {res.error}")
+                            # Persistiere den Fehler in Supabase für Forensik
+                            from core import db
+                            await db.insert_trade({
+                                "event": "live_error",
+                                "trade_id": trade_id,
+                                "asset": a, "direction": d,
+                                "live_order_success": False,
+                                "live_error": str(res.error)[:200],
+                                "executed_price": ap,
+                                "size_usd": sz,
+                            })
+                        else:
+                            logger.info(f"LIVE ORDER OK: {a} {d} — ID={res.order_id}")
                     except Exception as e:
                         logger.error(f"LIVE ORDER EXCEPTION: {a} {d} — {e}")
+                        from core import db
+                        await db.insert_trade({
+                            "event": "live_error",
+                            "trade_id": trade_id,
+                            "asset": a, "direction": d,
+                            "live_order_success": False,
+                            "live_error": str(e)[:200],
+                        })
 
                 asyncio.create_task(_execute_live_order(
-                    token_id, ask_price, live_size, asset, direction
+                    token_id, ask_price, live_size, asset, direction,
+                    pos.trade_id if pos else "unknown",
                 ))
 
             # Telegram Alert

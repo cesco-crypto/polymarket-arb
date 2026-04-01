@@ -124,37 +124,46 @@ def _get_client():
         return None
 
 
-async def insert_trade(data: dict) -> bool:
-    """Speichert einen Trade in Supabase (async-safe via sync call)."""
+async def insert_trade(data: dict, max_retries: int = 3) -> bool:
+    """Speichert einen Trade in Supabase mit Retry — Daten dürfen nie verloren gehen."""
     client = _get_client()
     if not client:
         return False
 
-    try:
-        # Instance Label hinzufügen
-        data["instance"] = os.environ.get("INSTANCE_LABEL", "LOCAL")
+    # Instance Label hinzufügen
+    data["instance"] = os.environ.get("INSTANCE_LABEL", "LOCAL")
 
-        # Nur bekannte Felder senden (Supabase wirft Fehler bei unbekannten)
-        allowed_fields = {
-            "event", "trade_id", "instance", "asset", "direction", "timeframe",
-            "window_slug", "market_question", "signal_ts", "entry_ts", "exit_ts",
-            "order_post_ts", "oracle_price_entry", "oracle_price_exit",
-            "polymarket_bid", "polymarket_ask", "executed_price",
-            "momentum_pct", "p_true", "p_market", "raw_edge_pct",
-            "fee_pct", "net_ev_pct", "size_usd", "shares", "fee_usd",
-            "kelly_fraction", "signal_to_order_ms", "transit_latency_ms",
-            "tick_age_ms", "outcome_correct", "pnl_usd", "pnl_pct",
-            "markout_1s", "markout_5s", "markout_10s", "markout_30s",
-            "markout_60s", "order_type", "live_order_id", "live_order_success",
-            "live_error", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
-        }
-        clean = {k: v for k, v in data.items() if k in allowed_fields}
+    # Nur bekannte Felder senden (Supabase wirft Fehler bei unbekannten)
+    allowed_fields = {
+        "event", "trade_id", "instance", "asset", "direction", "timeframe",
+        "window_slug", "market_question", "signal_ts", "entry_ts", "exit_ts",
+        "order_post_ts", "oracle_price_entry", "oracle_price_exit",
+        "polymarket_bid", "polymarket_ask", "executed_price",
+        "momentum_pct", "p_true", "p_market", "raw_edge_pct",
+        "fee_pct", "net_ev_pct", "size_usd", "shares", "fee_usd",
+        "kelly_fraction", "signal_to_order_ms", "transit_latency_ms",
+        "tick_age_ms", "outcome_correct", "pnl_usd", "pnl_pct",
+        "markout_1s", "markout_5s", "markout_10s", "markout_30s",
+        "markout_60s", "order_type", "live_order_id", "live_order_success",
+        "live_error", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+    }
+    clean = {k: v for k, v in data.items() if k in allowed_fields}
 
-        client.table("trades").insert(clean).execute()
-        return True
-    except Exception as e:
-        logger.error(f"DB Insert Fehler: {e}")
-        return False
+    for attempt in range(max_retries):
+        try:
+            client.table("trades").insert(clean).execute()
+            event = clean.get("event", "?")
+            tid = clean.get("trade_id", "?")
+            logger.info(f"DB: {event} {tid} → Supabase OK")
+            return True
+        except Exception as e:
+            logger.warning(f"DB Insert Versuch {attempt+1}/{max_retries} fehlgeschlagen: {e}")
+            if attempt < max_retries - 1:
+                import asyncio
+                await asyncio.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+
+    logger.error(f"DB Insert ENDGÜLTIG FEHLGESCHLAGEN nach {max_retries} Versuchen: {clean.get('trade_id', '?')}")
+    return False
 
 
 async def get_all_trades(limit: int = 500) -> list[dict]:

@@ -135,16 +135,25 @@ class TradeJournal:
         rec.event = "open"
         self._records.append(rec)
         self._append_to_file(rec)
-        asyncio.create_task(self._send_telegram_open(rec))
-        asyncio.create_task(db.insert_trade(asdict(rec)))
+        asyncio.create_task(self._safe_async(self._send_telegram_open(rec), "telegram_open"))
+        asyncio.create_task(self._safe_async(db.insert_trade(asdict(rec)), "supabase_open"))
+        logger.info(f"JOURNAL OPEN: {rec.trade_id} | RAM + JSONL + Telegram + Supabase")
 
     def record_close(self, rec: TradeRecord) -> None:
         """Speichert Trade-Close in alle 4 Systeme: RAM + JSONL + Telegram + Supabase."""
         rec.event = "close"
         self._records.append(rec)
         self._append_to_file(rec)
-        asyncio.create_task(self._send_telegram_close(rec))
-        asyncio.create_task(db.insert_trade(asdict(rec)))
+        asyncio.create_task(self._safe_async(self._send_telegram_close(rec), "telegram_close"))
+        asyncio.create_task(self._safe_async(db.insert_trade(asdict(rec)), "supabase_close"))
+        logger.info(f"JOURNAL CLOSE: {rec.trade_id} | RAM + JSONL + Telegram + Supabase")
+
+    async def _safe_async(self, coro, label: str) -> None:
+        """Fire-and-forget wrapper that never crashes the caller."""
+        try:
+            await coro
+        except Exception as e:
+            logger.error(f"Journal async '{label}' Fehler: {e}")
 
     def _append_to_file(self, rec: TradeRecord) -> None:
         """Append-only JSONL — eine Zeile pro Event, überlebt keine Deploys aber Render Starter Restarts."""
