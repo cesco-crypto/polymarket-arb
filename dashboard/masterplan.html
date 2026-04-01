@@ -114,41 +114,46 @@
 <script>
 const PHASES = [
   {
-    id: 1, title: "INFRASTRUKTUR", subtitle: "QuantVPS Dublin Pro — 0.83ms zu Polymarket CLOB",
-    status: "pending", timeline: "1-2 Tage",
+    id: 1, title: "INFRASTRUKTUR — AWS EC2 DUBLIN", subtitle: "AWS eu-west-1 — <1ms zu Polymarket CLOB via AWS Backbone",
+    status: "pending", timeline: "Heute",
     tasks: [
-      {text: "QuantVPS Dublin Pro bestellen ($100/mo, 8 Cores, 16GB RAM)", owner: "du", done: false},
-      {text: "SSH Zugang testen + OS Setup (Ubuntu 22.04)", owner: "du", done: false},
-      {text: "Docker + Python 3.11 installieren", owner: "claude", done: false},
-      {text: "Bot-Code auf VPS deployen (git clone + Docker)", owner: "claude", done: false},
+      {text: "AWS Account erstellen/einloggen (https://console.aws.amazon.com)", owner: "du", done: false},
+      {text: "EC2 Instance starten: c6i.xlarge, eu-west-1 (Dublin), Ubuntu 22.04", owner: "both", done: false},
+      {text: "Security Group: SSH (22) + HTTP (8000) + HTTPS (443)", owner: "claude", done: false},
+      {text: "Elastic IP zuweisen (feste IP fuer Bot)", owner: "both", done: false},
+      {text: "SSH Zugang testen + System Setup (Python 3.11, Docker, Git)", owner: "claude", done: false},
+      {text: "Bot-Code deployen (git clone + pip install + .env)", owner: "claude", done: false},
       {text: "Env Vars setzen (Supabase, Telegram, Polymarket Keys)", owner: "both", done: false},
-      {text: "Geoblock-Check: curl https://polymarket.com/api/geoblock", owner: "claude", done: false},
+      {text: "Geoblock-Check: curl https://polymarket.com/api/geoblock → blocked: false", owner: "both", done: false},
+      {text: "Latenz messen: ping clob.polymarket.com → Ziel <2ms", owner: "claude", done: false},
     ],
-    deliverable: "Bot laeuft auf Dublin, GET /api/geoblock zeigt blocked: false",
-    backcheck: "Latenz messen: ping clob.polymarket.com < 1ms?",
+    deliverable: "Bot laeuft auf AWS Dublin, Geoblock = false, Latenz <2ms",
+    backcheck: "Vergleich Latenz AWS Dublin vs Render Frankfurt/Singapur",
+    note: "AWS statt QuantVPS/TradoxVPS (sold out). Gleiche Latenz (<1ms via Cloudflare PoP Dublin). AWS Backbone zu Polymarket (eu-west-2 London). Sofort verfuegbar, unbegrenzte Kapazitaet.",
   },
   {
-    id: 2, title: "GEOBLOCK VERIFY + LIVE TRADING", subtitle: "Erster erfolgreicher Order auf Polymarket",
-    status: "pending", timeline: "1 Tag",
+    id: 2, title: "GEOBLOCK VERIFY + LIVE TRADING", subtitle: "Erster erfolgreicher Order auf Polymarket von Dublin",
+    status: "pending", timeline: "Heute",
     tasks: [
-      {text: "Paper Trading auf Dublin starten (24h Testlauf)", owner: "claude", done: false},
-      {text: "Vergleich: Dublin Paper Trades vs Render Paper Trades", owner: "claude", done: false},
+      {text: "Paper Trading auf Dublin starten (mind. 1h Testlauf)", owner: "claude", done: false},
+      {text: "Vergleich: Dublin Paper Trades vs Render Paper Trades (gleiche Signale?)", owner: "claude", done: false},
       {text: "Live Trading Flag aktivieren (LIVE_TRADING=true)", owner: "both", done: false},
       {text: "Test-Order: $1 BTC UP auf Polymarket (echter Trade!)", owner: "both", done: false},
-      {text: "Verify: Order erscheint auf Polygonscan + Polymarket", owner: "both", done: false},
+      {text: "Verify: Order erscheint auf Polygonscan (0xc013...4105)", owner: "both", done: false},
+      {text: "Verify: Keine 403 'Trading restricted' Fehler mehr", owner: "claude", done: false},
     ],
-    deliverable: "Erster ERFOLGREICHER Live Order auf Polymarket von Dublin",
+    deliverable: "Erster ERFOLGREICHER Live Order auf Polymarket von AWS Dublin",
     backcheck: "Parallel Paper-Trade auf Render zum Vergleich laufen lassen",
   },
   {
     id: 3, title: "DATEN-PIPELINE", subtitle: "pmxt Archive, Data API, Dune, Collector — 50K+ Trades",
-    status: "pending", timeline: "1-2 Wochen (parallel)",
+    status: "pending", timeline: "Parallel (laufend)",
     tasks: [
       {text: "pmxt Archive pruefen (https://archive.pmxt.dev) — BTC/ETH Orderbooks", owner: "claude", done: false},
-      {text: "Polymarket Data API: bessere Pagination fuer historische Trades", owner: "claude", done: false},
-      {text: "Dune Analytics: On-Chain Trade-Daten abfragen (Competitor Intelligence)", owner: "claude", done: false},
-      {text: "Eigenen Orderbook-Collector auf Dublin VPS (alle 5s Snapshot → Supabase)", owner: "claude", done: false},
-      {text: "Ziel: 50K+ Trade-Preise + 10K+ Orderbook-Snapshots gesammelt", owner: "claude", done: false},
+      {text: "Polymarket Data API: historische Trades fuer BTC/ETH UP/DOWN", owner: "claude", done: false},
+      {text: "Dune Analytics: On-Chain Trade-Daten (Competitor Intelligence)", owner: "claude", done: false},
+      {text: "Orderbook-Collector auf Dublin EC2 (alle 5s Snapshot → Supabase)", owner: "claude", done: false},
+      {text: "Ziel: 50K+ Trade-Preise + 10K+ Orderbook-Snapshots", owner: "claude", done: false},
     ],
     deliverable: "10K+ echte Polymarket L2 Orderbook-Snapshots + Trade-Preise",
     backcheck: "Opportunity Rate (15.1%) gegen groesseres Dataset validieren",
@@ -179,11 +184,26 @@ const PHASES = [
     backcheck: "Stimmen Live-Resultate mit kalibriertem Backtest ueberein?",
   },
   {
-    id: 6, title: "PROBABILITY MODEL KALIBRIEREN", subtitle: "Logistic Scaling validieren gegen echte Trades",
+    id: 6, title: "MULTI-ORACLE: COINBASE HINZUFUEGEN", subtitle: "Binance + Coinbase = robusteres Signal, weniger Fake-Outs",
+    status: "pending", timeline: "1-2 Tage",
+    tasks: [
+      {text: "Coinbase WebSocket integrieren (BTC/USD + ETH/USD bookTicker)", owner: "claude", done: false},
+      {text: "Dual-Oracle Momentum: Signal nur wenn BEIDE Exchanges gleiche Richtung", owner: "claude", done: false},
+      {text: "Gewichtung kalibrieren: 60% Binance + 40% Coinbase (Chainlink-Gewichtung)", owner: "claude", done: false},
+      {text: "A/B Test: Single-Oracle (Binance) vs Multi-Oracle (Binance+Coinbase)", owner: "claude", done: false},
+      {text: "Win Rate Vergleich: Multi-Oracle sollte hoehere Praezision haben", owner: "claude", done: false},
+    ],
+    deliverable: "Multi-Oracle System mit Binance + Coinbase, kalibrierte Gewichtung",
+    backcheck: "Multi-Oracle Win Rate > Single-Oracle Win Rate ueber 100+ Trades?",
+    note: "Chainlink (Polymarket Resolution Oracle) aggregiert BEIDE Exchanges. Wenn nur Binance sich bewegt aber Coinbase nicht → moeglicherweise Fake-Out oder Manipulation. Dual-Konfirmation = sichereres Signal.",
+  },
+  {
+    id: 7, title: "PROBABILITY MODEL KALIBRIEREN", subtitle: "Logistic Scaling + Multi-Oracle validieren gegen echte Trades",
     status: "pending", timeline: "1-2 Tage",
     tasks: [
       {text: "Echte Win Rate pro Momentum-Bucket aus Live-Daten messen", owner: "claude", done: false},
       {text: "Optimalen Scaling-Faktor berechnen (aktuell 3.0)", owner: "claude", done: false},
+      {text: "Multi-Oracle Signal-Qualitaet vs Single-Oracle vergleichen", owner: "claude", done: false},
       {text: "Out-of-Sample Validation: Train Woche 1, Test Woche 2", owner: "claude", done: false},
       {text: "Confidence Bands fuer p_true Schaetzung", owner: "claude", done: false},
     ],
@@ -191,7 +211,7 @@ const PHASES = [
     backcheck: "Out-of-Sample Win Rate innerhalb des Konfidenzintervalls?",
   },
   {
-    id: 7, title: "GO-LIVE MIT ECHTEM GELD", subtitle: "$79.99 USDC.e, $5 max/Trade, Kill-Switches aktiv",
+    id: 8, title: "GO-LIVE MIT ECHTEM GELD", subtitle: "$79.99 USDC.e, $5 max/Trade, Kill-Switches aktiv",
     status: "pending", timeline: "GO/NO-GO Entscheidung",
     tasks: [
       {text: "GO/NO-GO Check: Win Rate >65% ueber >100 Paper Trades?", owner: "both", done: false},
@@ -205,7 +225,7 @@ const PHASES = [
     condition: "NUR wenn Phase 5 zeigt >65% Win Rate ueber >100 Paper Trades",
   },
   {
-    id: 8, title: "MONITORING — ERSTE 48h LIVE", subtitle: "24/7 Ueberwachung, Telegram Alerts, Kill-Switch Validation",
+    id: 9, title: "MONITORING — ERSTE 48h LIVE", subtitle: "24/7 Ueberwachung, Telegram Alerts, Kill-Switch Validation",
     status: "pending", timeline: "48 Stunden",
     tasks: [
       {text: "Telegram Alerts fuer jeden Trade (Entry + Exit)", owner: "claude", done: false},
@@ -218,7 +238,7 @@ const PHASES = [
     backcheck: "Latenz-Metriken von Dublin: Transit, Fill Rate, Slippage",
   },
   {
-    id: 9, title: "SKALIERUNG", subtitle: "Kapital: $80 → $200 → $500 → $1000+",
+    id: 10, title: "SKALIERUNG", subtitle: "Kapital: $80 → $200 → $500 → $1000+",
     status: "pending", timeline: "Laufend",
     tasks: [
       {text: "200+ Live-Trades mit positiver PnL", owner: "both", done: false},
@@ -233,16 +253,18 @@ const PHASES = [
     condition: "Sharpe > 2.0, Win Rate > 60%, Max DD < 15%",
   },
   {
-    id: 10, title: "RUST EXECUTOR", subtitle: "Sub-0.1ms Order Placement — Python Strategy + Rust Execution",
+    id: 11, title: "RUST EXECUTOR + ADVANCED INFRA", subtitle: "Sub-0.1ms Order Placement — Python Strategy + Rust Execution",
     status: "pending", timeline: "2-4 Wochen (Langfrist)",
     tasks: [
       {text: "polyfill-rs evaluieren (https://github.com/floor-licker/polyfill-rs)", owner: "claude", done: false},
       {text: "Rust Executor: HMAC Signing + CLOB Order in <0.1ms", owner: "claude", done: false},
       {text: "Python → Rust Bridge (FFI oder Unix Socket)", owner: "claude", done: false},
+      {text: "AWS Reserved Instance buchen (-40% Kosten nach beweisener Profitabilitaet)", owner: "du", done: false},
+      {text: "QuantVPS/TradoxVPS Dublin migrieren (wenn wieder verfuegbar + schneller als AWS)", owner: "both", done: false},
       {text: "A/B Test: Python vs Rust Executor auf gleichen Signalen", owner: "claude", done: false},
     ],
-    deliverable: "Hybrid: Python Strategy + Rust Executor",
-    backcheck: "A/B Test zeigt messbaren Latenz-Vorteil?",
+    deliverable: "Hybrid: Python Strategy + Rust Executor, optimale Infrastruktur",
+    backcheck: "A/B Test zeigt messbaren Latenz-Vorteil + bessere Fill Rate?",
   },
 ];
 
@@ -311,7 +333,7 @@ function render() {
 
   // Summary
   const pct = totalTasks > 0 ? Math.round(doneTasks / totalTasks * 100) : 0;
-  document.getElementById('s-completed').textContent = `${donePhases}/10`;
+  document.getElementById('s-completed').textContent = `${donePhases}/11`;
   document.getElementById('s-tasks').textContent = `${doneTasks}/${totalTasks}`;
   document.getElementById('s-progress').textContent = `${pct}%`;
   document.getElementById('s-current').textContent = currentPhase;
@@ -319,7 +341,7 @@ function render() {
 
   // Update infra based on phase 1 completion
   if (state[1] && PHASES[0].tasks.every((t,i) => state[1][`task_${i}`])) {
-    document.getElementById('s-infra').textContent = 'Dublin';
+    document.getElementById('s-infra').textContent = 'AWS Dublin';
     document.getElementById('s-infra').style.color = 'var(--green)';
   }
 }
