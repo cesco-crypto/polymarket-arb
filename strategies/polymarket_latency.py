@@ -126,12 +126,19 @@ class PolymarketLatencyStrategy:
 
         # Hauptloops parallel starten
         # MarketDiscovery hat eigenen Refresh-Loop (alle 3s)
+        # CRITICAL: return_exceptions=True verhindert dass ein Loop-Crash alle anderen killt
         try:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 self._signal_loop(),
                 self._position_resolver_loop(),
                 self._status_loop(),
+                return_exceptions=True,
             )
+            # Log crashed loops statt silent fail
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    loop_names = ["signal_loop", "position_resolver", "status_loop"]
+                    logger.error(f"Loop '{loop_names[i]}' crashed: {result}")
         except asyncio.CancelledError:
             pass
         finally:
@@ -139,18 +146,32 @@ class PolymarketLatencyStrategy:
 
     async def shutdown(self) -> None:
         self._running = False
-        await self.oracle.stop()
-        await self.discovery.stop()
-        stats = self.paper_trader.stats()
-        logger.info(
-            f"Strategy beendet. "
-            f"Trades: {stats['trades_closed']} | "
-            f"Win Rate: {stats['win_rate_pct']:.1f}% | "
-            f"PnL: ${stats['daily_pnl_usd']:+.2f} | "
-            f"Kapital: ${stats['capital_usd']:.2f}"
-        )
-        await telegram.alert_shutdown(stats['capital_usd'], stats['trades_closed'], stats['daily_pnl_usd'])
-        await telegram.close()
+        try:
+            await self.oracle.stop()
+        except Exception as e:
+            logger.error(f"Oracle stop error: {e}")
+        try:
+            await self.discovery.stop()
+        except Exception as e:
+            logger.error(f"Discovery stop error: {e}")
+        try:
+            stats = self.paper_trader.stats()
+            logger.info(
+                f"Strategy beendet. "
+                f"Trades: {stats.get('trades_closed', 0)} | "
+                f"Win Rate: {stats.get('win_rate_pct', 0):.1f}% | "
+                f"PnL: ${stats.get('daily_pnl_usd', 0):+.2f} | "
+                f"Kapital: ${stats.get('capital_usd', 0):.2f}"
+            )
+            await telegram.alert_shutdown(
+                stats.get('capital_usd', 0), stats.get('trades_closed', 0), stats.get('daily_pnl_usd', 0)
+            )
+        except Exception as e:
+            logger.error(f"Shutdown stats/telegram error: {e}")
+        try:
+            await telegram.close()
+        except Exception:
+            pass
 
     # --- Signal Loop ---
 
@@ -509,25 +530,37 @@ class PolymarketLatencyStrategy:
         """Periodischer Status-Log (alle 60s)."""
         while self._running:
             await asyncio.sleep(60)
-            discovery_status = self.discovery.status()
-            trader_stats = self.paper_trader.stats()
-            logger.info(
-                f"STATUS | "
-                f"Fenster: {discovery_status['tradeable']}/{discovery_status['total_windows']} | "
-                f"Signale: {self._signals_detected} | "
-                f"Trades: {trader_stats['trades_closed']} | "
-                f"WR: {trader_stats['win_rate_pct']:.1f}% | "
-                f"PnL: ${trader_stats['daily_pnl_usd']:+.2f} | "
-                f"Kapital: ${trader_stats['capital_usd']:.2f}"
-            )
+            try:
+                discovery_status = self.discovery.status()
+                trader_stats = self.paper_trader.stats()
+                logger.info(
+                    f"STATUS | "
+                    f"Fenster: {discovery_status.get('tradeable', 0)}/{discovery_status.get('total_windows', 0)} | "
+                    f"Signale: {self._signals_detected} | "
+                    f"Trades: {trader_stats.get('trades_closed', 0)} | "
+                    f"WR: {trader_stats.get('win_rate_pct', 0):.1f}% | "
+                    f"PnL: ${trader_stats.get('daily_pnl_usd', 0):+.2f} | "
+                    f"Kapital: ${trader_stats.get('capital_usd', 0):.2f}"
+                )
+            except Exception as e:
+                logger.error(f"Status-Loop Fehler: {e}")
 
     # --- Status für Dashboard ---
 
     def get_status(self) -> dict:
         """Vollständiger Status für Web-Dashboard."""
-        oracle_status = self.oracle.status()
-        discovery_status = self.discovery.status()
-        trader_stats = self.paper_trader.stats()
+        try:
+            oracle_status = self.oracle.status()
+        except Exception:
+            oracle_status = {}
+        try:
+            discovery_status = self.discovery.status()
+        except Exception:
+            discovery_status = {"total_windows": 0, "tradeable": 0, "windows": []}
+        try:
+            trader_stats = self.paper_trader.stats()
+        except Exception:
+            trader_stats = {}
 
         return {
             "strategy": "polymarket_latency",

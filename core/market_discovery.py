@@ -144,8 +144,11 @@ class MarketDiscovery:
     # --- Public Interface ---
 
     def get_tradeable_windows(self) -> list[MarketWindow]:
-        """Gibt alle aktuell handelbaren Fenster zurück."""
-        return [w for w in self.windows.values() if w.is_tradeable]
+        """Gibt alle aktuell handelbaren Fenster zurück. Thread-safe."""
+        try:
+            return [w for w in list(self.windows.values()) if w.is_tradeable]
+        except RuntimeError:
+            return []
 
     def get_windows_for_asset(self, asset: str) -> list[MarketWindow]:
         """Alle handelbaren Fenster für ein Asset."""
@@ -367,34 +370,44 @@ class MarketDiscovery:
 
     def _cleanup_expired(self) -> int:
         """Entfernt abgelaufene Fenster (>30s nach Ablauf)."""
-        expired = [
-            slug for slug, w in self.windows.items()
-            if time.time() > w.window_end_ts + 30
-        ]
-        for slug in expired:
-            del self.windows[slug]
-        return len(expired)
+        try:
+            expired = [
+                slug for slug, w in list(self.windows.items())
+                if time.time() > w.window_end_ts + 30
+            ]
+            for slug in expired:
+                self.windows.pop(slug, None)
+            return len(expired)
+        except RuntimeError:
+            return 0
 
     # --- Status ---
 
     def status(self) -> dict:
-        """Status für Dashboard/Logging."""
-        windows = []
-        for w in sorted(self.windows.values(), key=lambda x: x.window_start_ts):
-            windows.append({
-                "slug": w.slug,
-                "asset": w.asset.upper(),
-                "tf": w.timeframe,
-                "remaining_s": round(w.seconds_remaining),
-                "up_bid": w.up_best_bid,
-                "up_ask": w.up_best_ask,
-                "down_bid": w.down_best_bid,
-                "down_ask": w.down_best_ask,
-                "liquidity": round(w.liquidity_usd),
-                "tradeable": w.is_tradeable,
-            })
-        return {
-            "total_windows": len(self.windows),
-            "tradeable": len(self.get_tradeable_windows()),
-            "windows": windows,
-        }
+        """Status für Dashboard/Logging. Thread-safe snapshot."""
+        try:
+            # Atomic snapshot to avoid RuntimeError: dictionary changed size during iteration
+            windows_snapshot = list(self.windows.values())
+            windows = []
+            for w in sorted(windows_snapshot, key=lambda x: x.window_start_ts):
+                windows.append({
+                    "slug": w.slug,
+                    "asset": w.asset.upper(),
+                    "tf": w.timeframe,
+                    "remaining_s": round(w.seconds_remaining),
+                    "up_bid": w.up_best_bid,
+                    "up_ask": w.up_best_ask,
+                    "down_bid": w.down_best_bid,
+                    "down_ask": w.down_best_ask,
+                    "liquidity": round(w.liquidity_usd),
+                    "tradeable": w.is_tradeable,
+                })
+            tradeable = [w for w in windows_snapshot if w.is_tradeable]
+            return {
+                "total_windows": len(windows_snapshot),
+                "tradeable": len(tradeable),
+                "windows": windows,
+            }
+        except Exception as e:
+            logger.error(f"Status generation error: {e}")
+            return {"total_windows": 0, "tradeable": 0, "windows": []}
