@@ -73,6 +73,13 @@ class PolymarketLatencyStrategy:
         self.executor = PolymarketExecutor(settings)
         self.journal = TradeJournal()
 
+        # Auto-Redeemer: Holt gewonnene Tokens zurück als USDC.e
+        from core.redeemer import AutoRedeemer
+        self.redeemer = AutoRedeemer(
+            private_key=settings.polymarket_private_key,
+            wallet_address=settings.polymarket_funder,
+        )
+
         self._running = False
         self._signals_detected: int = 0
         self._recent_signals: deque = deque(maxlen=30)
@@ -132,12 +139,13 @@ class PolymarketLatencyStrategy:
                 self._signal_loop(),
                 self._position_resolver_loop(),
                 self._status_loop(),
+                self._auto_redeem_loop(),
                 return_exceptions=True,
             )
             # Log crashed loops statt silent fail
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
-                    loop_names = ["signal_loop", "position_resolver", "status_loop"]
+                    loop_names = ["signal_loop", "position_resolver", "status_loop", "auto_redeem"]
                     logger.error(f"Loop '{loop_names[i]}' crashed: {result}")
         except asyncio.CancelledError:
             pass
@@ -619,6 +627,31 @@ class PolymarketLatencyStrategy:
                     ))
             except Exception as e:
                 logger.error(f"Status-Loop Fehler: {e}")
+
+    # --- Auto-Redeem Loop ---
+
+    async def _auto_redeem_loop(self) -> None:
+        """Alle 5 Minuten: Gewonnene Conditional Tokens automatisch redeemen."""
+        await asyncio.sleep(60)  # Warte 1 Min nach Start
+        while self._running:
+            try:
+                if self.executor.is_live and self.settings.polymarket_private_key:
+                    result = self.redeemer.redeem_all()
+                    if result.get("redeemed", 0) > 0:
+                        value = result.get("value_usd", 0)
+                        count = result.get("redeemed", 0)
+                        logger.info(f"AutoRedeem: {count} Positionen redeemed, ${value:.2f} zurück in Wallet")
+                        await telegram.send_alert(
+                            f"💰 <b>AUTO-REDEEM</b>\n"
+                            f"{'─'*26}\n"
+                            f"📊 {count} Positionen eingelöst\n"
+                            f"💵 ${value:.2f} → Wallet\n"
+                            f"🏦 Lifetime: ${result.get('total_lifetime_usd', 0):.2f} redeemed"
+                        )
+            except Exception as e:
+                logger.error(f"AutoRedeem Fehler: {e}")
+
+            await asyncio.sleep(300)  # Alle 5 Minuten
 
     # --- Status für Dashboard ---
 
