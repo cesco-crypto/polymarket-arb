@@ -235,6 +235,8 @@ async def api_live_trades() -> dict:
     # Primär: Supabase
     db_trades = await db.get_closed_trades(200)
     if db_trades:
+        # Sortierung: Neueste zuerst (nach exit_ts absteigend)
+        db_trades.sort(key=lambda t: t.get("exit_ts", t.get("entry_ts", 0)), reverse=True)
         # Berechne Statistiken
         wins = [t for t in db_trades if t.get("outcome_correct")]
         losses = [t for t in db_trades if not t.get("outcome_correct")]
@@ -261,6 +263,8 @@ async def api_live_trades() -> dict:
                         trades.append(rec)
                 except Exception:
                     pass
+        # Sortierung: Neueste zuerst (nach exit_ts absteigend)
+        trades.sort(key=lambda t: t.get("exit_ts", t.get("entry_ts", 0)), reverse=True)
         wins = [t for t in trades if t.get("outcome_correct")]
         losses = [t for t in trades if not t.get("outcome_correct")]
         total_pnl = sum(t.get("pnl_usd", 0) for t in trades)

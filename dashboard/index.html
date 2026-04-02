@@ -197,9 +197,9 @@
       <div class="d" style="font-size:10px">Loading trade history...</div>
     </div>
     <table>
-      <tr><th>ID</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th></tr>
+      <tr><th>ID</th><th>TF</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th><th style="font-size:9px">Opened</th><th style="font-size:9px">Closed</th></tr>
     </table>
-    <table id="hist-body"><tr><td colspan="9" class="empty">Loading...</td></tr></table>
+    <table id="hist-body"><tr><td colspan="12" class="empty">Loading...</td></tr></table>
   </div>
 </div>
 
@@ -498,7 +498,7 @@ function switchTab(btn, tab) {
     const trades = data.trades || [];
 
     if (!trades.length) {
-      hb.innerHTML = '<tr><td colspan="9" class="empty">No trade history yet</td></tr>';
+      hb.innerHTML = '<tr><td colspan="12" class="empty">No trade history yet</td></tr>';
       return;
     }
 
@@ -513,7 +513,7 @@ function switchTab(btn, tab) {
       <span class="d">Source: ${data.source || '?'}</span>
     </div>`;
 
-    hb.innerHTML = trades.slice(0, 30).map(t => {
+    hb.innerHTML = trades.slice(0, 50).map(t => {
       const won = t.outcome_correct;
       const icon = won ? '<span class="g">W</span>' : '<span class="rd">L</span>';
       const pnlC = (t.pnl_usd||0) >= 0 ? 'g' : 'rd';
@@ -522,8 +522,24 @@ function switchTab(btn, tab) {
       const asset = t.asset || '?';
       const mo5 = t.markout_5s ? ((t.markout_5s>=0?'+':'') + t.markout_5s.toFixed(3) + '%') : '—';
       const mo5c = (t.markout_5s||0) > 0 ? 'g' : (t.markout_5s||0) < 0 ? 'rd' : 'd';
+      const tf = t.timeframe || '—';
+      const tfTag = tf === '5m' ? 'tag-up' : tf === '15m' ? 'tag-btc' : '';
+      // Timestamps: entry_ts und exit_ts (Unix → HH:MM:SS DD.MM)
+      const fmtTs = (ts) => {
+        if (!ts) return '—';
+        const d = new Date(ts * 1000);
+        const hh = String(d.getHours()).padStart(2,'0');
+        const mm = String(d.getMinutes()).padStart(2,'0');
+        const ss = String(d.getSeconds()).padStart(2,'0');
+        const dd = String(d.getDate()).padStart(2,'0');
+        const mo = String(d.getMonth()+1).padStart(2,'0');
+        return `${hh}:${mm}:${ss} ${dd}.${mo}`;
+      };
+      const opened = fmtTs(t.entry_ts || t.signal_ts);
+      const closed = fmtTs(t.exit_ts);
       return `<tr>
         <td class="d">${t.trade_id || '?'}</td>
+        <td><span class="tag ${tfTag}" style="font-size:9px">${tf}</span></td>
         <td><span class="tag ${asset==='BTC'?'tag-btc':'tag-eth'}">${asset}</span></td>
         <td><span class="tag ${dirTag}">${dir}</span></td>
         <td class="r">${(t.executed_price || t.polymarket_ask || 0).toFixed(3)}</td>
@@ -532,6 +548,8 @@ function switchTab(btn, tab) {
         <td class="r d">$${(t.fee_usd||0).toFixed(3)}</td>
         <td>${icon}</td>
         <td class="r ${mo5c}" style="font-size:10px">${mo5}</td>
+        <td class="d" style="font-size:9px;white-space:nowrap">${opened}</td>
+        <td class="d" style="font-size:9px;white-space:nowrap">${closed}</td>
       </tr>`;
     }).join('');
   }
