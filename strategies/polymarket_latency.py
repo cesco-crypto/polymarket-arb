@@ -15,6 +15,7 @@ Wir nutzen Binance als MOMENTUM-INDIKATOR, Chainlink entscheidet die Auflösung.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -89,6 +90,12 @@ class PolymarketLatencyStrategy:
         self._last_tick_symbol: str = ""
         self._traded_windows: set = set()  # Slug-Set: verhindert Duplicate Trades pro Fenster
 
+        # Dedicated Thread-Pool für Redeemer (verhindert Event-Loop Blocking)
+        self._redeem_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="redeemer"
+        )
+        self._redeeming = False
+
     async def run(self) -> None:
         """Startet alle Komponenten und läuft bis zum Shutdown."""
         self._running = True
@@ -154,6 +161,11 @@ class PolymarketLatencyStrategy:
 
     async def shutdown(self) -> None:
         self._running = False
+        # Redeemer Thread-Pool sauber beenden (wait=False: nicht auf laufende TX warten)
+        try:
+            self._redeem_executor.shutdown(wait=False)
+        except Exception as e:
+            logger.error(f"Redeem executor shutdown error: {e}")
         try:
             await self.oracle.stop()
         except Exception as e:
@@ -631,25 +643,42 @@ class PolymarketLatencyStrategy:
     # --- Auto-Redeem Loop ---
 
     async def _auto_redeem_loop(self) -> None:
-        """Alle 5 Minuten: Gewonnene Conditional Tokens automatisch redeemen."""
+        """Alle 5 Minuten: Gewonnene Conditional Tokens automatisch redeemen.
+
+        CRITICAL FIX: redeem_all() ist synchron (web3 RPC + wait_for_receipt bis 120s).
+        Läuft in dediziertem Thread-Pool damit der Event-Loop NIE blockiert wird.
+        Guard-Flag verhindert überlappende Aufrufe bei >5 Min Laufzeit.
+        """
         await asyncio.sleep(60)  # Warte 1 Min nach Start
+        loop = asyncio.get_running_loop()
         while self._running:
             try:
                 if self.executor.is_live and self.settings.polymarket_private_key:
-                    result = self.redeemer.redeem_all()
-                    if result.get("redeemed", 0) > 0:
-                        value = result.get("value_usd", 0)
-                        count = result.get("redeemed", 0)
-                        logger.info(f"AutoRedeem: {count} Positionen redeemed, ${value:.2f} zurück in Wallet")
-                        await telegram.send_alert(
-                            f"💰 <b>AUTO-REDEEM</b>\n"
-                            f"{'─'*26}\n"
-                            f"📊 {count} Positionen eingelöst\n"
-                            f"💵 ${value:.2f} → Wallet\n"
-                            f"🏦 Lifetime: ${result.get('total_lifetime_usd', 0):.2f} redeemed"
-                        )
+                    if self._redeeming:
+                        logger.debug("AutoRedeem: Überspringe — vorheriger Lauf noch aktiv")
+                    else:
+                        self._redeeming = True
+                        try:
+                            result = await loop.run_in_executor(
+                                self._redeem_executor, self.redeemer.redeem_all
+                            )
+                        finally:
+                            self._redeeming = False
+
+                        if result.get("redeemed", 0) > 0:
+                            value = result.get("value_usd", 0)
+                            count = result.get("redeemed", 0)
+                            logger.info(f"AutoRedeem: {count} Positionen redeemed, ${value:.2f} zurück in Wallet")
+                            await telegram.send_alert(
+                                f"💰 <b>AUTO-REDEEM</b>\n"
+                                f"{'─'*26}\n"
+                                f"📊 {count} Positionen eingelöst\n"
+                                f"💵 ${value:.2f} → Wallet\n"
+                                f"🏦 Lifetime: ${result.get('total_lifetime_usd', 0):.2f} redeemed"
+                            )
             except Exception as e:
                 logger.error(f"AutoRedeem Fehler: {e}")
+                self._redeeming = False  # Safety Reset
 
             await asyncio.sleep(300)  # Alle 5 Minuten
 
