@@ -223,6 +223,94 @@ async def api_journal() -> dict:
     return {"records": records, "stats": stats, "count": len(records), "source": "local"}
 
 
+@app.get("/api/live-trades")
+async def api_live_trades() -> dict:
+    """Echte Live Trades — aus Supabase (primär) oder JSONL (fallback).
+
+    Gibt NUR echte Trades zurück, keine Paper Trades.
+    """
+    import json
+    from core import db
+
+    # Primär: Supabase
+    db_trades = await db.get_closed_trades(200)
+    if db_trades:
+        # Berechne Statistiken
+        wins = [t for t in db_trades if t.get("outcome_correct")]
+        losses = [t for t in db_trades if not t.get("outcome_correct")]
+        total_pnl = sum(t.get("pnl_usd", 0) for t in db_trades)
+        return {
+            "trades": db_trades,
+            "count": len(db_trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / len(db_trades) * 100, 1) if db_trades else 0,
+            "total_pnl": round(total_pnl, 2),
+            "source": "supabase",
+        }
+
+    # Fallback: JSONL Journal
+    journal_path = Path(__file__).parent.parent / "data" / "trade_journal.jsonl"
+    if journal_path.exists():
+        trades = []
+        with open(journal_path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line.strip())
+                    if rec.get("event") == "close":
+                        trades.append(rec)
+                except Exception:
+                    pass
+        wins = [t for t in trades if t.get("outcome_correct")]
+        losses = [t for t in trades if not t.get("outcome_correct")]
+        total_pnl = sum(t.get("pnl_usd", 0) for t in trades)
+        return {
+            "trades": trades,
+            "count": len(trades),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
+            "total_pnl": round(total_pnl, 2),
+            "source": "jsonl",
+        }
+
+    return {"trades": [], "count": 0, "source": "none"}
+
+
+@app.get("/api/positions")
+async def api_positions() -> dict:
+    """Echte Polymarket Positionen — direkt von der Data API."""
+    import json
+    from urllib.request import urlopen, Request
+
+    wallet = settings.polymarket_funder
+    if not wallet:
+        return {"positions": [], "error": "no wallet configured"}
+
+    try:
+        url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"
+        req = Request(url, headers={"User-Agent": "polymarket-arb/2.0"})
+        with urlopen(req, timeout=10) as resp:
+            positions = json.loads(resp.read())
+
+        total_value = sum(p.get("currentValue", 0) for p in positions)
+        redeemable = sum(p.get("currentValue", 0) for p in positions if p.get("redeemable") and p.get("currentValue", 0) > 0)
+        total_invested = sum(p.get("initialValue", 0) for p in positions)
+        total_pnl = sum(p.get("cashPnl", 0) for p in positions)
+
+        return {
+            "positions": positions,
+            "count": len(positions),
+            "total_value": round(total_value, 2),
+            "redeemable": round(redeemable, 2),
+            "total_invested": round(total_invested, 2),
+            "total_pnl": round(total_pnl, 2),
+            "wallet": wallet,
+        }
+    except Exception as e:
+        return {"positions": [], "error": str(e)}
+
+
 @app.post("/api/toggle-order-type")
 async def toggle_order_type() -> dict:
     """Toggle zwischen Maker und Taker Order-Typ."""

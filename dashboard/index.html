@@ -177,29 +177,29 @@
   <table id="signals-body"><tr><td colspan="8" class="empty">No signal evaluations yet</td></tr></table>
 </div>
 
-<!-- P5: Trading History -->
+<!-- P5: Live Trading History (echte Trades, nicht Paper) -->
 <div class="p p5">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-    <div class="pt" style="margin-bottom:0">Paper Trading</div>
+    <div class="pt" style="margin-bottom:0">Live Trading <span id="live-source" class="d" style="font-size:9px;font-weight:400"></span></div>
     <div class="tab-bar" style="margin-bottom:0;margin-left:auto">
-      <button class="tab-btn on" data-tab="open" onclick="switchTab(this,'open')">Open <span id="open-ct" class="d">0</span></button>
-      <button class="tab-btn" data-tab="closed" onclick="switchTab(this,'closed')">Resolved <span id="closed-ct" class="d">0</span></button>
+      <button class="tab-btn on" data-tab="positions" onclick="switchTab(this,'positions')">Positions <span id="pos-ct" class="d">0</span></button>
+      <button class="tab-btn" data-tab="history" onclick="switchTab(this,'history')">Trade History <span id="hist-ct" class="d">0</span></button>
     </div>
   </div>
-  <div id="tab-open" class="tab-panel on">
+  <div id="tab-positions" class="tab-panel on">
     <table>
-      <tr><th>ID</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">p_true</th><th style="width:90px">Expires</th></tr>
+      <tr><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Now @</th><th class="r">Size</th><th class="r">Value</th><th class="r">PnL</th><th>Status</th></tr>
     </table>
-    <table id="open-body"><tr><td colspan="7" class="empty">No open positions</td></tr></table>
+    <table id="pos-body"><tr><td colspan="8" class="empty">Loading positions...</td></tr></table>
   </div>
-  <div id="tab-closed" class="tab-panel">
-    <div id="markout-summary" style="margin-bottom:4px">
-      <div class="d" style="font-size:9px">Mark-out Analysis: waiting for trades...</div>
+  <div id="tab-history" class="tab-panel">
+    <div id="hist-summary" style="margin-bottom:6px">
+      <div class="d" style="font-size:10px">Loading trade history...</div>
     </div>
     <table>
       <tr><th>ID</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th></tr>
     </table>
-    <table id="closed-body"><tr><td colspan="9" class="empty">No resolved trades yet</td></tr></table>
+    <table id="hist-body"><tr><td colspan="9" class="empty">Loading...</td></tr></table>
   </div>
 </div>
 
@@ -253,7 +253,7 @@ function switchTab(btn, tab) {
     renderRisk(d.trading || {}, d.config || {});
 
     // P5: Positions
-    renderPositions(d.trading || {});
+    // Live positions loaded via REST API (fetchLiveData), not WebSocket
   }
 
   // --- P1: Oracle ---
@@ -441,82 +441,104 @@ function switchTab(btn, tab) {
       : '<span class="dot dot-g" style="display:inline-block;width:6px;height:6px;vertical-align:middle;margin-right:4px;animation:none"></span>OFF';
   }
 
-  // --- P5: Positions ---
-  function renderPositions(t) {
-    const open = t.open_positions || [];
-    const closed = t.closed_positions || [];
-    id('open-ct').textContent = open.length;
-    id('closed-ct').textContent = closed.length;
+  // --- P5: Live Positions & Trade History (from Polymarket API + Supabase) ---
+  let _livePositions = [];
+  let _liveHistory = [];
 
-    const ob = id('open-body');
-    if (!open.length) { ob.innerHTML = '<tr><td colspan="7" class="empty">No open positions</td></tr>'; }
-    else {
-      ob.innerHTML = open.map(p => {
-        const secs = Math.max(0, p.seconds_remaining - (Date.now()-(lastData?._t||Date.now()))/1000);
-        const mm=Math.floor(secs/60), ss=Math.floor(secs%60);
-        const dirTag = p.direction==='UP' ? 'tag-up' : 'tag-dn';
-        return `<tr>
-          <td class="d">${p.trade_id}</td>
-          <td><span class="tag ${p.asset==='BTC'?'tag-btc':'tag-eth'}">${p.asset}</span></td>
-          <td><span class="tag ${dirTag}">${p.direction}</span></td>
-          <td class="r">${p.entry_price.toFixed(3)}</td>
-          <td class="r b">$${p.size_usd.toFixed(0)}</td>
-          <td class="r">${p.p_true.toFixed(3)}</td>
-          <td><span class="countdown ${secs<30?'rd':secs<60?'y':'g'}">${mm}:${String(ss).padStart(2,'0')}</span></td>
-        </tr>`;
-      }).join('');
-    }
+  async function fetchLiveData() {
+    try {
+      const [posRes, histRes] = await Promise.all([
+        fetch('/api/positions'),
+        fetch('/api/live-trades'),
+      ]);
+      const posData = await posRes.json();
+      const histData = await histRes.json();
 
-    const cb = id('closed-body');
-    if (!closed.length) { cb.innerHTML = '<tr><td colspan="9" class="empty">No resolved trades yet</td></tr>'; }
-    else {
-      // Mark-out Summary (Aggregate über alle Trades)
-      const moData = closed.filter(p => p.markout && Object.keys(p.markout).length > 0);
-      if (moData.length > 0) {
-        const moAvg = {};
-        for (const sec of ['1','5','10','30','60']) {
-          const vals = moData.filter(p => p.markout[sec] !== undefined).map(p => p.markout[sec]);
-          if (vals.length > 0) moAvg[sec] = vals.reduce((a,b) => a+b, 0) / vals.length;
-        }
-        const moEl = document.getElementById('markout-summary');
-        if (moEl) {
-          let html = '<div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">';
-          for (const [sec, avg] of Object.entries(moAvg)) {
-            const c = avg > 0 ? 'g' : avg < -0.01 ? 'rd' : 'y';
-            const label = avg > 0 ? 'ALPHA' : 'TOXIC';
-            html += `<div style="background:var(--bg3);padding:6px 10px;border-radius:4px;text-align:center;min-width:60px">
-              <div class="${c} b" style="font-size:13px">${avg>=0?'+':''}${avg.toFixed(3)}%</div>
-              <div class="d" style="font-size:8px">T+${sec}s</div>
-              <div class="${c}" style="font-size:7px">${label}</div>
-            </div>`;
-          }
-          html += '</div>';
-          moEl.innerHTML = html;
-        }
-      }
+      _livePositions = posData.positions || [];
+      _liveHistory = histData.trades || [];
 
-      cb.innerHTML = closed.map(p => {
-        const icon = p.outcome_correct ? '<span class="g">W</span>' : '<span class="rd">L</span>';
-        const pnlC = p.pnl_usd >= 0 ? 'g' : 'rd';
-        const dirTag = p.direction==='UP' ? 'tag-up' : 'tag-dn';
-        // Mark-out mini display
-        const mo = p.markout || {};
-        const mo5 = mo['5'] !== undefined ? (mo['5']>=0?'+':'') + mo['5'].toFixed(3)+'%' : '—';
-        const mo5c = mo['5'] > 0 ? 'g' : mo['5'] < 0 ? 'rd' : 'd';
-        return `<tr>
-          <td class="d">${p.trade_id}</td>
-          <td><span class="tag ${p.asset==='BTC'?'tag-btc':'tag-eth'}">${p.asset}</span></td>
-          <td><span class="tag ${dirTag}">${p.direction}</span></td>
-          <td class="r">${p.entry_price.toFixed(3)}</td>
-          <td class="r">$${p.size_usd.toFixed(0)}</td>
-          <td class="r ${pnlC} b">$${p.pnl_usd>=0?'+':''}${p.pnl_usd.toFixed(2)}</td>
-          <td class="r d">$${p.fee_usd.toFixed(2)}</td>
-          <td>${icon}</td>
-          <td class="r ${mo5c}" style="font-size:10px">${mo5}</td>
-        </tr>`;
-      }).join('');
+      id('pos-ct').textContent = _livePositions.length;
+      id('hist-ct').textContent = _liveHistory.length;
+      id('live-source').textContent = `(${histData.source || 'api'} | ${histData.count || 0} trades | WR: ${histData.win_rate || 0}% | PnL: $${(histData.total_pnl || 0).toFixed(2)})`;
+
+      renderLivePositions();
+      renderLiveHistory(histData);
+    } catch(e) {
+      console.error('Live data fetch error:', e);
     }
   }
+
+  function renderLivePositions() {
+    const pb = id('pos-body');
+    if (!_livePositions.length) {
+      pb.innerHTML = '<tr><td colspan="8" class="empty">No open positions (all redeemed)</td></tr>';
+      return;
+    }
+    pb.innerHTML = _livePositions.map(p => {
+      const won = p.curPrice === 1;
+      const lost = p.curPrice === 0;
+      const pnlC = p.cashPnl >= 0 ? 'g' : 'rd';
+      const status = p.redeemable ? (won ? '<span class="g b">REDEEMABLE</span>' : '<span class="rd">LOST</span>') : '<span class="y">OPEN</span>';
+      const title = (p.title || '').substring(0, 35);
+      return `<tr>
+        <td style="font-size:10px">${title}</td>
+        <td><span class="tag ${p.outcome==='Up'?'tag-up':'tag-dn'}">${p.outcome}</span></td>
+        <td class="r">${(p.avgPrice||0).toFixed(3)}</td>
+        <td class="r">${(p.curPrice||0).toFixed(2)}</td>
+        <td class="r">$${(p.initialValue||0).toFixed(2)}</td>
+        <td class="r b">$${(p.currentValue||0).toFixed(2)}</td>
+        <td class="r ${pnlC} b">$${(p.cashPnl||0)>=0?'+':''}${(p.cashPnl||0).toFixed(2)}</td>
+        <td>${status}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  function renderLiveHistory(data) {
+    const hb = id('hist-body');
+    const trades = data.trades || [];
+
+    if (!trades.length) {
+      hb.innerHTML = '<tr><td colspan="9" class="empty">No trade history yet</td></tr>';
+      return;
+    }
+
+    // Summary
+    const summary = id('hist-summary');
+    summary.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap">
+      <span class="b">${data.count || 0} Trades</span>
+      <span class="g b">${data.wins || 0} Wins</span>
+      <span class="rd b">${data.losses || 0} Losses</span>
+      <span class="${(data.win_rate||0)>=60?'g':'rd'} b">WR: ${data.win_rate || 0}%</span>
+      <span class="${(data.total_pnl||0)>=0?'g':'rd'} b">PnL: $${(data.total_pnl||0)>=0?'+':''}${(data.total_pnl||0).toFixed(2)}</span>
+      <span class="d">Source: ${data.source || '?'}</span>
+    </div>`;
+
+    hb.innerHTML = trades.slice(0, 30).map(t => {
+      const won = t.outcome_correct;
+      const icon = won ? '<span class="g">W</span>' : '<span class="rd">L</span>';
+      const pnlC = (t.pnl_usd||0) >= 0 ? 'g' : 'rd';
+      const dir = t.direction || '?';
+      const dirTag = dir === 'UP' ? 'tag-up' : 'tag-dn';
+      const asset = t.asset || '?';
+      const mo5 = t.markout_5s ? ((t.markout_5s>=0?'+':'') + t.markout_5s.toFixed(3) + '%') : '—';
+      const mo5c = (t.markout_5s||0) > 0 ? 'g' : (t.markout_5s||0) < 0 ? 'rd' : 'd';
+      return `<tr>
+        <td class="d">${t.trade_id || '?'}</td>
+        <td><span class="tag ${asset==='BTC'?'tag-btc':'tag-eth'}">${asset}</span></td>
+        <td><span class="tag ${dirTag}">${dir}</span></td>
+        <td class="r">${(t.executed_price || t.polymarket_ask || 0).toFixed(3)}</td>
+        <td class="r">$${(t.size_usd||0).toFixed(2)}</td>
+        <td class="r ${pnlC} b">$${(t.pnl_usd||0)>=0?'+':''}${(t.pnl_usd||0).toFixed(2)}</td>
+        <td class="r d">$${(t.fee_usd||0).toFixed(3)}</td>
+        <td>${icon}</td>
+        <td class="r ${mo5c}" style="font-size:10px">${mo5}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Fetch live data every 30 seconds
+  fetchLiveData();
+  setInterval(fetchLiveData, 30000);
 
   // Order Type Toggle
   async function toggleOrderType() {
@@ -638,7 +660,7 @@ function switchTab(btn, tab) {
 
   setInterval(() => { id('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
   // Re-render countdowns every 500ms for smooth animation
-  setInterval(() => { if (lastData) { renderMarkets(lastData.discovery||{}); renderPositions(lastData.trading||{}); } }, 500);
+  setInterval(() => { if (lastData) { renderMarkets(lastData.discovery||{}); } }, 500);
 
   connect();
 })();
