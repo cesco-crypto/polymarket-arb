@@ -114,19 +114,40 @@ class TradeJournal:
         self._load_existing()
 
     def _load_existing(self) -> None:
-        """Lädt bestehende Journal-Einträge beim Start."""
+        """Lädt bestehende Journal-Einträge beim Start.
+
+        Merges live_update events into their corresponding open/close records.
+        """
         if JOURNAL_PATH.exists():
             try:
+                live_updates: dict[str, dict] = {}  # trade_id -> live data
+                raw_records: list[dict] = []
                 with open(JOURNAL_PATH) as f:
                     for line in f:
                         line = line.strip()
                         if line:
                             data = json.loads(line)
-                            self._records.append(TradeRecord(**{
-                                k: v for k, v in data.items()
-                                if k in TradeRecord.__dataclass_fields__
-                            }))
-                logger.info(f"TradeJournal: {len(self._records)} Einträge geladen")
+                            if data.get("event") == "live_update":
+                                live_updates[data.get("trade_id", "")] = data
+                            else:
+                                raw_records.append(data)
+
+                # Merge live_update data into close records
+                for data in raw_records:
+                    if data.get("event") == "close":
+                        tid = data.get("trade_id", "")
+                        if tid in live_updates:
+                            upd = live_updates[tid]
+                            data["live_order_success"] = upd.get("live_order_success", False)
+                            data["live_order_id"] = upd.get("live_order_id", "")
+                            data["live_error"] = upd.get("live_error", "")
+                            data["order_post_ts"] = upd.get("order_post_ts", 0)
+
+                    self._records.append(TradeRecord(**{
+                        k: v for k, v in data.items()
+                        if k in TradeRecord.__dataclass_fields__
+                    }))
+                logger.info(f"TradeJournal: {len(self._records)} Einträge geladen, {len(live_updates)} live_updates merged")
             except Exception as e:
                 logger.warning(f"TradeJournal Load Fehler: {e}")
 

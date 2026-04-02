@@ -232,24 +232,52 @@ async def api_live_trades() -> dict:
     import json
     from core import db
 
+    def _classify_and_stats(trades: list[dict]) -> dict:
+        """Classify trades by live status and compute separate stats."""
+        for t in trades:
+            # Determine live_status: "live", "failed", or "unknown" (legacy)
+            if t.get("live_order_success") is True:
+                t["live_status"] = "live"
+            elif t.get("live_order_id") or t.get("live_error"):
+                t["live_status"] = "failed"
+            else:
+                t["live_status"] = "unknown"  # Legacy: no live data recorded
+
+        # All trades stats (paper simulation)
+        all_wins = [t for t in trades if t.get("outcome_correct")]
+        all_losses = [t for t in trades if not t.get("outcome_correct")]
+        all_pnl = sum(t.get("pnl_usd", 0) for t in trades)
+
+        # Live-only stats (only where live order succeeded)
+        live_trades = [t for t in trades if t.get("live_status") == "live"]
+        live_wins = [t for t in live_trades if t.get("outcome_correct")]
+        live_losses = [t for t in live_trades if not t.get("outcome_correct")]
+        live_pnl = sum(t.get("pnl_usd", 0) for t in live_trades)
+
+        return {
+            "trades": trades,
+            "count": len(trades),
+            "wins": len(all_wins),
+            "losses": len(all_losses),
+            "win_rate": round(len(all_wins) / len(trades) * 100, 1) if trades else 0,
+            "total_pnl": round(all_pnl, 2),
+            "live": {
+                "count": len(live_trades),
+                "wins": len(live_wins),
+                "losses": len(live_losses),
+                "win_rate": round(len(live_wins) / len(live_trades) * 100, 1) if live_trades else 0,
+                "total_pnl": round(live_pnl, 2),
+            },
+        }
+
     # Primär: Supabase
     db_trades = await db.get_closed_trades(200)
     if db_trades:
         # Sortierung: Neueste zuerst (nach exit_ts absteigend)
         db_trades.sort(key=lambda t: t.get("exit_ts", t.get("entry_ts", 0)), reverse=True)
-        # Berechne Statistiken
-        wins = [t for t in db_trades if t.get("outcome_correct")]
-        losses = [t for t in db_trades if not t.get("outcome_correct")]
-        total_pnl = sum(t.get("pnl_usd", 0) for t in db_trades)
-        return {
-            "trades": db_trades,
-            "count": len(db_trades),
-            "wins": len(wins),
-            "losses": len(losses),
-            "win_rate": round(len(wins) / len(db_trades) * 100, 1) if db_trades else 0,
-            "total_pnl": round(total_pnl, 2),
-            "source": "supabase",
-        }
+        result = _classify_and_stats(db_trades)
+        result["source"] = "supabase"
+        return result
 
     # Fallback: JSONL Journal
     journal_path = Path(__file__).parent.parent / "data" / "trade_journal.jsonl"
@@ -277,18 +305,9 @@ async def api_live_trades() -> dict:
                 t["order_post_ts"] = upd.get("order_post_ts", 0)
         # Sortierung: Neueste zuerst (nach exit_ts absteigend)
         trades.sort(key=lambda t: t.get("exit_ts", t.get("entry_ts", 0)), reverse=True)
-        wins = [t for t in trades if t.get("outcome_correct")]
-        losses = [t for t in trades if not t.get("outcome_correct")]
-        total_pnl = sum(t.get("pnl_usd", 0) for t in trades)
-        return {
-            "trades": trades,
-            "count": len(trades),
-            "wins": len(wins),
-            "losses": len(losses),
-            "win_rate": round(len(wins) / len(trades) * 100, 1) if trades else 0,
-            "total_pnl": round(total_pnl, 2),
-            "source": "jsonl",
-        }
+        result = _classify_and_stats(trades)
+        result["source"] = "jsonl"
+        return result
 
     return {"trades": [], "count": 0, "source": "none"}
 

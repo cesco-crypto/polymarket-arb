@@ -95,12 +95,19 @@ class PolymarketExecutor:
     def is_live(self) -> bool:
         return self._ready and self._client is not None
 
+    # --- Minimum Order Constants (Polymarket CLOB) ---
+    MIN_ORDER_SIZE_USD = 1.0    # Minimum $1 order
+    MIN_SHARES = 5.0            # Minimum 5 shares for limit orders
+    MAX_PRE_SIGN_PRICE_DRIFT = 0.05  # 5% max drift between pre-signed and actual price
+
     def pre_sign_order(self, token_id: str, price: float, size_usd: float) -> None:
         """Pre-Signing: Order vorab signieren für minimale Latenz bei Trigger.
 
         Wird aufgerufen während der Bot auf das nächste Signal wartet.
         Bei Trigger muss nur noch post_order() mit dem fertigen Digest aufgerufen werden.
         Spart ~20-50ms EIP-712 Signatur-Berechnung.
+
+        Speichert auch den Pre-Sign-Preis für spätere Drift-Prüfung.
         """
         if not self.is_live:
             return
@@ -112,6 +119,11 @@ class PolymarketExecutor:
             order_price = max(0.01, price - 0.01) if is_maker else price
             size_shares = size_usd / order_price
 
+            # Guard: Minimum shares check
+            if round(size_shares, 2) < self.MIN_SHARES:
+                logger.debug(f"Pre-Sign abgebrochen: {round(size_shares, 2)} shares < {self.MIN_SHARES} Minimum")
+                return
+
             order_args = OrderArgs(
                 token_id=token_id,
                 price=order_price,
@@ -119,7 +131,10 @@ class PolymarketExecutor:
                 side=BUY,
             )
             signed = self._client.create_order(order_args)
-            self._pre_signed_orders[token_id] = signed
+            self._pre_signed_orders[token_id] = {
+                "order": signed,
+                "signed_price": order_price,
+            }
         except Exception as e:
             logger.debug(f"Pre-Sign Fehler: {e}")
 
@@ -151,6 +166,19 @@ class PolymarketExecutor:
             logger.warning(f"Position ${size_usd} > Max ${max_pos} — capped")
             size_usd = max_pos
 
+        # Safety Check: Minimum Order Size ($1)
+        if size_usd < self.MIN_ORDER_SIZE_USD:
+            msg = f"Order zu klein: ${size_usd:.2f} < ${self.MIN_ORDER_SIZE_USD} Minimum"
+            logger.warning(msg)
+            return ExecutionResult(success=False, error=msg)
+
+        # Safety Check: Minimum Shares (5 shares for limit orders)
+        size_shares_check = size_usd / price if price > 0 else 0
+        if round(size_shares_check, 2) < self.MIN_SHARES:
+            msg = f"Shares zu klein: {round(size_shares_check, 2)} < {self.MIN_SHARES} Minimum (${size_usd:.2f} @ {price:.3f})"
+            logger.warning(msg)
+            return ExecutionResult(success=False, error=msg)
+
         try:
             from py_clob_client.clob_types import OrderArgs
             from py_clob_client.order_builder.constants import BUY
@@ -161,11 +189,24 @@ class PolymarketExecutor:
             t0 = time.perf_counter()
 
             # Pre-Signed Order nutzen wenn vorhanden (spart ~20-50ms)
-            pre_signed = self._pre_signed_orders.pop(token_id, None)
+            pre_signed_data = self._pre_signed_orders.pop(token_id, None)
 
-            if pre_signed:
+            if pre_signed_data:
+                signed_price = pre_signed_data["signed_price"]
+                pre_signed = pre_signed_data["order"]
+
+                # Drift-Check: Verwerfe Pre-Signed Order wenn Preis zu stark abweicht
+                price_drift = abs(signed_price - price) / price if price > 0 else 1.0
+                if price_drift > self.MAX_PRE_SIGN_PRICE_DRIFT:
+                    logger.warning(
+                        f"Pre-Signed Order verworfen: Preis-Drift {price_drift:.1%} > {self.MAX_PRE_SIGN_PRICE_DRIFT:.0%} "
+                        f"(signed={signed_price:.3f}, actual={price:.3f}) — erstelle neue Order"
+                    )
+                    pre_signed = None  # Fallthrough zu frischer Order
+
+            if pre_signed_data and pre_signed:
                 order = self._client.post_order(pre_signed)
-                logger.debug(f"Pre-Signed Order verwendet (Latenz-Vorteil)")
+                logger.debug(f"Pre-Signed Order verwendet (Latenz-Vorteil, drift={abs(pre_signed_data['signed_price'] - price)/price:.1%})")
             else:
                 # Maker vs Taker: Maker setzt Limit 1 Cent unter Ask (kassiert Rebate)
                 is_maker = self.settings.order_type == "maker"
@@ -213,7 +254,7 @@ class PolymarketExecutor:
             return result
 
         except Exception as e:
-            error_msg = str(e)[:100]
+            error_msg = str(e)[:300]  # Polymarket 400 errors need >100 chars to show root cause
             logger.error(f"Order Fehler: {error_msg}")
 
             await telegram.send_alert(

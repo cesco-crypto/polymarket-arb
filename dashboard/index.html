@@ -459,7 +459,11 @@ function switchTab(btn, tab) {
 
       id('pos-ct').textContent = _livePositions.length;
       id('hist-ct').textContent = _liveHistory.length;
-      id('live-source').textContent = `(${histData.source || 'api'} | ${histData.count || 0} trades | WR: ${histData.win_rate || 0}% | PnL: $${(histData.total_pnl || 0).toFixed(2)})`;
+      const lv = histData.live || {};
+      const lvPnl = (lv.total_pnl || 0);
+      id('live-source').textContent = lv.count
+        ? `(LIVE: ${lv.count} trades | ${lv.wins}W/${lv.losses}L | WR: ${lv.win_rate}% | PnL: $${lvPnl>=0?'+':''}${lvPnl.toFixed(2)} | Paper: ${histData.count} total)`
+        : `(${histData.source || 'api'} | ${histData.count || 0} trades | no live data yet)`;
 
       renderLivePositions();
       renderLiveHistory(histData);
@@ -502,16 +506,27 @@ function switchTab(btn, tab) {
       return;
     }
 
-    // Summary
+    // Summary: Two rows — Live Only (real money) and All (paper simulation)
     const summary = id('hist-summary');
-    summary.innerHTML = `<div style="display:flex;gap:12px;flex-wrap:wrap">
-      <span class="b">${data.count || 0} Trades</span>
-      <span class="g b">${data.wins || 0} Wins</span>
-      <span class="rd b">${data.losses || 0} Losses</span>
-      <span class="${(data.win_rate||0)>=60?'g':'rd'} b">WR: ${data.win_rate || 0}%</span>
-      <span class="${(data.total_pnl||0)>=0?'g':'rd'} b">PnL: $${(data.total_pnl||0)>=0?'+':''}${(data.total_pnl||0).toFixed(2)}</span>
-      <span class="d">Source: ${data.source || '?'}</span>
-    </div>`;
+    const live = data.live || {};
+    const hasLive = (live.count || 0) > 0;
+    summary.innerHTML = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:${hasLive?'4':'0'}px">
+        <span class="g b" style="font-size:11px;padding:2px 6px;border:1px solid var(--green);border-radius:3px">LIVE</span>
+        <span class="b">${live.count || 0} Trades</span>
+        <span class="g b">${live.wins || 0} W</span>
+        <span class="rd b">${live.losses || 0} L</span>
+        <span class="${(live.win_rate||0)>=60?'g':'rd'} b">WR: ${live.win_rate || 0}%</span>
+        <span class="${(live.total_pnl||0)>=0?'g':'rd'} b">PnL: $${(live.total_pnl||0)>=0?'+':''}${(live.total_pnl||0).toFixed(2)}</span>
+      </div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;opacity:0.6;font-size:11px">
+        <span class="d" style="font-size:10px;padding:2px 6px;border:1px solid var(--border);border-radius:3px">ALL (Paper)</span>
+        <span>${data.count || 0} Trades</span>
+        <span>${data.wins || 0} W / ${data.losses || 0} L</span>
+        <span>WR: ${data.win_rate || 0}%</span>
+        <span>PnL: $${(data.total_pnl||0)>=0?'+':''}${(data.total_pnl||0).toFixed(2)}</span>
+        <span class="d">Source: ${data.source || '?'}</span>
+      </div>`;
 
     hb.innerHTML = trades.slice(0, 50).map(t => {
       const won = t.outcome_correct;
@@ -537,11 +552,12 @@ function switchTab(btn, tab) {
       };
       const opened = fmtTs(t.entry_ts || t.signal_ts);
       const closed = fmtTs(t.exit_ts);
-      const isLive = t.live_order_success === true;
-      const isLT = (t.trade_id||'').startsWith('LT-');
-      const modeTag = isLive ? '<span class="tag tag-up" style="font-size:8px">LIVE</span>'
-                    : isLT ? '<span class="tag" style="font-size:8px;background:#a33">PENDING</span>'
-                    : '<span class="tag" style="font-size:8px;background:#555">PAPER</span>';
+      const liveStatus = t.live_status || 'unknown';
+      const modeTag = liveStatus === 'live'
+                    ? '<span class="tag tag-up" style="font-size:8px">LIVE</span>'
+                    : liveStatus === 'failed'
+                    ? '<span class="tag" style="font-size:8px;background:#a33">FAILED</span>'
+                    : '<span class="tag" style="font-size:8px;background:#555;opacity:0.7">LEGACY</span>';
       return `<tr>
         <td class="d">${t.trade_id || '?'}</td>
         <td>${modeTag}</td>
