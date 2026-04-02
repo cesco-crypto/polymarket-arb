@@ -265,8 +265,16 @@ class PolymarketExecutor:
 
             return ExecutionResult(success=False, error=error_msg)
 
+    # Polygon RPCs mit Fallback (getestet 02.04.2026)
+    POLYGON_RPCS = [
+        "https://polygon.gateway.tenderly.co",     # Funktioniert ✅
+        "https://polygon-bor-rpc.publicnode.com",   # Fallback
+        "https://polygon.publicnode.com",           # Fallback
+        "https://polygon.drpc.org",                 # Oft 403
+    ]
+
     async def get_balance(self) -> float:
-        """Holt echte USDC.e Balance von der Blockchain."""
+        """Holt echte USDC.e Balance von der Blockchain (mit RPC Fallback)."""
         if not self._client:
             return 0.0
         try:
@@ -278,9 +286,17 @@ class PolymarketExecutor:
             payload = {"jsonrpc": "2.0", "method": "eth_call",
                        "params": [{"to": USDCE, "data": call_data}, "latest"], "id": 1}
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
-                async with s.post("https://polygon.drpc.org", json=payload) as r:
-                    result = await r.json()
-                    return int(result.get("result", "0x0"), 16) / 1e6
+                for rpc in self.POLYGON_RPCS:
+                    try:
+                        async with s.post(rpc, json=payload) as r:
+                            if r.status == 200:
+                                result = await r.json()
+                                balance = int(result.get("result", "0x0"), 16) / 1e6
+                                if balance >= 0:
+                                    return balance
+                    except Exception:
+                        continue
+            return 0.0
         except Exception:
             return 0.0
 

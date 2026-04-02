@@ -17,11 +17,11 @@ from urllib.request import urlopen, Request
 
 from loguru import logger
 
-# Working Polygon RPCs (tested 02.04.2026)
+# Working Polygon RPCs (tested 02.04.2026, tenderly first — publicnode often 403)
 POLYGON_RPCS = [
-    "https://polygon.publicnode.com",
-    "https://polygon-bor-rpc.publicnode.com",
     "https://polygon.gateway.tenderly.co",
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://polygon.publicnode.com",
 ]
 
 CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
