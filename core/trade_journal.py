@@ -139,6 +139,42 @@ class TradeJournal:
         asyncio.create_task(self._safe_async(db.insert_trade(asdict(rec)), "supabase_open"))
         logger.info(f"JOURNAL OPEN: {rec.trade_id} | RAM + JSONL + Telegram + Supabase")
 
+    def update_live_result(self, trade_id: str, success: bool, order_id: str, error: str) -> None:
+        """Schreibt das Live-Order-Ergebnis zurück in den bestehenden TradeRecord.
+
+        Wird aufgerufen nachdem die Live-Order auf Polymarket platziert wurde.
+        Aktualisiert RAM + schreibt Update-Zeile ins JSONL.
+        """
+        # RAM-Record aktualisieren
+        for rec in reversed(self._records):
+            if rec.trade_id == trade_id:
+                rec.live_order_success = success
+                rec.live_order_id = order_id
+                rec.live_error = error
+                rec.order_post_ts = time.time()
+                break
+
+        # JSONL: Update-Zeile anhängen (event="live_update")
+        update = {
+            "event": "live_update",
+            "trade_id": trade_id,
+            "live_order_success": success,
+            "live_order_id": order_id,
+            "live_error": error,
+            "order_post_ts": time.time(),
+        }
+        try:
+            with open(JOURNAL_PATH, "a") as f:
+                f.write(json.dumps(update) + "\n")
+        except Exception as e:
+            logger.error(f"Journal live_update write Fehler: {e}")
+
+        # Supabase
+        asyncio.create_task(self._safe_async(db.insert_trade(update), "supabase_live_update"))
+
+        status = "✅ SUCCESS" if success else f"❌ FAILED: {error[:60]}"
+        logger.info(f"JOURNAL LIVE_UPDATE: {trade_id} | {status}")
+
     def record_close(self, rec: TradeRecord) -> None:
         """Speichert Trade-Close in alle 4 Systeme: RAM + JSONL + Telegram + Supabase."""
         rec.event = "close"

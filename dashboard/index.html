@@ -197,9 +197,9 @@
       <div class="d" style="font-size:10px">Loading trade history...</div>
     </div>
     <table>
-      <tr><th>ID</th><th>TF</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th><th style="font-size:9px">Opened</th><th style="font-size:9px">Closed</th></tr>
+      <tr><th>ID</th><th>Mode</th><th>TF</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th><th style="font-size:9px">Opened</th><th style="font-size:9px">Closed</th></tr>
     </table>
-    <table id="hist-body"><tr><td colspan="12" class="empty">Loading...</td></tr></table>
+    <table id="hist-body"><tr><td colspan="13" class="empty">Loading...</td></tr></table>
   </div>
 </div>
 
@@ -498,7 +498,7 @@ function switchTab(btn, tab) {
     const trades = data.trades || [];
 
     if (!trades.length) {
-      hb.innerHTML = '<tr><td colspan="12" class="empty">No trade history yet</td></tr>';
+      hb.innerHTML = '<tr><td colspan="13" class="empty">No trade history yet</td></tr>';
       return;
     }
 
@@ -537,8 +537,14 @@ function switchTab(btn, tab) {
       };
       const opened = fmtTs(t.entry_ts || t.signal_ts);
       const closed = fmtTs(t.exit_ts);
+      const isLive = t.live_order_success === true;
+      const isLT = (t.trade_id||'').startsWith('LT-');
+      const modeTag = isLive ? '<span class="tag tag-up" style="font-size:8px">LIVE</span>'
+                    : isLT ? '<span class="tag" style="font-size:8px;background:#a33">PENDING</span>'
+                    : '<span class="tag" style="font-size:8px;background:#555">PAPER</span>';
       return `<tr>
         <td class="d">${t.trade_id || '?'}</td>
+        <td>${modeTag}</td>
         <td><span class="tag ${tfTag}" style="font-size:9px">${tf}</span></td>
         <td><span class="tag ${asset==='BTC'?'tag-btc':'tag-eth'}">${asset}</span></td>
         <td><span class="tag ${dirTag}">${dir}</span></td>

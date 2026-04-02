@@ -79,7 +79,7 @@ class PaperTrader:
 
         self._positions: dict[str, PaperPosition] = {}    # trade_id → Position
         self._closed_positions: list[PaperPosition] = []
-        self._trade_counter = 0
+        self._trade_counter = self._load_last_trade_counter(settings)
         self._session_start = time.time()
         self._peak_capital_usd = settings.paper_capital_usd
 
@@ -87,6 +87,34 @@ class PaperTrader:
         self._csv_path = settings.data_dir / "paper_trades.csv"
         self._csv_initialized = False
         settings.data_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _load_last_trade_counter(settings: Settings) -> int:
+        """Liest den höchsten Trade-Counter aus dem JSONL Journal.
+
+        Verhindert ID-Duplikate nach Bot-Neustarts.
+        """
+        import json
+        journal_path = settings.data_dir / "trade_journal.jsonl"
+        max_counter = 0
+        if journal_path.exists():
+            try:
+                with open(journal_path) as f:
+                    for line in f:
+                        try:
+                            rec = json.loads(line.strip())
+                            tid = rec.get("trade_id", "")
+                            # Parse "PT-0014" oder "LT-0014" → 14
+                            if tid and "-" in tid:
+                                num = int(tid.split("-")[1])
+                                max_counter = max(max_counter, num)
+                        except (ValueError, json.JSONDecodeError):
+                            pass
+                if max_counter > 0:
+                    logger.info(f"PaperTrader: Trade-Counter bei {max_counter} fortgesetzt (aus JSONL)")
+            except Exception as e:
+                logger.warning(f"PaperTrader: Konnte Counter nicht laden: {e}")
+        return max_counter
 
     # --- Trade Entry ---
 
@@ -116,7 +144,8 @@ class PaperTrader:
             return None
 
         self._trade_counter += 1
-        trade_id = f"PT-{self._trade_counter:04d}"
+        prefix = "LT" if self.settings.live_trading else "PT"
+        trade_id = f"{prefix}-{self._trade_counter:04d}"
 
         fee_usd = result.position_usd * (result.fee_pct / 100)
         shares = result.position_usd / result.p_market  # Shares = USD / Preis pro Share

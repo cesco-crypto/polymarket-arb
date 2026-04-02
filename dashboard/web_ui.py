@@ -255,14 +255,26 @@ async def api_live_trades() -> dict:
     journal_path = Path(__file__).parent.parent / "data" / "trade_journal.jsonl"
     if journal_path.exists():
         trades = []
+        live_updates: dict = {}  # trade_id → {live_order_success, live_order_id, ...}
         with open(journal_path) as f:
             for line in f:
                 try:
                     rec = json.loads(line.strip())
                     if rec.get("event") == "close":
                         trades.append(rec)
+                    elif rec.get("event") == "live_update":
+                        live_updates[rec.get("trade_id", "")] = rec
                 except Exception:
                     pass
+        # Merge live_update Ergebnisse in Close-Records
+        for t in trades:
+            tid = t.get("trade_id", "")
+            if tid in live_updates:
+                upd = live_updates[tid]
+                t["live_order_success"] = upd.get("live_order_success", False)
+                t["live_order_id"] = upd.get("live_order_id", "")
+                t["live_error"] = upd.get("live_error", "")
+                t["order_post_ts"] = upd.get("order_post_ts", 0)
         # Sortierung: Neueste zuerst (nach exit_ts absteigend)
         trades.sort(key=lambda t: t.get("exit_ts", t.get("entry_ts", 0)), reverse=True)
         wins = [t for t in trades if t.get("outcome_correct")]
