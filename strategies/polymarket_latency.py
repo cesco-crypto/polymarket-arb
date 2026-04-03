@@ -615,31 +615,104 @@ class PolymarketLatencyStrategy:
                     f"Kapital: ${trader_stats.get('capital_usd', 0):.2f}"
                 )
 
-                # Stündlicher Heartbeat via Telegram (alle 60 Minuten)
+                # Stündlicher forensischer Report via Telegram (alle 60 Minuten)
                 if heartbeat_counter % 60 == 0:
-                    # CLOB Latenz messen
-                    clob_ms = 0
-                    try:
-                        import aiohttp as _aio
-                        t0 = time.time()
-                        async with _aio.ClientSession(timeout=_aio.ClientTimeout(total=5)) as s:
-                            async with s.get("https://clob.polymarket.com/markets?limit=1") as r:
-                                await r.read()
-                        clob_ms = (time.time() - t0) * 1000
-                    except Exception:
-                        pass
-
-                    asyncio.create_task(telegram.alert_heartbeat(
-                        trades=trader_stats.get('trades_closed', 0),
-                        pnl=trader_stats.get('daily_pnl_usd', 0),
-                        capital=trader_stats.get('capital_usd', 0),
-                        windows_total=discovery_status.get('total_windows', 0),
-                        windows_tradeable=discovery_status.get('tradeable', 0),
-                        clob_latency_ms=clob_ms,
-                        binance_ticks=ticks,
+                    asyncio.create_task(self._send_hourly_report(
+                        trader_stats, discovery_status, ticks
                     ))
             except Exception as e:
                 logger.error(f"Status-Loop Fehler: {e}")
+
+    # --- Stündlicher Forensik-Report ---
+
+    async def _send_hourly_report(self, trader_stats: dict, discovery_status: dict, ticks: int) -> None:
+        """Stündlicher forensischer Wallet-Report via Telegram."""
+        try:
+            import json
+            from pathlib import Path
+
+            # 1. Wallet Balance (On-Chain)
+            balance = await self.executor.get_balance() if self.executor.is_live else 0
+            initial_deposit = 79.99
+            tangem_withdrawal = 10.00
+
+            # 2. Trades aus JSONL laden
+            journal_path = Path("data/trade_journal.jsonl")
+            live_trades = []
+            if journal_path.exists():
+                with open(journal_path) as f:
+                    for line in f:
+                        try:
+                            rec = json.loads(line.strip())
+                            if rec.get("event") == "close" and rec.get("trade_id", "").startswith("LT-"):
+                                live_trades.append(rec)
+                        except Exception:
+                            pass
+
+            # 3. Statistiken berechnen
+            wins = [t for t in live_trades if t.get("outcome_correct")]
+            losses = [t for t in live_trades if not t.get("outcome_correct")]
+            total_pnl_live = sum(t.get("pnl_usd", 0) for t in live_trades)
+            total_size = sum(t.get("size_usd", 0) for t in live_trades)
+            wr = len(wins) / len(live_trades) * 100 if live_trades else 0
+            avg_win = sum(t.get("pnl_usd", 0) for t in wins) / len(wins) if wins else 0
+            avg_loss = sum(abs(t.get("pnl_usd", 0)) for t in losses) / len(losses) if losses else 0
+            wl_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+
+            # 4. Portfolio-Gesamtwert
+            portfolio = balance + tangem_withdrawal
+            total_profit = portfolio - initial_deposit
+
+            # 5. Trade-Tabelle (letzte 8 Trades)
+            recent = sorted(live_trades, key=lambda t: t.get("exit_ts", 0), reverse=True)[:8]
+            trade_lines = []
+            for t in recent:
+                icon = "✅" if t.get("outcome_correct") else "❌"
+                pnl = t.get("pnl_usd", 0)
+                trade_lines.append(
+                    f"{icon} {t.get('trade_id','?')} {t.get('asset','?')} "
+                    f"{t.get('direction','?'):<4} ${t.get('size_usd',0):.2f} → ${pnl:+.2f}"
+                )
+            trades_text = "\n".join(trade_lines) if trade_lines else "Keine Live-Trades"
+
+            # 6. Executor Stats
+            exec_stats = self.executor.stats()
+
+            # 7. Report senden
+            await telegram.send_alert(
+                f"{'═'*28}\n"
+                f"📊 <b>STÜNDLICHER REPORT</b> | {telegram._uptime()}\n"
+                f"{'═'*28}\n\n"
+                f"🏦 <b>WALLET</b>\n"
+                f"├ Balance: <b>${balance:.2f}</b> USDC.e\n"
+                f"├ Gestartet: ${initial_deposit:.2f}\n"
+                f"├ Portfolio: <b>${portfolio:.2f}</b> (+Tangem ${tangem_withdrawal:.0f})\n"
+                f"└ Profit: <b>${total_profit:+.2f} ({total_profit/initial_deposit*100:+.1f}%)</b>\n\n"
+                f"📈 <b>LIVE TRADES</b> ({len(live_trades)} total)\n"
+                f"├ {len(wins)}W / {len(losses)}L = <b>{wr:.0f}% WR</b>\n"
+                f"├ Avg Win: ${avg_win:.2f} | Avg Loss: ${avg_loss:.2f}\n"
+                f"├ W/L Ratio: <b>{wl_ratio:.2f}x</b>\n"
+                f"└ Live PnL: <b>${total_pnl_live:+.2f}</b>\n\n"
+                f"<code>{trades_text}</code>\n\n"
+                f"🎯 <b>MARKT</b>\n"
+                f"├ Windows: {discovery_status.get('tradeable',0)}/{discovery_status.get('total_windows',0)}\n"
+                f"├ Signale (Session): {self._signals_detected}\n"
+                f"├ Orders Placed: {exec_stats.get('orders_placed',0)}\n"
+                f"└ Ticks: {ticks}\n\n"
+                f"🎯 Nächstes Ziel: $1,000 → $100 Charity",
+                silent=True,
+            )
+        except Exception as e:
+            logger.error(f"Hourly Report Fehler: {e}")
+            # Fallback: einfacher Heartbeat
+            try:
+                await telegram.alert_heartbeat(
+                    trades=trader_stats.get('trades_closed', 0),
+                    pnl=trader_stats.get('daily_pnl_usd', 0),
+                    capital=trader_stats.get('capital_usd', 0),
+                )
+            except Exception:
+                pass
 
     # --- Auto-Redeem Loop ---
 
