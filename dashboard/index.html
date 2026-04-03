@@ -258,8 +258,9 @@ function switchTab(btn, tab) {
     // P2: Markets
     renderMarkets(d.discovery || {});
 
-    // Live Embeds (aktuell getradete Events)
-    renderLiveEmbeds(d.discovery || {});
+    // Live Embeds (aktuell getradete Events + offene Positionen markiert)
+    const openPos = (d.paper_trading || {}).open_positions || [];
+    renderLiveEmbeds(d.discovery || {}, openPos);
 
     // P3: Signals
     renderSignals(d.signals || [], d.config || {});
@@ -338,21 +339,36 @@ function switchTab(btn, tab) {
   }
 
   // --- Live Market Embeds ---
-  let _lastEmbedSlugs = '';
-  function renderLiveEmbeds(disc) {
+  let _lastEmbedKey = '';
+  function renderLiveEmbeds(disc, openPositions) {
     const wins = (disc.windows || []).filter(w => w.tradeable && w.remaining_s > 15);
     const container = id('live-embeds');
     const countEl = id('embed-count');
 
-    // Sort: nearest expiry first, max 4 embeds
-    const sorted = [...wins].sort((a,b) => a.remaining_s - b.remaining_s).slice(0, 4);
-    const slugKey = sorted.map(w => w.slug).join(',');
+    // Offene Positionen → Set von condition_ids/slugs für Matching
+    const openSlugs = new Set();
+    if (openPositions && Array.isArray(openPositions)) {
+      openPositions.forEach(p => {
+        if (p.market_condition_id) openSlugs.add(p.market_condition_id);
+      });
+    }
 
-    // Only rebuild if windows changed (avoid iframe flicker)
-    if (slugKey === _lastEmbedSlugs) return;
-    _lastEmbedSlugs = slugKey;
+    // Sort: positions first, then nearest expiry
+    const sorted = [...wins].sort((a,b) => {
+      const aHasPos = openSlugs.has(a.condition_id) ? 0 : 1;
+      const bHasPos = openSlugs.has(b.condition_id) ? 0 : 1;
+      if (aHasPos !== bHasPos) return aHasPos - bHasPos;
+      return a.remaining_s - b.remaining_s;
+    }).slice(0, 4);
 
-    countEl.textContent = sorted.length + ' active';
+    const slugKey = sorted.map(w => w.slug).join(',') + '|' + [...openSlugs].join(',');
+    if (slugKey === _lastEmbedKey) return;
+    _lastEmbedKey = slugKey;
+
+    const posCount = sorted.filter(w => openSlugs.has(w.condition_id)).length;
+    countEl.textContent = posCount > 0
+      ? posCount + ' trading · ' + (sorted.length - posCount) + ' watching'
+      : 'watching ' + sorted.length + ' markets';
 
     if (!sorted.length) {
       container.innerHTML = '<span class="d" style="font-size:10px">No tradeable markets right now</span>';
@@ -362,8 +378,7 @@ function switchTab(btn, tab) {
     container.innerHTML = sorted.map(w => {
       const asset = (w.asset || '').toUpperCase();
       const slug = w.slug || '';
-      // Build Polymarket embed URL from slug
-      // Slug format: btc-updown-5m-1775240700 → event: btc-updown-5m-1775240700
+      const hasPosition = openSlugs.has(w.condition_id);
       const embedUrl = `https://embed.polymarket.com/market?market=${slug}&theme=dark&liveactivity=true&border=true&height=220`;
       const pmUrl = `https://polymarket.com/event/${slug}`;
       const tagC = asset === 'BTC' ? 'tag-btc' : 'tag-eth';
@@ -371,12 +386,17 @@ function switchTab(btn, tab) {
       const mm = Math.floor(secs/60);
       const ss = Math.floor(secs%60);
       const tf = w.tf || '5m';
+      const borderColor = hasPosition ? 'var(--green)' : 'var(--border)';
+      const posLabel = hasPosition
+        ? '<span style="font-size:8px;background:var(--green);color:#000;padding:1px 5px;border-radius:3px;font-weight:600">POSITION</span>'
+        : '';
 
-      return `<div style="flex:0 0 auto;min-width:280px;max-width:340px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;overflow:hidden">
+      return `<div style="flex:0 0 auto;min-width:280px;max-width:340px;background:var(--bg-card);border:2px solid ${borderColor};border-radius:6px;overflow:hidden">
         <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid var(--border)">
           <div style="display:flex;align-items:center;gap:6px">
             <span class="tag ${tagC}" style="font-size:9px">${asset}</span>
             <span class="d" style="font-size:9px">${tf}</span>
+            ${posLabel}
           </div>
           <div style="display:flex;align-items:center;gap:6px">
             <span style="font-size:10px;color:var(--${secs<30?'red':secs<60?'yellow':'green'})">${mm}:${String(ss).padStart(2,'0')}</span>
@@ -766,7 +786,7 @@ function switchTab(btn, tab) {
 
   setInterval(() => { id('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
   // Re-render countdowns every 500ms for smooth animation
-  setInterval(() => { if (lastData) { renderMarkets(lastData.discovery||{}); renderLiveEmbeds(lastData.discovery||{}); } }, 500);
+  setInterval(() => { if (lastData) { renderMarkets(lastData.discovery||{}); renderLiveEmbeds(lastData.discovery||{}, (lastData.paper_trading||{}).open_positions||[]); } }, 500);
 
   connect();
 })();
