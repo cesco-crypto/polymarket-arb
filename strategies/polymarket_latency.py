@@ -636,25 +636,39 @@ class PolymarketLatencyStrategy:
             initial_deposit = 79.99
             tangem_withdrawal = 10.00
 
-            # 2. Trades aus JSONL laden
+            # 2. Trades aus JSONL laden (close + live_update mergen)
             journal_path = Path("data/trade_journal.jsonl")
             live_trades = []
+            live_updates = {}  # trade_id → live_update record
             if journal_path.exists():
                 with open(journal_path) as f:
                     for line in f:
                         try:
                             rec = json.loads(line.strip())
-                            if rec.get("event") == "close" and rec.get("trade_id", "").startswith("LT-"):
+                            tid = rec.get("trade_id", "")
+                            if not tid.startswith("LT-"):
+                                continue
+                            if rec.get("event") == "live_update":
+                                live_updates[tid] = rec
+                            elif rec.get("event") == "close":
                                 live_trades.append(rec)
                         except Exception:
                             pass
+            # Merge: live_update Daten in close Records übernehmen
+            for t in live_trades:
+                upd = live_updates.get(t.get("trade_id", ""))
+                if upd:
+                    t["live_order_success"] = upd.get("live_order_success", False)
+                    t["live_order_id"] = upd.get("live_order_id", "")
 
-            # 3. Statistiken berechnen
-            wins = [t for t in live_trades if t.get("outcome_correct")]
-            losses = [t for t in live_trades if not t.get("outcome_correct")]
-            total_pnl_live = sum(t.get("pnl_usd", 0) for t in live_trades)
-            total_size = sum(t.get("size_usd", 0) for t in live_trades)
-            wr = len(wins) / len(live_trades) * 100 if live_trades else 0
+            # 3. Statistiken berechnen — NUR echte Live Trades (nicht paper-rejected)
+            real_live = [t for t in live_trades if t.get("live_order_success")]
+            rejected = [t for t in live_trades if not t.get("live_order_success")]
+            wins = [t for t in real_live if t.get("outcome_correct")]
+            losses = [t for t in real_live if not t.get("outcome_correct")]
+            total_pnl_live = sum(t.get("pnl_usd", 0) for t in real_live)
+            total_size = sum(t.get("size_usd", 0) for t in real_live)
+            wr = len(wins) / len(real_live) * 100 if real_live else 0
             avg_win = sum(t.get("pnl_usd", 0) for t in wins) / len(wins) if wins else 0
             avg_loss = sum(abs(t.get("pnl_usd", 0)) for t in losses) / len(losses) if losses else 0
             wl_ratio = avg_win / avg_loss if avg_loss > 0 else 0
@@ -663,8 +677,8 @@ class PolymarketLatencyStrategy:
             portfolio = balance + tangem_withdrawal
             total_profit = portfolio - initial_deposit
 
-            # 5. Trade-Tabelle (letzte 8 Trades)
-            recent = sorted(live_trades, key=lambda t: t.get("exit_ts", 0), reverse=True)[:8]
+            # 5. Trade-Tabelle (letzte 8 echte Live Trades)
+            recent = sorted(real_live, key=lambda t: t.get("exit_ts", 0), reverse=True)[:8]
             trade_lines = []
             for t in recent:
                 icon = "✅" if t.get("outcome_correct") else "❌"
@@ -688,7 +702,7 @@ class PolymarketLatencyStrategy:
                 f"├ Gestartet: ${initial_deposit:.2f}\n"
                 f"├ Portfolio: <b>${portfolio:.2f}</b> (+Tangem ${tangem_withdrawal:.0f})\n"
                 f"└ Profit: <b>${total_profit:+.2f} ({total_profit/initial_deposit*100:+.1f}%)</b>\n\n"
-                f"📈 <b>LIVE TRADES</b> ({len(live_trades)} total)\n"
+                f"📈 <b>LIVE TRADES</b> ({len(real_live)} echte | {len(rejected)} rejected)\n"
                 f"├ {len(wins)}W / {len(losses)}L = <b>{wr:.0f}% WR</b>\n"
                 f"├ Avg Win: ${avg_win:.2f} | Avg Loss: ${avg_loss:.2f}\n"
                 f"├ W/L Ratio: <b>{wl_ratio:.2f}x</b>\n"
