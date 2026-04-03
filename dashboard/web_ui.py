@@ -460,7 +460,10 @@ async def api_strategies() -> dict:
 
 @app.post("/api/strategy/enable")
 async def enable_strategy(body: dict) -> dict:
-    """Aktiviert eine Strategie (kann parallel zu anderen laufen)."""
+    """Aktiviert eine Strategie — deaktiviert alle anderen (Radio-Button Logik).
+
+    Nur EINE Strategie darf gleichzeitig aktiv sein um Doppel-Trades zu vermeiden.
+    """
     global strategy
 
     name = body.get("strategy", "")
@@ -472,16 +475,31 @@ async def enable_strategy(body: dict) -> dict:
     if name in active_strategies:
         return {"status": "already_active", "active": list(active_strategies.keys())}
 
+    # Radio-Button: ALLE anderen Strategien zuerst deaktivieren
+    for other_name in list(active_strategies.keys()):
+        if other_name != name:
+            task = _strategy_tasks.pop(other_name, None)
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            strat_old = active_strategies.pop(other_name, None)
+            if strat_old:
+                try:
+                    await strat_old.shutdown()
+                except Exception as e:
+                    logger.error(f"Shutdown {other_name}: {e}")
+            logger.info(f"Strategie DEAKTIVIERT (Radio-Button): {other_name}")
+
     # Neue Strategie erstellen und starten
     strat = create_strategy(name, settings)
     active_strategies[name] = strat
     _strategy_tasks[name] = asyncio.create_task(strat.run())
+    strategy = strat  # Immer primär
 
-    # Erste aktivierte Strategie wird primär (für Dashboard-Broadcast)
-    if strategy is None:
-        strategy = strat
-
-    logger.info(f"Strategie AKTIVIERT: {name} ({len(active_strategies)} aktiv)")
+    logger.info(f"Strategie AKTIVIERT: {name} (einzige aktive)")
     return {"status": "enabled", "strategy": name, "active": list(active_strategies.keys())}
 
 
@@ -517,6 +535,21 @@ async def disable_strategy(body: dict) -> dict:
 
     logger.info(f"Strategie DEAKTIVIERT: {name} ({len(active_strategies)} aktiv)")
     return {"status": "disabled", "strategy": name, "active": list(active_strategies.keys())}
+
+
+@app.get("/api/hmsf/config")
+async def get_hmsf_config() -> dict:
+    """HMSF Module-Toggles und Konfiguration."""
+    from strategies.hmsf_core import hmsf_config
+    return hmsf_config.get_all()
+
+
+@app.post("/api/hmsf/config")
+async def set_hmsf_config(body: dict) -> dict:
+    """HMSF Module-Toggles live ändern (kein Restart nötig)."""
+    from strategies.hmsf_core import hmsf_config
+    changed = hmsf_config.update_many(body)
+    return {"updated": changed, "config": hmsf_config.get_all()}
 
 
 @app.get("/strategy", response_class=HTMLResponse)

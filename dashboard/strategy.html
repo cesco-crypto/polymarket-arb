@@ -131,6 +131,7 @@ async function loadStrategies() {
 
     list.innerHTML = strategies.map(s => {
       const isActive = s.active;
+      const isHMSF = s.name === 'hmsf_decision_engine';
       return `
         <div class="strat-card ${isActive ? 'active' : 'inactive'}" id="card-${s.name}">
           <div class="strat-header">
@@ -138,22 +139,26 @@ async function loadStrategies() {
             <span class="strat-badge ${isActive ? 'on' : 'off'}">${isActive ? 'AKTIV' : 'INAKTIV'}</span>
           </div>
           <div class="strat-desc">${s.description}</div>
+          ${isHMSF && isActive ? '<div id="hmsf-modules" style="margin:12px 0;padding:10px;background:var(--bg-card2);border:1px solid var(--border);border-radius:6px"><div style="font-size:10px;color:var(--text-mid);margin-bottom:8px;font-weight:600">MODULE (einzeln ein/ausschaltbar)</div><div id="module-toggles">Lade Module...</div></div>' : ''}
           <div class="strat-toggle">
             ${isActive
               ? `<button class="toggle-btn disable" onclick="disableStrategy('${s.name}')">Deaktivieren</button>`
               : `<button class="toggle-btn enable" onclick="enableStrategy('${s.name}')">Aktivieren</button>`
             }
-            <span class="strat-status">${isActive ? 'Laeuft seit Bot-Start' : 'Gestoppt'}</span>
+            <span class="strat-status">${isActive ? 'Aktiv (einzige)' : 'Gestoppt'}</span>
           </div>
         </div>`;
     }).join('');
+    // Lade HMSF Module-Toggles wenn HMSF aktiv
+    const hmsfActive = strategies.find(s => s.name === 'hmsf_decision_engine' && s.active);
+    if (hmsfActive) loadHMSFModules();
   } catch(e) {
     document.getElementById('strategies-list').innerHTML = '<p style="color:var(--red)">Fehler beim Laden: ' + e + '</p>';
   }
 }
 
 async function enableStrategy(name) {
-  if (!confirm('Strategie "' + name + '" aktivieren?\n\nSie wird parallel zu anderen aktiven Strategien laufen.')) return;
+  if (!confirm('Strategie "' + name + '" aktivieren?\n\nDie andere Strategie wird automatisch deaktiviert (nur 1 gleichzeitig).')) return;
   try {
     const r = await fetch(API + '/api/strategy/enable', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -228,6 +233,72 @@ async function toggleTradingMode() {
 
 loadTradingMode();
 setInterval(loadTradingMode, 10000);
+
+// HMSF Module Toggles
+const HMSF_MODULES = [
+  {key: 'legacy_momentum_enabled', label: 'Modul 0: Legacy Momentum', desc: 'v2.0 Logik — Binance Momentum >= 0.05% in 15s'},
+  {key: 'enhanced_latency_momentum_enabled', label: 'Modul 1: Enhanced Latency', desc: 'Momentum + Price-Gap + Orderbook-Imbalance'},
+  {key: 'last_seconds_sniping_enabled', label: 'Modul 2: Last-Seconds Sniping', desc: '15-60s vor Expiry, Ask >= 0.72'},
+  {key: 'both_sides_arbitrage_enabled', label: 'Modul 3: Both-Sides Arb', desc: 'UP+DOWN < $1.00 nach Fees (delta-neutral)'},
+];
+
+async function loadHMSFModules() {
+  try {
+    const r = await fetch('/api/hmsf/config');
+    const cfg = await r.json();
+    const container = document.getElementById('module-toggles');
+    if (!container) return;
+
+    container.innerHTML = HMSF_MODULES.map(m => {
+      const enabled = cfg[m.key];
+      const color = enabled ? 'var(--green)' : 'var(--text-dim)';
+      const icon = enabled ? '☑' : '☐';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer" onclick="toggleModule('${m.key}', ${!enabled})">
+        <span style="font-size:14px;color:${color};width:18px">${icon}</span>
+        <div>
+          <div style="font-size:11px;color:${enabled ? 'var(--text)' : 'var(--text-dim)'};font-weight:${enabled ? '600' : '400'}">${m.label}</div>
+          <div style="font-size:9px;color:var(--text-dim)">${m.desc}</div>
+        </div>
+        <span style="margin-left:auto;font-size:8px;padding:2px 6px;border-radius:3px;background:${enabled ? 'var(--green-dim)' : 'var(--bg)'};color:${enabled ? 'var(--green)' : 'var(--text-dim)'};border:1px solid ${enabled ? 'var(--green)' : 'var(--border)'}">${enabled ? 'AN' : 'AUS'}</span>
+      </div>`;
+    }).join('') + `<div style="margin-top:8px;display:flex;gap:8px">
+      <div style="display:flex;align-items:center;gap:4px;cursor:pointer" onclick="toggleHMSFMode('conservative')">
+        <span style="font-size:12px;color:${cfg.conservative_mode ? 'var(--green)' : 'var(--text-dim)'}">${cfg.conservative_mode ? '●' : '○'}</span>
+        <span style="font-size:10px;color:${cfg.conservative_mode ? 'var(--text)' : 'var(--text-dim)'}">Conservative</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:4px;cursor:pointer" onclick="toggleHMSFMode('aggressive')">
+        <span style="font-size:12px;color:${cfg.aggressive_mode ? 'var(--red)' : 'var(--text-dim)'}">${cfg.aggressive_mode ? '●' : '○'}</span>
+        <span style="font-size:10px;color:${cfg.aggressive_mode ? 'var(--text)' : 'var(--text-dim)'}">Aggressive</span>
+      </div>
+    </div>`;
+  } catch(e) { console.error('HMSF config error:', e); }
+}
+
+async function toggleModule(key, value) {
+  try {
+    const body = {}; body[key] = value;
+    await fetch('/api/hmsf/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    showStatus((value ? 'Aktiviert' : 'Deaktiviert') + ': ' + key, 'success');
+    loadHMSFModules();
+  } catch(e) { showStatus('Fehler: ' + e, 'error'); }
+}
+
+async function toggleHMSFMode(mode) {
+  const body = mode === 'conservative'
+    ? {conservative_mode: true, aggressive_mode: false}
+    : {conservative_mode: false, aggressive_mode: true};
+  try {
+    await fetch('/api/hmsf/config', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    showStatus('Modus: ' + mode.toUpperCase(), 'success');
+    loadHMSFModules();
+  } catch(e) { showStatus('Fehler: ' + e, 'error'); }
+}
 </script>
 </body>
 </html>
