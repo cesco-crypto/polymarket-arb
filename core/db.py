@@ -181,13 +181,14 @@ async def get_all_trades(limit: int = 500) -> list[dict]:
 
 
 async def get_closed_trades(limit: int = 200) -> list[dict]:
-    """Holt nur geschlossene Trades."""
+    """Holt geschlossene Trades und merged open-time Felder (fees, EV, spread etc.)."""
     client = _get_client()
     if not client:
         return []
 
     try:
-        result = (
+        # Fetch close records
+        close_result = (
             client.table("trades")
             .select("*")
             .eq("event", "close")
@@ -195,7 +196,50 @@ async def get_closed_trades(limit: int = 200) -> list[dict]:
             .limit(limit)
             .execute()
         )
-        return result.data or []
+        closes = close_result.data or []
+        if not closes:
+            return []
+
+        # Fetch matching open records to merge open-time fields
+        trade_ids = list({t.get("trade_id", "") for t in closes if t.get("trade_id")})
+        open_by_id: dict[str, dict] = {}
+        if trade_ids:
+            # Supabase .in_() filter — batch in chunks of 50 to stay under URL limits
+            for i in range(0, len(trade_ids), 50):
+                chunk = trade_ids[i:i + 50]
+                try:
+                    open_result = (
+                        client.table("trades")
+                        .select("*")
+                        .eq("event", "open")
+                        .in_("trade_id", chunk)
+                        .execute()
+                    )
+                    for row in (open_result.data or []):
+                        open_by_id[row.get("trade_id", "")] = row
+                except Exception as e:
+                    logger.warning(f"DB open-record fetch Fehler: {e}")
+
+        # Merge open-time fields into close records
+        _open_fields = (
+            "signal_ts", "window_slug", "market_question", "timeframe",
+            "polymarket_bid", "polymarket_ask",
+            "p_market", "raw_edge_pct", "fee_pct", "net_ev_pct",
+            "shares", "kelly_fraction",
+            "signal_to_order_ms", "transit_latency_ms", "tick_age_ms",
+            "order_type", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+        )
+        for t in closes:
+            tid = t.get("trade_id", "")
+            if tid in open_by_id:
+                opn = open_by_id[tid]
+                for fld in _open_fields:
+                    if not t.get(fld):
+                        val = opn.get(fld)
+                        if val:
+                            t[fld] = val
+
+        return closes
     except Exception as e:
         logger.error(f"DB Query Fehler: {e}")
         return []

@@ -283,20 +283,39 @@ async def api_live_trades() -> dict:
     journal_path = Path(__file__).parent.parent / "data" / "trade_journal.jsonl"
     if journal_path.exists():
         trades = []
-        live_updates: dict = {}  # trade_id → {live_order_success, live_order_id, ...}
+        open_records: dict = {}   # trade_id → open record (for field merging)
+        live_updates: dict = {}   # trade_id → {live_order_success, live_order_id, ...}
         with open(journal_path) as f:
             for line in f:
                 try:
                     rec = json.loads(line.strip())
-                    if rec.get("event") == "close":
+                    if rec.get("event") == "open":
+                        open_records[rec.get("trade_id", "")] = rec
+                    elif rec.get("event") == "close":
                         trades.append(rec)
                     elif rec.get("event") == "live_update":
                         live_updates[rec.get("trade_id", "")] = rec
                 except Exception:
                     pass
-        # Merge live_update Ergebnisse in Close-Records
+        # Merge open-time fields + live_update results into close records
+        _open_fields = (
+            "signal_ts", "window_slug", "market_question", "timeframe",
+            "polymarket_bid", "polymarket_ask",
+            "p_market", "raw_edge_pct", "fee_pct", "net_ev_pct",
+            "shares", "kelly_fraction",
+            "signal_to_order_ms", "transit_latency_ms", "tick_age_ms",
+            "order_type", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+        )
         for t in trades:
             tid = t.get("trade_id", "")
+            # Copy open-time fields if missing in close record
+            if tid in open_records:
+                opn = open_records[tid]
+                for fld in _open_fields:
+                    if not t.get(fld):
+                        val = opn.get(fld)
+                        if val:
+                            t[fld] = val
             if tid in live_updates:
                 upd = live_updates[tid]
                 t["live_order_success"] = upd.get("live_order_success", False)

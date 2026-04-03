@@ -199,21 +199,40 @@ async def alert_signal(
     p_true: float = 0, fee_pct: float = 0, kelly: float = 0,
     liquidity: float = 0, spread_pct: float = 0,
     seconds_to_expiry: float = 0, transit_ms: float = 0,
+    # --- Advanced Metrics ---
+    slippage_pct: float = 0, ob_imbalance_pct: float = 0,
+    cex_lag_ms: float = 0, regime: str = "",
+    confluence: int = 0, confidence_score: float = 0,
+    fill_type: str = "taker", gas_fee_usd: float = 0,
+    implied_prob: float = 0,
 ) -> None:
-    """Signal erkannt: Detaillierte Analyse."""
+    """Signal erkannt: Vollstaendige Analyse mit Advanced HFT Metrics."""
     _stats["signals"] += 1
     arrow = "🟩" if direction == "UP" else "🟥"
     conf = "🔥" if abs(momentum) > 0.30 else "⚡" if abs(momentum) > 0.15 else "📊"
 
+    implied_str = f"{implied_prob * 100:.1f}%" if implied_prob > 0 else f"{ask * 100:.1f}%"
+    regime_str = regime if regime else "N/A"
+    # OB Imbalance: positive = bullish pressure
+    ob_sign = "+" if ob_imbalance_pct >= 0 else ""
+
     await send_alert(
         f"{arrow} <b>SIGNAL #{_stats['signals']}: {asset} {direction}</b> {conf}\n\n"
-        f"📈 Mom: <b>{momentum:+.3f}%</b> → p={p_true:.3f}\n"
-        f"💱 Ask: {ask:.3f} | EV: <b>{ev:+.2f}%</b>\n"
-        f"💰 Size: ${size:.2f} | Kelly: {kelly:.3f}\n"
-        f"📉 Fee: {fee_pct:.2f}% | Spread: {spread_pct:.1f}%\n"
-        f"💧 Liq: ${liquidity:,.0f} | Exp: {seconds_to_expiry:.0f}s\n"
-        f"⏱ Transit: {transit_ms:.0f}ms\n\n"
-        f"<i>{question[:55]}</i>"
+        f"📈 Momentum: <b>{momentum:+.3f}%</b> → Model p={p_true:.3f}\n"
+        f"💱 Ask: {ask:.3f} | Implied: {implied_str}\n"
+        f"💰 Size: ${size:.2f} | Kelly: {kelly:.3f}\n\n"
+        f"🔍 <b>ADVANCED METRICS</b>\n"
+        f"<pre>"
+        f"Net EV: {ev:+.2f}%     Fee: {fee_pct:.2f}%\n"
+        f"Spread: {spread_pct:.1f}%      Slip: {slippage_pct:.1f}%\n"
+        f"Liq:    ${liquidity:,.0f}\n"
+        f"OB Imb: {ob_sign}{ob_imbalance_pct:.1f}%\n"
+        f"CEX Lag:{cex_lag_ms:5.1f}s   Transit: {transit_ms:.0f}ms\n"
+        f"Expiry: {seconds_to_expiry:.0f}s     Regime: {regime_str}\n"
+        f"Confl:  {confluence}/5    Score: {confidence_score:.0f}/100\n"
+        f"Fill:   {fill_type:7s}  Gas: ${gas_fee_usd:.3f}"
+        f"</pre>\n\n"
+        f"📍 <i>{question[:60]}</i>"
     )
 
 
@@ -346,3 +365,121 @@ async def alert_heartbeat(
         f"📈 Live: {_stats['live_orders_ok']} OK / {_stats['live_orders_fail']} Fail",
         silent=True,
     )
+
+
+def _format_trade_table(trades: list[dict], max_rows: int = 8) -> str:
+    """Formatiert eine monospace Trade-Tabelle fuer den Hourly Report.
+
+    Jeder Trade-Dict braucht: trade_id, asset, direction, size_usd, pnl_usd,
+    net_ev_pct, fee_pct, spread_pct, market_liquidity_usd, transit_latency_ms,
+    seconds_to_expiry, confidence_score.
+    """
+    if not trades:
+        return "  (keine Trades)\n"
+
+    # Header
+    header = "ID      A Dir  $Sz   PnL    EV%  Fee% Spr% Liq$   Lat Exp  Sc"
+    lines = [header]
+
+    recent = sorted(trades, key=lambda t: t.get("exit_ts", 0), reverse=True)[:max_rows]
+    for t in recent:
+        tid = t.get("trade_id", "?")[-3:]      # Last 3 chars: "028"
+        asset_code = t.get("asset", "?")[0]      # B or E
+        direction = t.get("direction", "?")[:2]  # UP or DN
+        size = t.get("size_usd", 0)
+        pnl = t.get("pnl_usd", 0)
+        ev = t.get("net_ev_pct", 0)
+        fee = t.get("fee_pct", 0)
+        spread = t.get("spread_pct", 0)
+        liq = t.get("market_liquidity_usd", 0)
+        transit = t.get("transit_latency_ms", 0)
+        expiry = t.get("seconds_to_expiry", 0)
+        score = t.get("confidence_score", 0)
+
+        # Liquidity in K
+        liq_k = f"{liq/1000:.1f}k" if liq >= 1000 else f"{liq:.0f}"
+
+        lines.append(
+            f"{tid:>3}    {asset_code} {direction:<2} {size:5.2f} {pnl:+6.2f} "
+            f"{ev:+5.1f} {fee:4.2f} {spread:4.1f} {liq_k:>5} "
+            f"{transit:4.0f} {expiry:3.0f} {score:3.0f}"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
+async def alert_hourly_report(
+    # --- Wallet ---
+    balance: float,
+    initial_deposit: float = 79.99,
+    tangem_withdrawal: float = 10.00,
+    # --- Trade Stats ---
+    real_trades: list[dict] | None = None,
+    rejected_count: int = 0,
+    wins_count: int = 0,
+    losses_count: int = 0,
+    avg_win: float = 0,
+    avg_loss: float = 0,
+    wl_ratio: float = 0,
+    live_pnl: float = 0,
+    # --- Market Info ---
+    windows_tradeable: int = 0,
+    windows_total: int = 0,
+    signals_session: int = 0,
+    orders_placed: int = 0,
+    ticks: int = 0,
+    # --- Advanced Aggregate Stats ---
+    avg_net_ev: float = 0,
+    avg_liquidity: float = 0,
+    avg_transit_ms: float = 0,
+    avg_cex_lag_s: float = 0,
+    regime_breakdown: str = "",
+    avg_confluence: float = 0,
+) -> None:
+    """Stuendlicher Forensik-Report mit monospace Trade-Tabelle und Advanced Stats."""
+    if real_trades is None:
+        real_trades = []
+
+    total_real = len(real_trades)
+    wr = wins_count / total_real * 100 if total_real > 0 else 0
+
+    # Portfolio
+    portfolio = balance + tangem_withdrawal
+    total_profit = portfolio - initial_deposit
+    profit_pct = total_profit / initial_deposit * 100 if initial_deposit > 0 else 0
+
+    # Trade Table
+    trade_table = _format_trade_table(real_trades)
+
+    # Regime fallback
+    if not regime_breakdown:
+        regime_breakdown = "N/A"
+
+    msg = (
+        f"{'═' * 29}\n"
+        f"📊 <b>STUENDLICHER REPORT</b> | {_uptime()}\n"
+        f"{'═' * 29}\n\n"
+        f"🏦 <b>WALLET</b>\n"
+        f"├ Balance: <b>${balance:.2f}</b> USDC.e\n"
+        f"├ Portfolio: <b>${portfolio:.2f}</b> (+Tangem ${tangem_withdrawal:.0f})\n"
+        f"└ Profit: <b>${total_profit:+.2f} ({profit_pct:+.1f}%)</b>\n\n"
+        f"📈 <b>LIVE TRADES</b> ({total_real} echte | {rejected_count} rejected)\n"
+        f"├ {wins_count}W / {losses_count}L = <b>{wr:.0f}% WR</b>\n"
+        f"├ Avg Win: ${avg_win:.2f} | Avg Loss: ${avg_loss:.2f}\n"
+        f"├ W/L Ratio: <b>{wl_ratio:.2f}x</b>\n"
+        f"└ Live PnL: <b>${live_pnl:+.2f}</b>\n\n"
+        f"<pre>{trade_table}</pre>\n"
+        f"📊 <b>ADVANCED STATS</b>\n"
+        f"├ Avg Net EV: <b>{avg_net_ev:+.1f}%</b>\n"
+        f"├ Avg Liquidity: ${avg_liquidity:,.0f}\n"
+        f"├ Avg Transit: {avg_transit_ms:.0f}ms | Avg CEX Lag: {avg_cex_lag_s:.1f}s\n"
+        f"├ Regime: {regime_breakdown}\n"
+        f"└ Avg Confluence: {avg_confluence:.1f}/5\n\n"
+        f"🎯 <b>MARKT</b>\n"
+        f"├ Windows: {windows_tradeable}/{windows_total}\n"
+        f"├ Signale: {signals_session} | Orders: {orders_placed}\n"
+        f"└ Ticks: {ticks}\n\n"
+        f"🎯 Naechstes Ziel: $1,000 → $100 Charity"
+    )
+
+    await send_alert(msg, silent=True)

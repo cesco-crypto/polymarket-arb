@@ -419,6 +419,67 @@ class PolymarketLatencyStrategy:
                 transit = self.oracle.status().get(f"{asset}/USDT", {}).get("transit_p50_ms", 0)
                 bid = window.up_best_bid if direction == "UP" else window.down_best_bid
                 spread = (ask_price - bid) / ((ask_price + bid) / 2) * 100 if bid > 0 else 0
+
+                # --- Advanced HFT Metrics (14 neue Felder) ---
+                # 1. orderbook_imbalance_pct: (bid_vol / ask_vol) - 1
+                _bid_vol = window.up_bid_size if window.up_bid_size > 0 else 0.01
+                _ask_vol = window.up_ask_size if window.up_ask_size > 0 else 0.01
+                _ob_imbalance = (_bid_vol / _ask_vol) - 1.0
+
+                # 2. cex_lag_ms: Binance tick age vs Polymarket orderbook age
+                _binance_tick = self.oracle.get_latest(f"{asset}/USDT")
+                _binance_ts = _binance_tick.timestamp if _binance_tick else time.time()
+                _poly_ts = window.orderbook_ts
+                _cex_lag = (_binance_ts - _poly_ts) * 1000 if _poly_ts > 0 else 0.0
+
+                # 4. implied_prob: Polymarket ask price at entry = implied probability
+                _implied_prob = ask_price
+
+                # 6. regime_tag: high_vol / low_vol based on recent tick volatility
+                _vol = self.oracle.get_volatility(f"{asset}/USDT", window_s=30.0)
+                _regime = "high_vol" if _vol > 0.02 else "low_vol"
+
+                # 7. signal_confluence_count: count aligned sub-signals (0-5)
+                _confluence = 0
+                # a) Momentum above threshold
+                if abs(momentum_pct) >= self.settings.min_momentum_pct:
+                    _confluence += 1
+                # b) Orderbook imbalance confirms direction
+                if (direction == "UP" and _ob_imbalance > 0) or (direction == "DOWN" and _ob_imbalance < 0):
+                    _confluence += 1
+                # c) Price-first filter passes (ask near 0.50)
+                if abs(ask_price - 0.50) <= 0.10:
+                    _confluence += 1
+                # d) Spread is below 2% (tight market)
+                if spread > 0 and spread < 2.0:
+                    _confluence += 1
+                # e) Net EV above 2x minimum threshold
+                if result.net_ev_pct >= self.settings.min_edge_pct * 2:
+                    _confluence += 1
+
+                # 8. confidence_score: weighted 0-100
+                _conf = (
+                    result.p_true * 40
+                    + min(result.net_ev_pct / 50, 1.0) * 30
+                    + (_confluence / 5) * 30
+                )
+                _confidence = round(max(0.0, min(100.0, _conf)), 1)
+
+                # 9. gas_fee_usd: 0.0 for CLOB orders (operator pays gas)
+                _gas_fee = 0.0
+
+                # 10. fill_type: set at entry, refined after live execution
+                _fill_type = self.settings.order_type  # "taker" or "maker"
+
+                # 11. position_size_usd: same as size_usd at entry
+                _position_size = result.position_usd
+
+                # 12. entry_timestamp_ms: exact Unix millisecond of entry
+                _entry_ts_ms = int(pos.entered_at * 1000)
+
+                # 13. market_id: Polymarket market slug
+                _market_id = window.slug
+
                 self.journal.record_open(TradeRecord(
                     trade_id=pos.trade_id, asset=asset, direction=direction,
                     signal_ts=time.time(), entry_ts=pos.entered_at,
@@ -437,6 +498,18 @@ class PolymarketLatencyStrategy:
                     seconds_to_expiry=seconds_to_expiry,
                     market_liquidity_usd=window.liquidity_usd,
                     spread_pct=round(spread, 2),
+                    # --- 14 Advanced HFT Metrics ---
+                    orderbook_imbalance_pct=round(_ob_imbalance, 4),
+                    cex_lag_ms=round(_cex_lag, 1),
+                    implied_prob=round(_implied_prob, 4),
+                    regime_tag=_regime,
+                    signal_confluence_count=_confluence,
+                    confidence_score=_confidence,
+                    gas_fee_usd=_gas_fee,
+                    fill_type=_fill_type,
+                    position_size_usd=round(_position_size, 2),
+                    entry_timestamp_ms=_entry_ts_ms,
+                    market_id=_market_id,
                 ))
 
             # Fenster als getraded markieren (Duplicate Prevention)
@@ -457,10 +530,15 @@ class PolymarketLatencyStrategy:
                         latency = (time.time() - t0) * 1000
                         if not res.success:
                             logger.error(f"LIVE ORDER FAILED: {a} {d} — {res.error}")
-                            # Live-Ergebnis in Journal zurückschreiben
+                            # 3. slippage_pct: n/a on failure
+                            # 10. fill_type: "rejected" on failure
+                            _live_fill_type = "rejected"
+                            if "MIN_SHARES" in str(res.error) or "zu klein" in str(res.error):
+                                _live_fill_type = "rejected"
                             journal.update_live_result(
                                 trade_id, success=False, order_id="",
                                 error=str(res.error)[:200],
+                                fill_type=_live_fill_type,
                             )
                             await telegram.alert_live_order(
                                 trade_id, a, d, success=False,
@@ -468,10 +546,21 @@ class PolymarketLatencyStrategy:
                             )
                         else:
                             logger.info(f"LIVE ORDER OK: {a} {d} — ID={res.order_id} ({latency:.0f}ms)")
-                            # Live-Ergebnis in Journal zurückschreiben
+                            # 3. slippage_pct: (fill_price - expected_price) / expected_price * 100
+                            _fill_price = res.filled_price if res.filled_price > 0 else ap
+                            _slippage = (_fill_price - ap) / ap * 100 if ap > 0 else 0.0
+                            # 10. fill_type: refine from executor response
+                            _live_fill_type = "taker"
+                            if res.filled_size > 0 and res.filled_size < sz * 0.95:
+                                _live_fill_type = "partial"
+                            # 11. position_size_usd: actual filled amount
+                            _actual_size = res.filled_size if res.filled_size > 0 else sz
                             journal.update_live_result(
                                 trade_id, success=True,
                                 order_id=str(res.order_id), error="",
+                                slippage_pct=round(_slippage, 4),
+                                fill_type=_live_fill_type,
+                                position_size_usd=round(_actual_size, 2),
                             )
                             await telegram.alert_live_order(
                                 trade_id, a, d, success=True,
@@ -483,6 +572,7 @@ class PolymarketLatencyStrategy:
                         journal.update_live_result(
                             trade_id, success=False, order_id="",
                             error=str(e)[:200],
+                            fill_type="rejected",
                         )
                         await telegram.alert_live_order(
                             trade_id, a, d, success=False,
@@ -495,15 +585,37 @@ class PolymarketLatencyStrategy:
                     self.journal,
                 ))
 
-            # Telegram Alert (erweitert mit allen Metriken)
-            transit = self.oracle.status().get(f"{asset}/USDT", {}).get("transit_p50_ms", 0)
-            asyncio.create_task(telegram.alert_signal(
-                asset, direction, momentum_pct,
-                ask_price, result.net_ev_pct, result.position_usd, window.question,
-                p_true=result.p_true, fee_pct=result.fee_pct, kelly=result.kelly_fraction,
-                liquidity=window.liquidity_usd, spread_pct=round((ask_price - (window.up_best_bid if direction == "UP" else window.down_best_bid)) / max(ask_price, 0.01) * 100, 1),
-                seconds_to_expiry=seconds_to_expiry, transit_ms=transit,
-            ))
+            # Telegram Alert (erweitert mit allen Advanced Metrics)
+            if pos:
+                # Alle advanced Metriken sind bereits berechnet (transit, spread, etc.)
+                asyncio.create_task(telegram.alert_signal(
+                    asset, direction, momentum_pct,
+                    ask_price, result.net_ev_pct, result.position_usd, window.question,
+                    p_true=result.p_true, fee_pct=result.fee_pct, kelly=result.kelly_fraction,
+                    liquidity=window.liquidity_usd, spread_pct=round(spread, 1),
+                    seconds_to_expiry=seconds_to_expiry, transit_ms=transit,
+                    # --- Advanced Metrics ---
+                    slippage_pct=0.0,  # Erst nach Fill bekannt
+                    ob_imbalance_pct=round(_ob_imbalance * 100, 1),
+                    cex_lag_ms=round(_cex_lag / 1000, 1),  # ms -> s fuer Display
+                    regime=_regime,
+                    confluence=_confluence,
+                    confidence_score=_confidence,
+                    fill_type=_fill_type,
+                    gas_fee_usd=_gas_fee,
+                    implied_prob=_implied_prob,
+                ))
+            else:
+                # Fallback ohne Advanced Metrics (pos konnte nicht erstellt werden)
+                _transit = self.oracle.status().get(f"{asset}/USDT", {}).get("transit_p50_ms", 0)
+                asyncio.create_task(telegram.alert_signal(
+                    asset, direction, momentum_pct,
+                    ask_price, result.net_ev_pct, result.position_usd, window.question,
+                    p_true=result.p_true, fee_pct=result.fee_pct, kelly=result.kelly_fraction,
+                    liquidity=window.liquidity_usd,
+                    spread_pct=round((ask_price - (window.up_best_bid if direction == "UP" else window.down_best_bid)) / max(ask_price, 0.01) * 100, 1),
+                    seconds_to_expiry=seconds_to_expiry, transit_ms=_transit,
+                ))
 
     # --- Position Resolver Loop ---
 
@@ -547,6 +659,11 @@ class PolymarketLatencyStrategy:
                         v = mo.get(ts_key, 0)
                         return round((v - ref) / ref * 100, 4) if ref > 0 and v > 0 else 0.0
 
+                    # 5. realized_prob: 1.0 if outcome correct, 0.0 if not
+                    _realized_prob = 1.0 if pos.outcome_correct else 0.0
+                    # 14. post_trade_pnl_pct: pnl_usd / size_usd * 100
+                    _post_trade_pnl = round(pos.pnl_usd / pos.size_usd * 100, 2) if pos.size_usd > 0 else 0.0
+
                     self.journal.record_close(TradeRecord(
                         trade_id=pos.trade_id, asset=pos.asset, direction=pos.direction,
                         entry_ts=pos.entered_at, exit_ts=pos.resolved_at or time.time(),
@@ -562,6 +679,9 @@ class PolymarketLatencyStrategy:
                         markout_1s=_mo_pct(1), markout_5s=_mo_pct(5),
                         markout_10s=_mo_pct(10), markout_30s=_mo_pct(30),
                         markout_60s=_mo_pct(60),
+                        # --- Resolution-time HFT metrics ---
+                        realized_prob=_realized_prob,
+                        post_trade_pnl_pct=_post_trade_pnl,
                     ))
 
                 stats = self.paper_trader.stats()
@@ -626,9 +746,10 @@ class PolymarketLatencyStrategy:
     # --- Stündlicher Forensik-Report ---
 
     async def _send_hourly_report(self, trader_stats: dict, discovery_status: dict, ticks: int) -> None:
-        """Stündlicher forensischer Wallet-Report via Telegram."""
+        """Stuendlicher forensischer Wallet-Report mit Advanced Stats via Telegram."""
         try:
             import json
+            from collections import Counter
             from pathlib import Path
 
             # 1. Wallet Balance (On-Chain)
@@ -636,10 +757,11 @@ class PolymarketLatencyStrategy:
             initial_deposit = 79.99
             tangem_withdrawal = 10.00
 
-            # 2. Trades aus JSONL laden (close + live_update mergen)
+            # 2. Trades aus JSONL laden (close + live_update + open mergen)
             journal_path = Path("data/trade_journal.jsonl")
             live_trades = []
-            live_updates = {}  # trade_id → live_update record
+            live_updates = {}   # trade_id -> live_update record
+            open_records = {}   # trade_id -> open record (hat Advanced Metrics)
             if journal_path.exists():
                 with open(journal_path) as f:
                     for line in f:
@@ -648,73 +770,92 @@ class PolymarketLatencyStrategy:
                             tid = rec.get("trade_id", "")
                             if not tid.startswith("LT-"):
                                 continue
-                            if rec.get("event") == "live_update":
+                            evt = rec.get("event", "")
+                            if evt == "live_update":
                                 live_updates[tid] = rec
-                            elif rec.get("event") == "close":
+                            elif evt == "open":
+                                open_records[tid] = rec
+                            elif evt == "close":
                                 live_trades.append(rec)
                         except Exception:
                             pass
-            # Merge: live_update Daten in close Records übernehmen
+
+            # Merge: live_update + open record Daten in close Records uebernehmen
             for t in live_trades:
-                upd = live_updates.get(t.get("trade_id", ""))
+                tid = t.get("trade_id", "")
+                upd = live_updates.get(tid)
                 if upd:
                     t["live_order_success"] = upd.get("live_order_success", False)
                     t["live_order_id"] = upd.get("live_order_id", "")
+                # Open-Record hat die Advanced Metrics (EV, Fee, Spread, Liq, etc.)
+                opn = open_records.get(tid)
+                if opn:
+                    for key in (
+                        "net_ev_pct", "fee_pct", "spread_pct",
+                        "market_liquidity_usd", "transit_latency_ms",
+                        "seconds_to_expiry", "confidence_score",
+                        "regime_tag", "signal_confluence_count",
+                        "cex_lag_ms", "orderbook_imbalance_pct",
+                    ):
+                        if key in opn and key not in t:
+                            t[key] = opn[key]
 
-            # 3. Statistiken berechnen — NUR echte Live Trades (nicht paper-rejected)
+            # 3. Statistiken berechnen -- NUR echte Live Trades (nicht paper-rejected)
             real_live = [t for t in live_trades if t.get("live_order_success")]
             rejected = [t for t in live_trades if not t.get("live_order_success")]
             wins = [t for t in real_live if t.get("outcome_correct")]
             losses = [t for t in real_live if not t.get("outcome_correct")]
             total_pnl_live = sum(t.get("pnl_usd", 0) for t in real_live)
-            total_size = sum(t.get("size_usd", 0) for t in real_live)
-            wr = len(wins) / len(real_live) * 100 if real_live else 0
             avg_win = sum(t.get("pnl_usd", 0) for t in wins) / len(wins) if wins else 0
             avg_loss = sum(abs(t.get("pnl_usd", 0)) for t in losses) / len(losses) if losses else 0
             wl_ratio = avg_win / avg_loss if avg_loss > 0 else 0
 
-            # 4. Portfolio-Gesamtwert
-            portfolio = balance + tangem_withdrawal
-            total_profit = portfolio - initial_deposit
+            # 4. Advanced Aggregate Stats (ueber alle echten Trades)
+            if real_live:
+                avg_net_ev = sum(t.get("net_ev_pct", 0) for t in real_live) / len(real_live)
+                avg_liquidity = sum(t.get("market_liquidity_usd", 0) for t in real_live) / len(real_live)
+                avg_transit = sum(t.get("transit_latency_ms", 0) for t in real_live) / len(real_live)
+                avg_cex_lag = sum(t.get("cex_lag_ms", 0) for t in real_live) / len(real_live) / 1000  # ms -> s
+                avg_confluence = sum(t.get("signal_confluence_count", 0) for t in real_live) / len(real_live)
 
-            # 5. Trade-Tabelle (letzte 8 echte Live Trades)
-            recent = sorted(real_live, key=lambda t: t.get("exit_ts", 0), reverse=True)[:8]
-            trade_lines = []
-            for t in recent:
-                icon = "✅" if t.get("outcome_correct") else "❌"
-                pnl = t.get("pnl_usd", 0)
-                trade_lines.append(
-                    f"{icon} {t.get('trade_id','?')} {t.get('asset','?')} "
-                    f"{t.get('direction','?'):<4} ${t.get('size_usd',0):.2f} → ${pnl:+.2f}"
-                )
-            trades_text = "\n".join(trade_lines) if trade_lines else "Keine Live-Trades"
+                # Regime breakdown
+                regime_counts = Counter(t.get("regime_tag", "N/A") or "N/A" for t in real_live)
+                total_r = sum(regime_counts.values())
+                regime_parts = []
+                for regime, cnt in regime_counts.most_common(3):
+                    regime_parts.append(f"{cnt/total_r*100:.0f}% {regime}")
+                regime_str = " | ".join(regime_parts) if regime_parts else "N/A"
+            else:
+                avg_net_ev = avg_liquidity = avg_transit = avg_cex_lag = avg_confluence = 0
+                regime_str = "N/A"
 
-            # 6. Executor Stats
+            # 5. Executor Stats
             exec_stats = self.executor.stats()
 
-            # 7. Report senden
-            await telegram.send_alert(
-                f"{'═'*28}\n"
-                f"📊 <b>STÜNDLICHER REPORT</b> | {telegram._uptime()}\n"
-                f"{'═'*28}\n\n"
-                f"🏦 <b>WALLET</b>\n"
-                f"├ Balance: <b>${balance:.2f}</b> USDC.e\n"
-                f"├ Gestartet: ${initial_deposit:.2f}\n"
-                f"├ Portfolio: <b>${portfolio:.2f}</b> (+Tangem ${tangem_withdrawal:.0f})\n"
-                f"└ Profit: <b>${total_profit:+.2f} ({total_profit/initial_deposit*100:+.1f}%)</b>\n\n"
-                f"📈 <b>LIVE TRADES</b> ({len(real_live)} echte | {len(rejected)} rejected)\n"
-                f"├ {len(wins)}W / {len(losses)}L = <b>{wr:.0f}% WR</b>\n"
-                f"├ Avg Win: ${avg_win:.2f} | Avg Loss: ${avg_loss:.2f}\n"
-                f"├ W/L Ratio: <b>{wl_ratio:.2f}x</b>\n"
-                f"└ Live PnL: <b>${total_pnl_live:+.2f}</b>\n\n"
-                f"<code>{trades_text}</code>\n\n"
-                f"🎯 <b>MARKT</b>\n"
-                f"├ Windows: {discovery_status.get('tradeable',0)}/{discovery_status.get('total_windows',0)}\n"
-                f"├ Signale (Session): {self._signals_detected}\n"
-                f"├ Orders Placed: {exec_stats.get('orders_placed',0)}\n"
-                f"└ Ticks: {ticks}\n\n"
-                f"🎯 Nächstes Ziel: $1,000 → $100 Charity",
-                silent=True,
+            # 6. Report via centralized template senden
+            await telegram.alert_hourly_report(
+                balance=balance,
+                initial_deposit=initial_deposit,
+                tangem_withdrawal=tangem_withdrawal,
+                real_trades=real_live,
+                rejected_count=len(rejected),
+                wins_count=len(wins),
+                losses_count=len(losses),
+                avg_win=avg_win,
+                avg_loss=avg_loss,
+                wl_ratio=wl_ratio,
+                live_pnl=total_pnl_live,
+                windows_tradeable=discovery_status.get("tradeable", 0),
+                windows_total=discovery_status.get("total_windows", 0),
+                signals_session=self._signals_detected,
+                orders_placed=exec_stats.get("orders_placed", 0),
+                ticks=ticks,
+                avg_net_ev=avg_net_ev,
+                avg_liquidity=avg_liquidity,
+                avg_transit_ms=avg_transit,
+                avg_cex_lag_s=avg_cex_lag,
+                regime_breakdown=regime_str,
+                avg_confluence=avg_confluence,
             )
         except Exception as e:
             logger.error(f"Hourly Report Fehler: {e}")

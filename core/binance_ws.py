@@ -70,6 +70,25 @@ class PriceWindow:
             return float("inf")
         return time.time() - self._ticks[-1].timestamp
 
+    def volatility_pct(self, window_s: float = 30.0) -> float:
+        """Standardabweichung der Tick-Returns in % ueber die letzten window_s Sekunden.
+
+        Wird fuer regime_tag genutzt (high_vol vs low_vol).
+        Gibt 0.0 zurueck wenn zu wenig Daten (<5 Ticks).
+        """
+        if len(self._ticks) < 5:
+            return 0.0
+        now = self._ticks[-1].timestamp
+        cutoff = now - window_s
+        prices = [t.mid for t in self._ticks if t.timestamp >= cutoff]
+        if len(prices) < 5:
+            return 0.0
+        returns = [(prices[i] - prices[i - 1]) / prices[i - 1] * 100
+                   for i in range(1, len(prices))]
+        mean = sum(returns) / len(returns)
+        variance = sum((r - mean) ** 2 for r in returns) / len(returns)
+        return variance ** 0.5
+
     def latency_percentiles(self) -> tuple[float, float]:
         """P50 und P99 Tick-Intervall in ms. (0, 0) wenn zu wenig Daten."""
         if len(self._tick_intervals) < 5:
@@ -225,6 +244,11 @@ class BinanceWebSocketOracle:
         """True wenn letzter Tick jünger als max_age_s Sekunden."""
         w = self._windows.get(symbol)
         return w is not None and w.age_s() < max_age_s
+
+    def get_volatility(self, symbol: str, window_s: float = 30.0) -> float:
+        """Volatilitaet (Stddev der Returns in %) ueber window_s Sekunden."""
+        w = self._windows.get(symbol)
+        return w.volatility_pct(window_s) if w else 0.0
 
     def tick_count(self, symbol: str) -> int:
         w = self._windows.get(symbol)

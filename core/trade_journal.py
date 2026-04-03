@@ -103,6 +103,22 @@ class TradeRecord:
     market_liquidity_usd: float = 0.0
     spread_pct: float = 0.0
 
+    # --- Advanced HFT Metrics (Pro-Level Logging) ---
+    orderbook_imbalance_pct: float = 0.0    # (bid_vol / ask_vol) - 1 → positiv = bullish
+    cex_lag_ms: float = 0.0                 # Binance tick age vs Polymarket book age
+    slippage_pct: float = 0.0              # (actual_fill - expected_price) / expected_price
+    implied_prob: float = 0.0              # Polymarket price at entry = implied probability
+    realized_prob: float = 0.0            # 1.0 if won, 0.0 if lost
+    regime_tag: str = ""                   # "high_vol" / "low_vol" / "trending" / "ranging"
+    signal_confluence_count: int = 0       # How many sub-indicators aligned (0-5)
+    confidence_score: float = 0.0         # Weighted model confidence (0-100)
+    gas_fee_usd: float = 0.0             # Polygon gas cost in USD
+    fill_type: str = ""                   # "taker" / "maker" / "partial" / "rejected"
+    position_size_usd: float = 0.0       # Actual USD committed (may differ from size_usd after slippage)
+    entry_timestamp_ms: int = 0           # Exact Unix millisecond of entry
+    market_id: str = ""                   # Polymarket market slug (e.g., "btc-updown-5m-1775122200")
+    post_trade_pnl_pct: float = 0.0      # Actual P&L % after resolution
+
 
 class TradeJournal:
     """Unverlierbare Trade-Datenbank."""
@@ -116,11 +132,13 @@ class TradeJournal:
     def _load_existing(self) -> None:
         """Lädt bestehende Journal-Einträge beim Start.
 
-        Merges live_update events into their corresponding open/close records.
+        Merges live_update events and open-time fields into close records
+        so every close record is self-contained with all forensic data.
         """
         if JOURNAL_PATH.exists():
             try:
-                live_updates: dict[str, dict] = {}  # trade_id -> live data
+                live_updates: dict[str, dict] = {}   # trade_id -> live data
+                open_records: dict[str, dict] = {}   # trade_id -> open data
                 raw_records: list[dict] = []
                 with open(JOURNAL_PATH) as f:
                     for line in f:
@@ -130,24 +148,55 @@ class TradeJournal:
                             if data.get("event") == "live_update":
                                 live_updates[data.get("trade_id", "")] = data
                             else:
+                                if data.get("event") == "open":
+                                    open_records[data.get("trade_id", "")] = data
                                 raw_records.append(data)
 
-                # Merge live_update data into close records
+                # Merge live_update + open-time fields into close records
+                _open_fields = (
+                    "signal_ts", "window_slug", "market_question", "timeframe",
+                    "polymarket_bid", "polymarket_ask",
+                    "p_market", "raw_edge_pct", "fee_pct", "net_ev_pct",
+                    "shares", "kelly_fraction",
+                    "signal_to_order_ms", "transit_latency_ms", "tick_age_ms",
+                    "order_type", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+                    # Advanced HFT metrics (entry-time)
+                    "orderbook_imbalance_pct", "cex_lag_ms", "implied_prob",
+                    "regime_tag", "signal_confluence_count", "confidence_score",
+                    "gas_fee_usd", "fill_type", "position_size_usd",
+                    "entry_timestamp_ms", "market_id",
+                )
                 for data in raw_records:
                     if data.get("event") == "close":
                         tid = data.get("trade_id", "")
+                        # Merge open-time fields
+                        if tid in open_records:
+                            opn = open_records[tid]
+                            for fld in _open_fields:
+                                if not data.get(fld):
+                                    val = opn.get(fld)
+                                    if val:
+                                        data[fld] = val
+                        # Merge live_update fields
                         if tid in live_updates:
                             upd = live_updates[tid]
                             data["live_order_success"] = upd.get("live_order_success", False)
                             data["live_order_id"] = upd.get("live_order_id", "")
                             data["live_error"] = upd.get("live_error", "")
                             data["order_post_ts"] = upd.get("order_post_ts", 0)
+                            # Advanced metrics from live execution
+                            if upd.get("slippage_pct"):
+                                data["slippage_pct"] = upd["slippage_pct"]
+                            if upd.get("fill_type"):
+                                data["fill_type"] = upd["fill_type"]
+                            if upd.get("position_size_usd"):
+                                data["position_size_usd"] = upd["position_size_usd"]
 
                     self._records.append(TradeRecord(**{
                         k: v for k, v in data.items()
                         if k in TradeRecord.__dataclass_fields__
                     }))
-                logger.info(f"TradeJournal: {len(self._records)} Einträge geladen, {len(live_updates)} live_updates merged")
+                logger.info(f"TradeJournal: {len(self._records)} Einträge geladen, {len(live_updates)} live_updates merged, {len(open_records)} open records indexed")
             except Exception as e:
                 logger.warning(f"TradeJournal Load Fehler: {e}")
 
@@ -160,7 +209,11 @@ class TradeJournal:
         asyncio.create_task(self._safe_async(db.insert_trade(asdict(rec)), "supabase_open"))
         logger.info(f"JOURNAL OPEN: {rec.trade_id} | RAM + JSONL + Telegram + Supabase")
 
-    def update_live_result(self, trade_id: str, success: bool, order_id: str, error: str) -> None:
+    def update_live_result(
+        self, trade_id: str, success: bool, order_id: str, error: str,
+        slippage_pct: float = 0.0, fill_type: str = "",
+        position_size_usd: float = 0.0,
+    ) -> None:
         """Schreibt das Live-Order-Ergebnis zurück in den bestehenden TradeRecord.
 
         Wird aufgerufen nachdem die Live-Order auf Polymarket platziert wurde.
@@ -173,6 +226,13 @@ class TradeJournal:
                 rec.live_order_id = order_id
                 rec.live_error = error
                 rec.order_post_ts = time.time()
+                # Advanced metrics from live execution
+                if slippage_pct != 0.0:
+                    rec.slippage_pct = slippage_pct
+                if fill_type:
+                    rec.fill_type = fill_type
+                if position_size_usd > 0:
+                    rec.position_size_usd = position_size_usd
                 break
 
         # JSONL: Update-Zeile anhängen (event="live_update")
@@ -183,6 +243,9 @@ class TradeJournal:
             "live_order_id": order_id,
             "live_error": error,
             "order_post_ts": time.time(),
+            "slippage_pct": slippage_pct,
+            "fill_type": fill_type,
+            "position_size_usd": position_size_usd,
         }
         try:
             with open(JOURNAL_PATH, "a") as f:
@@ -196,9 +259,40 @@ class TradeJournal:
         status = "✅ SUCCESS" if success else f"❌ FAILED: {error[:60]}"
         logger.info(f"JOURNAL LIVE_UPDATE: {trade_id} | {status}")
 
+    # Fields that are only available at open time and must be copied to close records
+    _OPEN_ONLY_FIELDS = (
+        "signal_ts", "window_slug", "market_question", "timeframe",
+        "polymarket_bid", "polymarket_ask",
+        "p_market", "raw_edge_pct", "fee_pct", "net_ev_pct",
+        "shares", "kelly_fraction",
+        "signal_to_order_ms", "transit_latency_ms", "tick_age_ms",
+        "order_type", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+        # Advanced HFT metrics (entry-time, must propagate to close)
+        "orderbook_imbalance_pct", "cex_lag_ms", "implied_prob",
+        "regime_tag", "signal_confluence_count", "confidence_score",
+        "gas_fee_usd", "fill_type", "position_size_usd",
+        "entry_timestamp_ms", "market_id",
+    )
+
     def record_close(self, rec: TradeRecord) -> None:
-        """Speichert Trade-Close in alle 4 Systeme: RAM + JSONL + Telegram + Supabase."""
+        """Speichert Trade-Close in alle 4 Systeme: RAM + JSONL + Telegram + Supabase.
+
+        Copies open-time fields (fees, EV, spread, liquidity, etc.) from the
+        matching open record so close records are self-contained.
+        """
         rec.event = "close"
+
+        # --- Merge open-time fields into close record ---
+        for open_rec in reversed(self._records):
+            if open_rec.trade_id == rec.trade_id and open_rec.event == "open":
+                for fld in self._OPEN_ONLY_FIELDS:
+                    # Only copy if the close record still has the default value
+                    close_val = getattr(rec, fld)
+                    if close_val in (0, 0.0, "", False):
+                        open_val = getattr(open_rec, fld)
+                        if open_val not in (0, 0.0, "", False):
+                            setattr(rec, fld, open_val)
+                break
         self._records.append(rec)
         self._append_to_file(rec)
         asyncio.create_task(self._safe_async(self._send_telegram_close(rec), "telegram_close"))
