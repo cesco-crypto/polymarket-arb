@@ -20,7 +20,8 @@ from loguru import logger
 from config import settings
 from strategies.base import StrategyBase
 from strategies.registry import create_strategy, list_strategies
-import strategies.polymarket_latency  # noqa: F401 — registriert die Strategie
+import strategies.polymarket_latency  # noqa: F401 — registriert momentum_latency_v2
+import strategies.hmsf_strategy       # noqa: F401 — registriert hmsf_decision_engine
 from utils.logger import setup_logger
 
 app = FastAPI(title="Polymarket Latency Arb")
