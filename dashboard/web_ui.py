@@ -26,27 +26,30 @@ from utils.logger import setup_logger
 app = FastAPI(title="Polymarket Latency Arb")
 
 # --- Global State ---
-strategy: StrategyBase | None = None
+strategy: StrategyBase | None = None  # Primary strategy (für Dashboard-Status Broadcast)
+active_strategies: dict[str, StrategyBase] = {}  # name → instance (mehrere gleichzeitig)
+_strategy_tasks: dict[str, asyncio.Task] = {}  # name → asyncio.Task
 start_time: float = 0
 connected_clients: set[WebSocket] = set()
-_strategy_task: asyncio.Task | None = None
 _broadcast_task: asyncio.Task | None = None
 
 
 @app.on_event("startup")
 async def startup() -> None:
     """Startet die Polymarket-Strategie und den Broadcast-Loop."""
-    global strategy, start_time, _strategy_task, _broadcast_task
+    global strategy, start_time, _broadcast_task
 
     setup_logger(level=settings.log_level, data_dir=settings.data_dir)
     logger.info("Polymarket Latency Arb Dashboard startet...")
 
     start_time = time.time()
-    strategy = create_strategy(settings.strategy_name, settings)
-    logger.info(f"Strategie geladen: {strategy.name} — {strategy.description}")
 
-    # Strategy läuft in eigenem Task (selbstständige Loops)
-    _strategy_task = asyncio.create_task(strategy.run())
+    # Primäre Strategie starten (aus Config)
+    strat = create_strategy(settings.strategy_name, settings)
+    strategy = strat  # Primär für Dashboard-Broadcast
+    active_strategies[strat.name] = strat
+    _strategy_tasks[strat.name] = asyncio.create_task(strat.run())
+    logger.info(f"Strategie geladen: {strat.name} — {strat.description}")
 
     # Dashboard broadcastet Strategy-Status an WebSocket-Clients (1Hz)
     _broadcast_task = asyncio.create_task(_broadcast_loop())
@@ -57,14 +60,20 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    global _strategy_task, _broadcast_task
+    global _broadcast_task
     if _broadcast_task:
         _broadcast_task.cancel()
-    if _strategy_task:
-        _strategy_task.cancel()
+    # Alle aktiven Strategien stoppen
+    for name, task in _strategy_tasks.items():
+        task.cancel()
         try:
-            await _strategy_task
-        except asyncio.CancelledError:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+    for name, strat in active_strategies.items():
+        try:
+            await strat.shutdown()
+        except Exception:
             pass
     logger.info("Dashboard beendet.")
 
@@ -380,54 +389,84 @@ async def toggle_order_type() -> dict:
 
 @app.get("/api/strategies")
 async def api_strategies() -> dict:
-    """Alle verfügbaren Strategien + welche aktiv ist."""
-    strategies = list_strategies()
-    active = strategy.name if strategy else settings.strategy_name
+    """Alle verfügbaren Strategien + welche aktiv sind (Multi-Strategy)."""
+    available = list_strategies()
+    active_names = set(active_strategies.keys())
     return {
         "strategies": [
-            {"name": name, "description": desc, "active": name == active}
-            for name, desc in strategies.items()
+            {"name": name, "description": desc, "active": name in active_names}
+            for name, desc in available.items()
         ],
-        "active": active,
+        "active": list(active_names),
     }
 
 
-@app.post("/api/strategy/switch")
-async def switch_strategy(body: dict) -> dict:
-    """Wechselt die aktive Strategie per Dashboard-Klick."""
-    global strategy, _strategy_task
+@app.post("/api/strategy/enable")
+async def enable_strategy(body: dict) -> dict:
+    """Aktiviert eine Strategie (kann parallel zu anderen laufen)."""
+    global strategy
 
-    new_name = body.get("strategy", "")
+    name = body.get("strategy", "")
     available = list_strategies()
 
-    if new_name not in available:
-        return {"error": f"Unbekannte Strategie: {new_name}", "available": list(available.keys())}
+    if name not in available:
+        return {"error": f"Unbekannte Strategie: {name}", "available": list(available.keys())}
 
-    if strategy and strategy.name == new_name:
-        return {"status": "no_change", "active": new_name}
+    if name in active_strategies:
+        return {"status": "already_active", "active": list(active_strategies.keys())}
 
-    logger.info(f"Strategy Switch: {strategy.name if strategy else '?'} → {new_name}")
+    # Neue Strategie erstellen und starten
+    strat = create_strategy(name, settings)
+    active_strategies[name] = strat
+    _strategy_tasks[name] = asyncio.create_task(strat.run())
 
-    # 1. Alte Strategie stoppen
-    if _strategy_task:
-        _strategy_task.cancel()
+    # Erste aktivierte Strategie wird primär (für Dashboard-Broadcast)
+    if strategy is None:
+        strategy = strat
+
+    logger.info(f"Strategie AKTIVIERT: {name} ({len(active_strategies)} aktiv)")
+    return {"status": "enabled", "strategy": name, "active": list(active_strategies.keys())}
+
+
+@app.post("/api/strategy/disable")
+async def disable_strategy(body: dict) -> dict:
+    """Deaktiviert eine laufende Strategie (stoppt sie sauber)."""
+    global strategy
+
+    name = body.get("strategy", "")
+
+    if name not in active_strategies:
+        return {"error": f"Strategie '{name}' ist nicht aktiv", "active": list(active_strategies.keys())}
+
+    # Strategie stoppen
+    task = _strategy_tasks.pop(name, None)
+    if task:
+        task.cancel()
         try:
-            await _strategy_task
+            await task
         except (asyncio.CancelledError, Exception):
             pass
-    if strategy:
+
+    strat = active_strategies.pop(name, None)
+    if strat:
         try:
-            await strategy.shutdown()
+            await strat.shutdown()
         except Exception as e:
-            logger.error(f"Shutdown Fehler: {e}")
+            logger.error(f"Shutdown Fehler für {name}: {e}")
 
-    # 2. Neue Strategie erstellen und starten
-    strategy = create_strategy(new_name, settings)
-    settings.strategy_name = new_name
-    _strategy_task = asyncio.create_task(strategy.run())
+    # Primäre Strategie updaten
+    if strategy and strategy.name == name:
+        strategy = next(iter(active_strategies.values()), None)
 
-    logger.info(f"Strategy Switch komplett: {strategy.name} aktiv")
-    return {"status": "switched", "active": new_name, "description": strategy.description}
+    logger.info(f"Strategie DEAKTIVIERT: {name} ({len(active_strategies)} aktiv)")
+    return {"status": "disabled", "strategy": name, "active": list(active_strategies.keys())}
+
+
+@app.get("/strategy", response_class=HTMLResponse)
+async def strategy_page() -> HTMLResponse:
+    """Strategy Management Page — Strategien aktivieren/deaktivieren."""
+    html_path = Path(__file__).parent / "strategy.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
 @app.get("/wallet", response_class=HTMLResponse)

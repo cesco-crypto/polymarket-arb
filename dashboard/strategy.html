@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strategies — Polymarket Arb</title>
+<style>
+  :root {
+    --bg: #0a0c10; --bg-card: #13151c; --bg-card2: #181b24;
+    --border: #1e2230; --border-hi: #2a3040;
+    --text: #e1e4eb; --text-dim: #6b7080; --text-mid: #9298a8;
+    --accent: #3b82f6; --green: #22c55e; --green-dim: #0a2f1a;
+    --red: #ef4444; --red-dim: #2d0f0f; --yellow: #eab308; --orange: #f97316;
+    --font: 'SF Mono','JetBrains Mono','Cascadia Code','Fira Code',monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:13px;line-height:1.5}
+  .nav{display:flex;align-items:center;justify-content:space-between;padding:12px 24px;background:var(--bg-card);border-bottom:1px solid var(--border)}
+  .nav-title{font-size:16px;font-weight:700;color:var(--green)}
+  .nav-links{display:flex;gap:12px;font-size:11px}
+  .nav-links a{color:var(--text-mid);text-decoration:none;padding:4px 10px;border:1px solid var(--border);border-radius:4px}
+  .nav-links a:hover{border-color:var(--accent);color:var(--accent)}
+
+  .container{max-width:900px;margin:0 auto;padding:24px}
+  h1{font-size:18px;margin-bottom:8px;color:var(--text)}
+  .subtitle{color:var(--text-dim);font-size:11px;margin-bottom:24px}
+
+  .strat-card{background:var(--bg-card);border:2px solid var(--border);border-radius:8px;padding:20px;margin-bottom:16px;transition:border-color 0.2s}
+  .strat-card.active{border-color:var(--green)}
+  .strat-card.inactive{opacity:0.7}
+
+  .strat-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+  .strat-name{font-size:15px;font-weight:700}
+  .strat-badge{font-size:10px;padding:3px 10px;border-radius:12px;font-weight:600;letter-spacing:0.5px}
+  .strat-badge.on{background:var(--green-dim);color:var(--green);border:1px solid var(--green)}
+  .strat-badge.off{background:var(--bg-card2);color:var(--text-dim);border:1px solid var(--border)}
+
+  .strat-desc{color:var(--text-mid);font-size:12px;margin-bottom:16px;line-height:1.6}
+
+  .strat-toggle{display:flex;align-items:center;gap:12px}
+  .toggle-btn{padding:8px 20px;border-radius:6px;font-family:var(--font);font-size:11px;font-weight:600;cursor:pointer;border:none;transition:all 0.2s}
+  .toggle-btn.enable{background:var(--green);color:#000}
+  .toggle-btn.enable:hover{background:#16a34a}
+  .toggle-btn.disable{background:var(--red-dim);color:var(--red);border:1px solid var(--red)}
+  .toggle-btn.disable:hover{background:var(--red);color:#fff}
+  .toggle-btn:disabled{opacity:0.4;cursor:not-allowed}
+
+  .strat-status{font-size:10px;color:var(--text-dim)}
+
+  .info-box{background:var(--bg-card2);border:1px solid var(--border);border-radius:6px;padding:16px;margin-top:24px;font-size:11px;color:var(--text-mid);line-height:1.7}
+  .info-box strong{color:var(--text)}
+
+  #status-msg{margin-top:16px;padding:10px 16px;border-radius:6px;font-size:11px;display:none}
+  #status-msg.success{display:block;background:var(--green-dim);color:var(--green);border:1px solid var(--green)}
+  #status-msg.error{display:block;background:var(--red-dim);color:var(--red);border:1px solid var(--red)}
+</style>
+</head>
+<body>
+<div class="nav">
+  <span class="nav-title">STRATEGIES</span>
+  <div class="nav-links">
+    <a href="/">Dashboard</a>
+    <a href="/wallet">Wallet</a>
+    <a href="/quant-lab">Quant Lab</a>
+    <a href="/masterplan">Masterplan</a>
+  </div>
+</div>
+
+<div class="container">
+  <h1>Strategy Manager</h1>
+  <p class="subtitle">Aktiviere oder deaktiviere Strategien per Klick. Mehrere Strategien k&ouml;nnen gleichzeitig laufen.</p>
+
+  <div id="strategies-list">
+    <p style="color:var(--text-dim)">Lade Strategien...</p>
+  </div>
+
+  <div id="status-msg"></div>
+
+  <div class="info-box">
+    <strong>Wie es funktioniert:</strong><br>
+    Jede Strategie l&auml;uft in ihrem eigenen async Loop. Mehrere Strategien k&ouml;nnen parallel traden —
+    jede mit eigenen Signalen, eigenem Timing und eigener Logik.<br><br>
+    <strong>Sicherheit:</strong> Wallet-Balance, Trade Journal und Kill-Switches bleiben bei jedem Wechsel erhalten.
+    Beim Deaktivieren wird die Strategie sauber heruntergefahren (offene Positionen laufen aus).<br><br>
+    <strong>Aktuell registriert:</strong> <span id="total-count">0</span> Strategie(n),
+    <span id="active-count">0</span> aktiv
+  </div>
+</div>
+
+<script>
+const API = '';
+
+function showStatus(msg, type) {
+  const el = document.getElementById('status-msg');
+  el.textContent = msg;
+  el.className = type;
+  setTimeout(() => { el.className = ''; el.style.display = 'none'; }, 4000);
+}
+
+async function loadStrategies() {
+  try {
+    const r = await fetch(API + '/api/strategies');
+    const d = await r.json();
+    const list = document.getElementById('strategies-list');
+    const strategies = d.strategies || [];
+
+    document.getElementById('total-count').textContent = strategies.length;
+    document.getElementById('active-count').textContent = (d.active || []).length;
+
+    if (!strategies.length) {
+      list.innerHTML = '<p style="color:var(--text-dim)">Keine Strategien registriert.</p>';
+      return;
+    }
+
+    list.innerHTML = strategies.map(s => {
+      const isActive = s.active;
+      return `
+        <div class="strat-card ${isActive ? 'active' : 'inactive'}" id="card-${s.name}">
+          <div class="strat-header">
+            <span class="strat-name">${s.name}</span>
+            <span class="strat-badge ${isActive ? 'on' : 'off'}">${isActive ? 'AKTIV' : 'INAKTIV'}</span>
+          </div>
+          <div class="strat-desc">${s.description}</div>
+          <div class="strat-toggle">
+            ${isActive
+              ? `<button class="toggle-btn disable" onclick="disableStrategy('${s.name}')">Deaktivieren</button>`
+              : `<button class="toggle-btn enable" onclick="enableStrategy('${s.name}')">Aktivieren</button>`
+            }
+            <span class="strat-status">${isActive ? 'Laeuft seit Bot-Start' : 'Gestoppt'}</span>
+          </div>
+        </div>`;
+    }).join('');
+  } catch(e) {
+    document.getElementById('strategies-list').innerHTML = '<p style="color:var(--red)">Fehler beim Laden: ' + e + '</p>';
+  }
+}
+
+async function enableStrategy(name) {
+  if (!confirm('Strategie "' + name + '" aktivieren?\n\nSie wird parallel zu anderen aktiven Strategien laufen.')) return;
+  try {
+    const r = await fetch(API + '/api/strategy/enable', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({strategy: name})
+    });
+    const d = await r.json();
+    if (d.error) { showStatus('Fehler: ' + d.error, 'error'); }
+    else { showStatus('Strategie "' + name + '" aktiviert!', 'success'); }
+    loadStrategies();
+  } catch(e) { showStatus('Fehler: ' + e, 'error'); }
+}
+
+async function disableStrategy(name) {
+  if (!confirm('Strategie "' + name + '" deaktivieren?\n\nOffene Positionen laufen aus, keine neuen Trades.')) return;
+  try {
+    const r = await fetch(API + '/api/strategy/disable', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({strategy: name})
+    });
+    const d = await r.json();
+    if (d.error) { showStatus('Fehler: ' + d.error, 'error'); }
+    else { showStatus('Strategie "' + name + '" deaktiviert.', 'success'); }
+    loadStrategies();
+  } catch(e) { showStatus('Fehler: ' + e, 'error'); }
+}
+
+loadStrategies();
+setInterval(loadStrategies, 10000);
+</script>
+</body>
+</html>
