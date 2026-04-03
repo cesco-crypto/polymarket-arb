@@ -18,13 +18,15 @@ from fastapi.responses import HTMLResponse
 from loguru import logger
 
 from config import settings
-from strategies.polymarket_latency import PolymarketLatencyStrategy
+from strategies.base import StrategyBase
+from strategies.registry import create_strategy, list_strategies
+import strategies.polymarket_latency  # noqa: F401 — registriert die Strategie
 from utils.logger import setup_logger
 
 app = FastAPI(title="Polymarket Latency Arb")
 
 # --- Global State ---
-strategy: PolymarketLatencyStrategy | None = None
+strategy: StrategyBase | None = None
 start_time: float = 0
 connected_clients: set[WebSocket] = set()
 _strategy_task: asyncio.Task | None = None
@@ -40,7 +42,8 @@ async def startup() -> None:
     logger.info("Polymarket Latency Arb Dashboard startet...")
 
     start_time = time.time()
-    strategy = PolymarketLatencyStrategy(settings)
+    strategy = create_strategy(settings.strategy_name, settings)
+    logger.info(f"Strategie geladen: {strategy.name} — {strategy.description}")
 
     # Strategy läuft in eigenem Task (selbstständige Loops)
     _strategy_task = asyncio.create_task(strategy.run())
@@ -373,6 +376,58 @@ async def toggle_order_type() -> dict:
     settings.order_type = new_type
     logger.info(f"Order-Typ umgestellt: {current} → {new_type}")
     return {"order_type": new_type, "previous": current}
+
+
+@app.get("/api/strategies")
+async def api_strategies() -> dict:
+    """Alle verfügbaren Strategien + welche aktiv ist."""
+    strategies = list_strategies()
+    active = strategy.name if strategy else settings.strategy_name
+    return {
+        "strategies": [
+            {"name": name, "description": desc, "active": name == active}
+            for name, desc in strategies.items()
+        ],
+        "active": active,
+    }
+
+
+@app.post("/api/strategy/switch")
+async def switch_strategy(body: dict) -> dict:
+    """Wechselt die aktive Strategie per Dashboard-Klick."""
+    global strategy, _strategy_task
+
+    new_name = body.get("strategy", "")
+    available = list_strategies()
+
+    if new_name not in available:
+        return {"error": f"Unbekannte Strategie: {new_name}", "available": list(available.keys())}
+
+    if strategy and strategy.name == new_name:
+        return {"status": "no_change", "active": new_name}
+
+    logger.info(f"Strategy Switch: {strategy.name if strategy else '?'} → {new_name}")
+
+    # 1. Alte Strategie stoppen
+    if _strategy_task:
+        _strategy_task.cancel()
+        try:
+            await _strategy_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    if strategy:
+        try:
+            await strategy.shutdown()
+        except Exception as e:
+            logger.error(f"Shutdown Fehler: {e}")
+
+    # 2. Neue Strategie erstellen und starten
+    strategy = create_strategy(new_name, settings)
+    settings.strategy_name = new_name
+    _strategy_task = asyncio.create_task(strategy.run())
+
+    logger.info(f"Strategy Switch komplett: {strategy.name} aktiv")
+    return {"status": "switched", "active": new_name, "description": strategy.description}
 
 
 @app.get("/wallet", response_class=HTMLResponse)

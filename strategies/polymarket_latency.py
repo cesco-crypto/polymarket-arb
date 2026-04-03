@@ -30,6 +30,8 @@ from core.paper_trader import PaperTrader
 from core.pretrade_calculator import PreTradeCalculator, TradeDecision
 from core.risk_manager import RiskManager
 from core.trade_journal import TradeJournal, TradeRecord
+from strategies.base import StrategyBase
+from strategies.registry import register as register_strategy
 from utils import telegram
 
 
@@ -47,7 +49,7 @@ class StrategySignal:
     detected_at: float
 
 
-class PolymarketLatencyStrategy:
+class PolymarketLatencyStrategy(StrategyBase):
     """Orchestriert den kompletten Polymarket Latency Arb Loop.
 
     Komponenten:
@@ -56,6 +58,17 @@ class PolymarketLatencyStrategy:
     - Signal-Loop: alle 500ms auf neue Signale prüfen
     - Position-Resolver: abgelaufene Positionen auflösen
     """
+
+    STRATEGY_NAME = "momentum_latency_v2"
+    DESCRIPTION = "Binance Momentum → Polymarket Latency Arb. Kauft UP/DOWN Tokens wenn BTC/ETH sich >0.05% in 15s bewegt."
+
+    @property
+    def name(self) -> str:
+        return self.STRATEGY_NAME
+
+    @property
+    def description(self) -> str:
+        return self.DESCRIPTION
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -952,3 +965,7 @@ class PolymarketLatencyStrategy:
                 "paper_capital_usd": self.settings.paper_capital_usd,
             },
         }
+
+
+# Auto-Register bei Import
+register_strategy(PolymarketLatencyStrategy.STRATEGY_NAME, PolymarketLatencyStrategy)

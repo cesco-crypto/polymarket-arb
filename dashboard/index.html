@@ -65,6 +65,9 @@
     <span>Signals: <strong id="sig-count">0</strong></span>
     <span>Scanned: <strong id="scan-count" style="color:var(--text-dim)">0</strong></span>
     <span id="clock"></span>
+    <select id="strategy-select" onchange="switchStrategy(this.value)" style="background:var(--bg-card2);color:var(--green);border:1px solid var(--green);border-radius:4px;padding:3px 8px;font-family:var(--font);font-size:10px;cursor:pointer">
+      <option value="">Strategie laden...</option>
+    </select>
     <a href="/wallet" style="color:var(--green);text-decoration:none;font-size:11px;padding:3px 10px;border:1px solid var(--green);border-radius:4px;">WALLET</a>
     <a href="/quant-lab" style="color:var(--accent);text-decoration:none;font-size:11px;padding:3px 10px;border:1px solid var(--accent);border-radius:4px;">QUANT LAB</a>
     <span><span id="ws-dot" class="dot dot-r" style="display:inline-block;width:6px;height:6px;margin-right:3px;vertical-align:middle"></span><span id="ws-txt">...</span></span>
@@ -579,6 +582,44 @@ function switchTab(btn, tab) {
   // Fetch live data every 30 seconds
   fetchLiveData();
   setInterval(fetchLiveData, 30000);
+
+  // Strategy Selector
+  async function loadStrategies() {
+    try {
+      const r = await fetch('/api/strategies');
+      const d = await r.json();
+      const sel = id('strategy-select');
+      sel.innerHTML = '';
+      for (const s of d.strategies || []) {
+        const opt = document.createElement('option');
+        opt.value = s.name;
+        opt.textContent = (s.active ? '● ' : '○ ') + s.name;
+        opt.title = s.description;
+        if (s.active) opt.selected = true;
+        sel.appendChild(opt);
+      }
+    } catch(e) { console.error('Strategy load error:', e); }
+  }
+  async function switchStrategy(name) {
+    if (!name) return;
+    if (!confirm('Strategie wechseln zu: ' + name + '?\n\nDer Bot wird gestoppt und mit der neuen Strategie neu gestartet.')) {
+      loadStrategies(); // Reset dropdown
+      return;
+    }
+    try {
+      const r = await fetch('/api/strategy/switch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({strategy: name})
+      });
+      const d = await r.json();
+      if (d.error) { alert('Fehler: ' + d.error); }
+      else if (d.status === 'switched') { alert('Gewechselt zu: ' + name); }
+      loadStrategies();
+    } catch(e) { alert('Switch fehlgeschlagen: ' + e); }
+  }
+  window.switchStrategy = switchStrategy;
+  loadStrategies();
 
   // Order Type Toggle
   async function toggleOrderType() {

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     # --- Modus ---
     mode: str = Field(default="paper", description="paper | live")
+    strategy_name: str = Field(default="momentum_latency_v2", description="Aktive Strategie (aus Registry)")
     log_level: str = Field(default="INFO")
 
     # --- Börsen ---
