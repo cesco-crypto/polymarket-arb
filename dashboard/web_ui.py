@@ -387,6 +387,62 @@ async def toggle_order_type() -> dict:
     return {"order_type": new_type, "previous": current}
 
 
+@app.get("/api/trading-mode")
+async def get_trading_mode() -> dict:
+    """Aktueller Trading-Modus: Paper oder Live."""
+    return {
+        "live_trading": settings.live_trading,
+        "mode": "live" if settings.live_trading else "paper",
+        "wallet": settings.polymarket_funder if settings.live_trading else "",
+    }
+
+
+@app.post("/api/trading-mode")
+async def set_trading_mode(body: dict) -> dict:
+    """Toggle zwischen Paper und Live Trading."""
+    global strategy, active_strategies, _strategy_tasks
+
+    new_mode = body.get("live", None)
+    if new_mode is None:
+        # Toggle
+        new_mode = not settings.live_trading
+
+    old_mode = settings.live_trading
+    settings.live_trading = bool(new_mode)
+
+    mode_str = "LIVE" if settings.live_trading else "PAPER"
+    logger.info(f"Trading-Modus geändert: {'LIVE' if old_mode else 'PAPER'} → {mode_str}")
+
+    # Alle aktiven Strategien neu starten damit der Executor reinitialisiert
+    for name in list(active_strategies.keys()):
+        task = _strategy_tasks.pop(name, None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        strat = active_strategies.pop(name, None)
+        if strat:
+            try:
+                await strat.shutdown()
+            except Exception:
+                pass
+
+        # Neu starten mit aktualisiertem live_trading Flag
+        new_strat = create_strategy(name, settings)
+        active_strategies[name] = new_strat
+        _strategy_tasks[name] = asyncio.create_task(new_strat.run())
+
+    strategy = next(iter(active_strategies.values()), None)
+
+    return {
+        "live_trading": settings.live_trading,
+        "mode": mode_str,
+        "restarted_strategies": list(active_strategies.keys()),
+    }
+
+
 @app.get("/api/strategies")
 async def api_strategies() -> dict:
     """Alle verfügbaren Strategien + welche aktiv sind (Multi-Strategy)."""

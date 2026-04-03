@@ -67,6 +67,23 @@
 </div>
 
 <div class="container">
+
+  <!-- Trading Mode Toggle -->
+  <div class="strat-card" id="trading-mode-card" style="margin-bottom:24px">
+    <div class="strat-header">
+      <span class="strat-name">Trading Mode</span>
+      <span class="strat-badge" id="mode-badge">...</span>
+    </div>
+    <div class="strat-desc">
+      <b>PAPER:</b> Simulierte Trades ohne echtes Geld. Sicher zum Testen.<br>
+      <b>LIVE:</b> Echte Orders auf Polymarket mit deiner Wallet. Echtes Geld.
+    </div>
+    <div class="strat-toggle">
+      <button class="toggle-btn" id="mode-btn" onclick="toggleTradingMode()" style="min-width:180px">...</button>
+      <span class="strat-status" id="mode-wallet"></span>
+    </div>
+  </div>
+
   <h1>Strategy Manager</h1>
   <p class="subtitle">Aktiviere oder deaktiviere Strategien per Klick. Mehrere Strategien k&ouml;nnen gleichzeitig laufen.</p>
 
@@ -165,6 +182,52 @@ async function disableStrategy(name) {
 
 loadStrategies();
 setInterval(loadStrategies, 10000);
+
+// Trading Mode Toggle
+async function loadTradingMode() {
+  try {
+    const r = await fetch('/api/trading-mode');
+    const d = await r.json();
+    const isLive = d.live_trading;
+    const badge = document.getElementById('mode-badge');
+    const btn = document.getElementById('mode-btn');
+    const card = document.getElementById('trading-mode-card');
+    const wallet = document.getElementById('mode-wallet');
+
+    badge.textContent = isLive ? 'LIVE' : 'PAPER';
+    badge.className = 'strat-badge ' + (isLive ? 'on' : 'off');
+    btn.textContent = isLive ? 'Zu PAPER wechseln' : 'Zu LIVE wechseln';
+    btn.className = 'toggle-btn ' + (isLive ? 'disable' : 'enable');
+    card.style.borderColor = isLive ? 'var(--green)' : 'var(--border)';
+    wallet.textContent = isLive ? 'Wallet: ' + (d.wallet || '?') : 'Kein echtes Geld';
+  } catch(e) { console.error('Mode load error:', e); }
+}
+
+async function toggleTradingMode() {
+  const r0 = await fetch('/api/trading-mode');
+  const d0 = await r0.json();
+  const goingLive = !d0.live_trading;
+
+  if (goingLive) {
+    if (!confirm('ACHTUNG: Zu LIVE Trading wechseln?\n\nDer Bot wird ECHTE Orders mit deiner Wallet platzieren.\nEchtes Geld ist im Risiko!\n\nBist du sicher?')) return;
+  }
+
+  try {
+    const r = await fetch('/api/trading-mode', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({live: goingLive})
+    });
+    const d = await r.json();
+    if (d.mode) {
+      showStatus('Trading-Modus: ' + d.mode + ' (Strategien neu gestartet)', 'success');
+    }
+    loadTradingMode();
+    loadStrategies();
+  } catch(e) { showStatus('Fehler: ' + e, 'error'); }
+}
+
+loadTradingMode();
+setInterval(loadTradingMode, 10000);
 </script>
 </body>
 </html>

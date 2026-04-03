@@ -72,18 +72,16 @@ class PreTradeCalculator:
         """Dynamische Polymarket-Gebühr in %.
 
         Offizielle Formel: fee_pct = feeRate × (p × (1-p))^exponent × 100
-        Ab 30. März 2026 — Crypto 5m/15m: Peak 1.80% bei p=0.50
-        Bei p=0.50: 1.80%  (Peak)
-        Bei p=0.60: 1.66%
-        Bei p=0.70: 1.18%
-        Bei p=0.80: 0.59%
+        Ab 30. März 2026 — Crypto 5m/15m: feeRate=0.072, Peak 1.80% bei p=0.50.
+        Offizielle Formel: fee_dollar = shares × 0.072 × p × (1-p)
+        Als Prozent des Investments: fee_pct = max_fee × 4p(1-p)
 
-        Wir nutzen polymarket_max_fee_pct als Peak-Gebühr und Exponent 2:
-        fee = MAX_FEE × (4 × p × (1-p))^2
+        STRESSTEST FIX (04.04.2026): Exponent von 2 auf 1 korrigiert.
+        Exponent 2 unterschätzte Fees um Faktor 2-3x bei Preisen abseits von 0.50.
         """
         p = max(0.01, min(0.99, price))
         base = 4 * p * (1 - p)  # Normalisiert: 1.0 bei p=0.50
-        return self.settings.polymarket_max_fee_pct * base * base  # Exponent 2
+        return self.settings.polymarket_max_fee_pct * base  # Exponent 1 (korrigiert)
 
     # --- Wahrscheinlichkeitsschätzung ---
 
