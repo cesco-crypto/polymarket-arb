@@ -178,7 +178,18 @@
   <table id="signals-body"><tr><td colspan="8" class="empty">No signal evaluations yet</td></tr></table>
 </div>
 
-<!-- P5: Live Trading History (echte Trades, nicht Paper) -->
+<!-- P5: Live Market Embeds (aktuell getradete Events) -->
+<div class="p" id="live-embeds-panel" style="grid-column:1/-1;padding:8px 12px">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+    <div class="pt" style="margin-bottom:0">Live Markets</div>
+    <span class="d" style="font-size:9px" id="embed-count">0 active</span>
+  </div>
+  <div id="live-embeds" style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;min-height:60px;align-items:center">
+    <span class="d" style="font-size:10px">Waiting for active markets...</span>
+  </div>
+</div>
+
+<!-- P6: Live Trading History (echte Trades, nicht Paper) -->
 <div class="p p5">
   <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
     <div class="pt" style="margin-bottom:0">Live Trading <span id="live-source" class="d" style="font-size:9px;font-weight:400"></span></div>
@@ -246,6 +257,9 @@ function switchTab(btn, tab) {
 
     // P2: Markets
     renderMarkets(d.discovery || {});
+
+    // Live Embeds (aktuell getradete Events)
+    renderLiveEmbeds(d.discovery || {});
 
     // P3: Signals
     renderSignals(d.signals || [], d.config || {});
@@ -320,6 +334,57 @@ function switchTab(btn, tab) {
         <td class="r d">${fk(w.liquidity||0)}</td>
         <td>${status}</td>
       </tr>`;
+    }).join('');
+  }
+
+  // --- Live Market Embeds ---
+  let _lastEmbedSlugs = '';
+  function renderLiveEmbeds(disc) {
+    const wins = (disc.windows || []).filter(w => w.tradeable && w.remaining_s > 15);
+    const container = id('live-embeds');
+    const countEl = id('embed-count');
+
+    // Sort: nearest expiry first, max 4 embeds
+    const sorted = [...wins].sort((a,b) => a.remaining_s - b.remaining_s).slice(0, 4);
+    const slugKey = sorted.map(w => w.slug).join(',');
+
+    // Only rebuild if windows changed (avoid iframe flicker)
+    if (slugKey === _lastEmbedSlugs) return;
+    _lastEmbedSlugs = slugKey;
+
+    countEl.textContent = sorted.length + ' active';
+
+    if (!sorted.length) {
+      container.innerHTML = '<span class="d" style="font-size:10px">No tradeable markets right now</span>';
+      return;
+    }
+
+    container.innerHTML = sorted.map(w => {
+      const asset = (w.asset || '').toUpperCase();
+      const slug = w.slug || '';
+      // Build Polymarket embed URL from slug
+      // Slug format: btc-updown-5m-1775240700 → event: btc-updown-5m-1775240700
+      const embedUrl = `https://embed.polymarket.com/market?market=${slug}&theme=dark&liveactivity=true&border=true&height=220`;
+      const pmUrl = `https://polymarket.com/event/${slug}`;
+      const tagC = asset === 'BTC' ? 'tag-btc' : 'tag-eth';
+      const secs = Math.max(0, w.remaining_s);
+      const mm = Math.floor(secs/60);
+      const ss = Math.floor(secs%60);
+      const tf = w.tf || '5m';
+
+      return `<div style="flex:0 0 auto;min-width:280px;max-width:340px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px;overflow:hidden">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid var(--border)">
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="tag ${tagC}" style="font-size:9px">${asset}</span>
+            <span class="d" style="font-size:9px">${tf}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span style="font-size:10px;color:var(--${secs<30?'red':secs<60?'yellow':'green'})">${mm}:${String(ss).padStart(2,'0')}</span>
+            <a href="${pmUrl}" target="_blank" rel="noopener" style="color:var(--accent);font-size:9px;text-decoration:none">↗</a>
+          </div>
+        </div>
+        <iframe src="${embedUrl}" width="100%" height="220" frameborder="0" allowtransparency="true" style="display:block;background:var(--bg)"></iframe>
+      </div>`;
     }).join('');
   }
 
@@ -701,7 +766,7 @@ function switchTab(btn, tab) {
 
   setInterval(() => { id('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
   // Re-render countdowns every 500ms for smooth animation
-  setInterval(() => { if (lastData) { renderMarkets(lastData.discovery||{}); } }, 500);
+  setInterval(() => { if (lastData) { renderMarkets(lastData.discovery||{}); renderLiveEmbeds(lastData.discovery||{}); } }, 500);
 
   connect();
 })();
