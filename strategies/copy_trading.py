@@ -90,6 +90,8 @@ class TrackedTrade:
     condition_id: str
     timestamp: int
     asset_id: str = ""    # Token asset ID für Order
+    outcome_index: int = -1   # 0 oder 1 (welches Outcome)
+    source_tx_hash: str = ""  # Original Blockchain Transaction Hash
 
 
 @dataclass
@@ -106,6 +108,11 @@ class CopiedPosition:
     entry_price: float
     size_usd: float
     copied_at: float
+    token_id: str = ""           # Polymarket Token ID (für SELL-Orders)
+    outcome_index: int = -1      # 0 oder 1 (welches Outcome)
+    is_hedge: bool = False       # True wenn dies der Hedge-Leg ist
+    source_tx_hash: str = ""     # Original trader's tx hash on Polygon
+    source_orig_usd: float = 0.0 # Trader's original trade size in USD (for hedge ratio)
     live_order_id: str = ""
     live_success: bool = False
     resolved: bool = False
@@ -242,9 +249,11 @@ class CopyTradingStrategy(StrategyBase):
                     for t in trades:
                         ts = t.get("timestamp", 0)
                         cid = t.get("conditionId", "")
-                        # Alle 3 Key-Typen markieren
+                        oi = t.get("outcomeIndex", -1)
+                        # Alle Key-Typen markieren (v3.0: Outcome-aware)
                         self._seen_trade_keys.add(f"{addr}_{ts}_{cid}")
-                        self._seen_trade_keys.add(f"{addr}_{cid}")  # Market-Key
+                        self._seen_trade_keys.add(f"{addr}_{cid}_{oi}")  # Outcome-Key (v3.0)
+                        self._seen_trade_keys.add(f"{addr}_{cid}")  # Legacy Market-Key
                         total_marked += 1
                     self._last_seen[addr] = max(
                         self._last_seen.get(addr, 0),
@@ -295,7 +304,11 @@ class CopyTradingStrategy(StrategyBase):
             await asyncio.sleep(self.poll_interval_s)
 
     async def _check_wallet(self, wallet: dict) -> None:
-        """Prüft eine Wallet auf neue Trades — mit allen Safety Guards."""
+        """Prüft eine Wallet auf neue Trades — mit allen Safety Guards.
+
+        v3.0: Outcome-aware Dedup (Hedge-Copy erlaubt), SELL-Copy,
+        proportionales Sizing, Market-basierter Concurrent-Counter.
+        """
         addr = wallet["address"]
         name = wallet["name"]
 
@@ -314,33 +327,43 @@ class CopyTradingStrategy(StrategyBase):
             self._last_seen[addr] = max(self._last_seen.get(addr, 0), ts)
 
             side = trade.get("side", "")
+            condition_id = trade.get("conditionId", "")
+            outcome_index = trade.get("outcomeIndex", -1)
 
             # ── GUARD 1: Unique Trade Key (verhindert Duplikate per Wallet) ──
-            trade_key = f"{addr}_{ts}_{trade.get('conditionId','')}"
+            trade_key = f"{addr}_{ts}_{condition_id}"
             if trade_key in self._seen_trade_keys:
                 continue
             self._seen_trade_keys.add(trade_key)
 
-            # ── SELL-Trades: Alert senden (Smart Wallet Exit = wichtiges Signal) ──
+            # ── SELL-Trades: SELL-COPY wenn wir die Position haben ──
             if side == "SELL":
-                logger.info(f"COPY EXIT SIGNAL: {name} SELL {trade.get('outcome','')} @ {trade.get('price',0)} | {trade.get('title','')[:40]}")
-                asyncio.create_task(telegram.send_alert(
-                    f"🔔 <b>EXIT SIGNAL</b>\n"
-                    f"{'─'*26}\n"
-                    f"👤 <b>{name}</b> hat VERKAUFT!\n"
-                    f"📊 SELL {trade.get('outcome','')} @ {float(trade.get('price',0)):.3f}\n"
-                    f"📍 {trade.get('title','')[:50]}\n"
-                    f"⚠️ Prüfe ob du diese Position auch schliessen willst"
-                ))
-                continue  # SELL-Trades nicht kopieren (nur alertieren)
-
-            # ── GUARD 2: Intra-Wallet Market-Dedup (keine Tranchen-Duplikate) ──
-            condition_id = trade.get("conditionId", "")
-            market_key = f"{addr}_{condition_id}"
-            if market_key in self._seen_trade_keys:
-                logger.debug(f"Copy Skip (Tranche, gleicher Markt): {name} {trade.get('title','')[:30]}")
+                await self._handle_sell_signal(trade, name, addr)
                 continue
-            self._seen_trade_keys.add(market_key)
+
+            # ── GUARD 2: Outcome-aware Dedup (Hedge = anderes Outcome ERLAUBT) ──
+            # SAFETY: outcomeIndex muss 0 oder 1 sein, sonst Fallback auf Market-Key
+            is_hedge = False
+            if outcome_index in (0, 1):
+                outcome_key = f"{addr}_{condition_id}_{outcome_index}"
+                if outcome_key in self._seen_trade_keys:
+                    logger.debug(f"Copy Skip (Tranche, gleicher Outcome): {name} {trade.get('title','')[:30]}")
+                    continue
+                self._seen_trade_keys.add(outcome_key)
+
+                # Prüfe ob dies ein Hedge ist (anderes Outcome auf gleichem Market)
+                other_key = f"{addr}_{condition_id}_{1 - outcome_index}"
+                if other_key in self._seen_trade_keys:
+                    is_hedge = True
+                    logger.info(f"HEDGE DETECTED: {name} kauft BEIDE Seiten auf {trade.get('title','')[:35]}")
+            else:
+                # Fallback: kein outcomeIndex → Market-Level Dedup (konservativ)
+                market_key = f"{addr}_{condition_id}"
+                if market_key in self._seen_trade_keys:
+                    logger.debug(f"Copy Skip (Market-level, no outcomeIndex): {name} {trade.get('title','')[:30]}")
+                    continue
+                self._seen_trade_keys.add(market_key)
+                logger.warning(f"outcomeIndex missing ({outcome_index}) for {name} on {condition_id[:12]}... — fallback to market dedup")
 
             # ── GUARD 3: Price Filter (keine Lotterietickets, kein schlechtes R/R) ──
             price = float(trade.get("price", 0))
@@ -348,16 +371,29 @@ class CopyTradingStrategy(StrategyBase):
                 logger.info(f"Copy Skip (Preis {price:.3f} ausserhalb {self.min_copy_price}-{self.max_copy_price}): {name} {trade.get('title','')[:40]}")
                 continue
 
-            # ── GUARD 4: Trade zu alt? ──
+            # ── GUARD 4: Age Filter — lockerer für Hedges (15 Min statt 5 Min) ──
             age = time.time() - ts
-            if age > self.min_seconds_to_copy * 60:  # 5 Minuten
-                logger.debug(f"Copy Skip (zu alt: {age:.0f}s): {name}")
+            max_age = self.min_seconds_to_copy * 60 * 3 if is_hedge else self.min_seconds_to_copy * 60
+            if age > max_age:
+                logger.debug(f"Copy Skip (zu alt: {age:.0f}s > {max_age:.0f}s{'[hedge]' if is_hedge else ''}): {name}")
                 continue
 
-            # ── GUARD 5: Max concurrent? ──
-            active = sum(1 for p in self._copied_positions if not p.resolved)
-            if active >= self.max_concurrent:
-                logger.warning(f"Copy Skip (max {self.max_concurrent} erreicht): {name}")
+            # ── GUARD 5: Max concurrent — zähle MÄRKTE, nicht einzelne Seiten ──
+            # DEADLOCK FIX: Positionen älter als 7 Tage werden auto-resolved
+            # (Markets lösen sich natürlich auf, aber unser Code erkennt das nicht)
+            MAX_POSITION_AGE_S = 7 * 24 * 3600  # 7 Tage
+            now = time.time()
+            active_markets = set()
+            for p in self._copied_positions:
+                if not p.resolved:
+                    if now - p.copied_at > MAX_POSITION_AGE_S:
+                        p.resolved = True  # Auto-expire stale position
+                        logger.info(f"AUTO-RESOLVE: {p.trade_id} ({p.market_title[:30]}) — älter als 7d")
+                    else:
+                        active_markets.add(p.condition_id)
+            # Neuer Market oder Hedge auf bestehendem? Hedge zählt nicht extra.
+            if condition_id not in active_markets and len(active_markets) >= self.max_concurrent:
+                logger.warning(f"Copy Skip (max {self.max_concurrent} Markets erreicht): {name}")
                 continue
 
             # ── GUARD 6: Balance-Check (nicht ordern wenn Wallet zu leer) ──
@@ -369,6 +405,34 @@ class CopyTradingStrategy(StrategyBase):
                         continue
                 except Exception:
                     pass  # Balance-Check optional, CLOB blockt auch
+
+            # ── Proportionale Sizing für Hedges ──
+            # Hedge-Leg bekommt proportional less (based on trader's OWN ratio).
+            # CORRECT formula: ratio = trader_hedge_usd / trader_first_leg_usd
+            # We stored the trader's original USD size in source_orig_usd.
+            copy_size = self.max_copy_size_usd
+            trader_hedge_usd = float(trade.get("usdcSize", 0) or 0)
+            if is_hedge:
+                # Find our first-leg copy FROM THE SAME SOURCE WALLET
+                first_leg = next(
+                    (p for p in self._copied_positions
+                     if p.condition_id == condition_id
+                     and p.source_wallet == addr
+                     and not p.resolved),
+                    None,
+                )
+                if first_leg and trader_hedge_usd > 0 and first_leg.source_orig_usd > 0:
+                    # Both values are the TRADER's USD sizes → correct apples-to-apples ratio
+                    ratio = min(1.0, trader_hedge_usd / first_leg.source_orig_usd)
+                    copy_size = max(1.0, round(self.max_copy_size_usd * ratio, 2))
+                    logger.info(
+                        f"HEDGE SIZING: ${copy_size:.2f} (trader hedge ${trader_hedge_usd:,.0f} "
+                        f"/ trader main ${first_leg.source_orig_usd:,.0f} = {ratio:.1%} "
+                        f"of our ${self.max_copy_size_usd})"
+                    )
+                else:
+                    # Fallback: no first-leg data → copy at full size
+                    logger.info(f"HEDGE SIZING: ${copy_size:.2f} (fallback, no first-leg trader data)")
 
             # ── Alle Guards bestanden → Kopieren! ──
             # Cross-Wallet Confluence ERLAUBT: Wenn 2 Top-Wallets denselben
@@ -385,24 +449,180 @@ class CopyTradingStrategy(StrategyBase):
                 condition_id=condition_id,
                 timestamp=ts,
                 asset_id=trade.get("asset", ""),
+                outcome_index=outcome_index,
+                source_tx_hash=trade.get("transactionHash", ""),
             )
 
-            await self._copy_trade(tracked)
-            self._save_seen_state()  # Persist nach jedem Copy
+            try:
+                await self._copy_trade(tracked, copy_size=copy_size, is_hedge=is_hedge)
+            finally:
+                self._save_seen_state()  # Persist IMMER — auch bei Exception
+
+    # ═══════════════════════════════════════════════════════════════
+    # SELL-COPY (Auto-Exit wenn Source Wallet verkauft)
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _handle_sell_signal(self, trade: dict, name: str, addr: str) -> None:
+        """Verarbeitet SELL-Trade eines Trackers: verkauft unsere Position.
+
+        FIXES applied (10-Agent Stress Test):
+        - Source wallet filter (nur Positionen von DIESEM Tracker verkaufen)
+        - Simplified sell sizing (sell all — $5 Positionen sind Minimum, kein Partial)
+        - Re-entry key removal (outcome_key wird entfernt → Trader kann re-buyen)
+        - Hedge unwind (wenn Primary sold → Hedge auch auflösen)
+        - Phantom position cleanup (failed BUYs → resolved markieren)
+        - Journal recording (SELL-Copy ins JSONL schreiben)
+        """
+        condition_id = trade.get("conditionId", "")
+        outcome = trade.get("outcome", "")
+        outcome_index = trade.get("outcomeIndex", -1)
+        sell_price = float(trade.get("price", 0))
+        source_tx = trade.get("transactionHash", "")
+
+        # FIX: Source wallet filter — nur Positionen von DIESEM Trader
+        matching = [
+            p for p in self._copied_positions
+            if p.condition_id == condition_id
+            and p.outcome_index == outcome_index
+            and p.source_wallet == addr  # FIX: nur von diesem Wallet
+            and not p.resolved
+        ]
+
+        # FIX: Phantom cleanup — Positionen ohne token_id (failed BUYs) auflösen
+        phantoms = [p for p in matching if not p.token_id]
+        for ph in phantoms:
+            ph.resolved = True
+            logger.warning(f"PHANTOM CLEANUP: {ph.trade_id} — no token_id, marked resolved")
+        matching = [p for p in matching if p.token_id]
+
+        if not matching:
+            logger.info(f"SELL SIGNAL (no match): {name} SELL {outcome} @ {sell_price:.3f} | {trade.get('title','')[:40]}")
+            asyncio.create_task(telegram.send_alert(
+                f"🔔 <b>EXIT SIGNAL (unmatched)</b>\n"
+                f"👤 <b>{name}</b> SELL {outcome} @ {sell_price:.3f}\n"
+                f"📍 {trade.get('title','')[:50]}\n"
+                f"ℹ️ Wir haben keine Position auf diesem Outcome von {name}"
+            ))
+            return
+
+        for pos in matching:
+            # FIX: Simplified — bei $5 Positionen immer komplett verkaufen
+            # Partial sells auf $5 Positionen erzeugen Dust + extra Fees
+            our_sell_size = pos.size_usd
+
+            logger.info(
+                f"SELL-COPY: {name} verkauft {outcome} → wir auch! "
+                f"${our_sell_size:.2f} | {pos.trade_id}"
+            )
+
+            # LIVE SELL Order
+            sell_success = False
+            sell_order_id = ""
+            if self.executor.is_live and pos.token_id:
+                try:
+                    res = await self.executor.place_order(
+                        token_id=pos.token_id,
+                        side="SELL",
+                        price=sell_price,
+                        size_usd=our_sell_size,
+                        asset=name,
+                        direction=f"SELL_{outcome}",
+                    )
+                    if res.success:
+                        sell_success = True
+                        sell_order_id = res.order_id
+                        pos.resolved = True
+                        logger.info(f"SELL-COPY LIVE OK: {pos.trade_id} — {res.order_id}")
+                    else:
+                        logger.error(f"SELL-COPY LIVE FAILED: {pos.trade_id} — {res.error}")
+                except Exception as e:
+                    logger.error(f"SELL-COPY EXCEPTION: {pos.trade_id} — {e}")
+
+            # FIX: Re-entry key removal — outcome_key entfernen damit Trader re-buyen kann
+            if pos.resolved and outcome_index in (0, 1):
+                reentry_key = f"{addr}_{condition_id}_{outcome_index}"
+                self._seen_trade_keys.discard(reentry_key)
+                logger.info(f"RE-ENTRY ENABLED: {reentry_key} removed from dedup")
+
+            # FIX: Hedge unwind — wenn Primary verkauft, Hedge auch auflösen
+            if pos.resolved and not pos.is_hedge:
+                hedges = [
+                    h for h in self._copied_positions
+                    if h.condition_id == condition_id
+                    and h.is_hedge
+                    and not h.resolved
+                    and h.token_id
+                    and h.source_wallet == addr
+                ]
+                for hedge in hedges:
+                    logger.info(f"HEDGE UNWIND: Closing hedge {hedge.trade_id} (primary sold)")
+                    if self.executor.is_live:
+                        try:
+                            hr = await self.executor.place_order(
+                                token_id=hedge.token_id,
+                                side="SELL",
+                                price=max(0.01, 1.0 - sell_price),  # Approximate other side
+                                size_usd=hedge.size_usd,
+                                asset=name,
+                                direction=f"SELL_{hedge.outcome}",
+                            )
+                            if hr.success:
+                                hedge.resolved = True
+                                logger.info(f"HEDGE UNWIND OK: {hedge.trade_id} — {hr.order_id}")
+                        except Exception as e:
+                            logger.error(f"HEDGE UNWIND FAILED: {hedge.trade_id} — {e}")
+
+            # FIX: Journal recording — SELL-Copy ins JSONL schreiben
+            self.journal.record_open(TradeRecord(
+                trade_id=f"{pos.trade_id}_SELL",
+                asset=name,
+                direction=f"SELL_{outcome}",
+                signal_ts=float(trade.get("timestamp", 0)),
+                entry_ts=time.time(),
+                window_slug=pos.market_slug,
+                market_question=pos.market_title[:60],
+                executed_price=sell_price,
+                size_usd=our_sell_size,
+                order_type="copy_sell",
+                live_order_id=sell_order_id,
+                live_order_success=sell_success,
+                condition_id=condition_id,
+                source_wallet=addr,
+                source_wallet_name=name,
+                source_tx_hash=source_tx,
+            ))
+
+            # Telegram Alert
+            tx_short = source_tx[:12] + "…" if source_tx else "N/A"
+            asyncio.create_task(telegram.send_alert(
+                f"📤 <b>SELL-COPY</b> (Auto-Exit)\n"
+                f"{'─'*26}\n"
+                f"👤 {name} SELL → wir folgen!\n"
+                f"📊 SELL {outcome} @ {sell_price:.3f}\n"
+                f"💰 Sell Size: ${our_sell_size:.2f}\n"
+                f"📍 {pos.market_title[:40]}\n"
+                f"🔗 {pos.trade_id}\n"
+                f"⛓️ Source TX: {tx_short}"
+            ))
 
     # ═══════════════════════════════════════════════════════════════
     # COPY EXECUTION
     # ═══════════════════════════════════════════════════════════════
 
-    async def _copy_trade(self, trade: TrackedTrade) -> None:
-        """Kopiert einen erkannten Trade."""
+    async def _copy_trade(
+        self, trade: TrackedTrade, copy_size: float = 0, is_hedge: bool = False
+    ) -> None:
+        """Kopiert einen erkannten Trade (BUY oder Hedge-Leg)."""
         self._copy_count += 1
         trade_id = f"CT-{self._copy_count:04d}"
+        if copy_size <= 0:
+            copy_size = self.max_copy_size_usd
 
+        hedge_tag = " [HEDGE]" if is_hedge else ""
         logger.info(
-            f"COPY #{self._copy_count}: {trade.wallet_name} → "
+            f"COPY #{self._copy_count}{hedge_tag}: {trade.wallet_name} → "
             f"{trade.side} {trade.outcome} @ {trade.price:.3f} | "
-            f"${trade.size_usd:,.0f} | {trade.title[:50]}"
+            f"Orig: ${trade.size_usd:,.0f} | Copy: ${copy_size:.2f} | {trade.title[:45]}"
         )
 
         # Position tracken
@@ -416,8 +636,13 @@ class CopyTradingStrategy(StrategyBase):
             side=trade.side,
             outcome=trade.outcome,
             entry_price=trade.price,
-            size_usd=self.max_copy_size_usd,
+            size_usd=copy_size,
             copied_at=time.time(),
+            token_id=trade.asset_id,
+            outcome_index=trade.outcome_index,
+            is_hedge=is_hedge,
+            source_tx_hash=trade.source_tx_hash,
+            source_orig_usd=trade.size_usd,  # Trader's original USD size (for hedge ratio)
         )
         self._copied_positions.append(pos)
 
@@ -431,6 +656,8 @@ class CopyTradingStrategy(StrategyBase):
             "price": round(trade.price, 3),
             "market": trade.title[:40],
             "original_size": round(trade.size_usd, 0),
+            "source_tx_hash": trade.source_tx_hash,
+            "condition_id": trade.condition_id,
         })
 
         # Telegram Alert — zeige Wallet-PnL aus Config
@@ -440,14 +667,18 @@ class CopyTradingStrategy(StrategyBase):
                 wallet_pnl = w.get("pnl", 0)
                 break
         size_str = f"${trade.size_usd:,.0f}" if trade.size_usd > 0 else "N/A"
+        tx_short = trade.source_tx_hash[:12] + "…" if trade.source_tx_hash else "N/A"
+        tx_link = f"https://polygonscan.com/tx/{trade.source_tx_hash}" if trade.source_tx_hash else ""
+        hedge_emoji = "🛡️ HEDGE " if is_hedge else ""
         asyncio.create_task(telegram.send_alert(
-            f"📋 <b>COPY TRADE #{self._copy_count}</b>\n"
+            f"📋 <b>{hedge_emoji}COPY TRADE #{self._copy_count}</b>\n"
             f"{'─'*26}\n"
             f"👤 Source: <b>{trade.wallet_name}</b> (${wallet_pnl:,.0f} Lifetime PnL)\n"
             f"📊 {trade.side} {trade.outcome} @ {trade.price:.3f} (Orig: {size_str})\n"
-            f"💰 Copy Size: ${self.max_copy_size_usd:.2f}\n"
+            f"💰 Copy Size: ${copy_size:.2f}{' (proportional)' if is_hedge else ''}\n"
             f"📍 {trade.title[:50]}\n"
-            f"🔗 <code>{trade.slug}</code>"
+            f"🔗 <code>{trade.slug}</code>\n"
+            f"⛓️ Source TX: <a href=\"{tx_link}\">{tx_short}</a>"
         ))
 
         # LIVE Order platzieren
@@ -457,7 +688,7 @@ class CopyTradingStrategy(StrategyBase):
                     token_id=trade.asset_id,
                     side="BUY",
                     price=trade.price,
-                    size_usd=self.max_copy_size_usd,
+                    size_usd=copy_size,
                     asset=trade.wallet_name,
                     direction=trade.outcome,
                 )
@@ -470,7 +701,7 @@ class CopyTradingStrategy(StrategyBase):
             except Exception as e:
                 logger.error(f"COPY LIVE EXCEPTION: {trade_id} — {e}")
 
-        # Journal
+        # Journal — Full Forensic Record mit Source-Zuordnung
         self.journal.record_open(TradeRecord(
             trade_id=trade_id,
             asset=trade.wallet_name,
@@ -480,10 +711,15 @@ class CopyTradingStrategy(StrategyBase):
             window_slug=trade.slug,
             market_question=trade.title[:60],
             executed_price=trade.price,
-            size_usd=self.max_copy_size_usd,
-            order_type="copy_trade",
+            size_usd=copy_size,
+            order_type="copy_hedge" if is_hedge else "copy_trade",
             live_order_id=pos.live_order_id,
             live_order_success=pos.live_success,
+            # Copy Trading Forensics — 100% Traceability
+            condition_id=trade.condition_id,
+            source_wallet=trade.wallet_address,
+            source_wallet_name=trade.wallet_name,
+            source_tx_hash=trade.source_tx_hash,
         ))
 
     # ═══════════════════════════════════════════════════════════════

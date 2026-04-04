@@ -119,6 +119,12 @@ class TradeRecord:
     market_id: str = ""                   # Polymarket market slug (e.g., "btc-updown-5m-1775122200")
     post_trade_pnl_pct: float = 0.0      # Actual P&L % after resolution
 
+    # --- Copy Trading Forensics ---
+    condition_id: str = ""                # Polymarket conditionId (hex)
+    source_wallet: str = ""               # Copy source: tracked wallet address
+    source_wallet_name: str = ""          # Copy source: human name (e.g., "swisstony")
+    source_tx_hash: str = ""              # Copy source: original trader's tx hash on Polygon
+
 
 class TradeJournal:
     """Unverlierbare Trade-Datenbank."""
@@ -165,6 +171,8 @@ class TradeJournal:
                     "regime_tag", "signal_confluence_count", "confidence_score",
                     "gas_fee_usd", "fill_type", "position_size_usd",
                     "entry_timestamp_ms", "market_id",
+                    # Copy Trading Forensics
+                    "condition_id", "source_wallet", "source_wallet_name", "source_tx_hash",
                 )
                 for data in raw_records:
                     if data.get("event") == "close":
@@ -272,6 +280,8 @@ class TradeJournal:
         "regime_tag", "signal_confluence_count", "confidence_score",
         "gas_fee_usd", "fill_type", "position_size_usd",
         "entry_timestamp_ms", "market_id",
+        # Copy Trading Forensics (must propagate to close)
+        "condition_id", "source_wallet", "source_wallet_name", "source_tx_hash",
     )
 
     def record_close(self, rec: TradeRecord) -> None:

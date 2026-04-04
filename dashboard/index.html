@@ -200,9 +200,9 @@
   </div>
   <div id="tab-positions" class="tab-panel on">
     <table>
-      <tr><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Now @</th><th class="r">Size</th><th class="r">Value</th><th class="r">PnL</th><th>Status</th></tr>
+      <tr><th style="font-size:8px">TX</th><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Now @</th><th class="r">Size</th><th class="r">Value</th><th class="r">PnL</th><th>Expires</th><th>Status</th></tr>
     </table>
-    <table id="pos-body"><tr><td colspan="8" class="empty">Loading positions...</td></tr></table>
+    <table id="pos-body"><tr><td colspan="10" class="empty">Loading positions...</td></tr></table>
     <div id="redeem-panel" style="margin-top:8px;padding:8px 10px;background:var(--bg-card2);border:1px solid var(--border);border-radius:6px;display:none">
       <div style="display:flex;align-items:center;justify-content:space-between">
         <div>
@@ -225,6 +225,19 @@
     <div id="hist-summary" style="margin-bottom:6px">
       <div class="d" style="font-size:10px">Loading trade history...</div>
     </div>
+    <!-- Resolved (LOST) Positions -->
+    <div id="resolved-section" style="display:none;margin-bottom:10px">
+      <div style="font-size:10px;color:var(--red);font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:6px">
+        RESOLVED POSITIONS <span id="resolved-ct" class="d" style="font-size:9px;font-weight:400"></span>
+        <span id="resolved-pnl" class="rd b" style="font-size:11px"></span>
+      </div>
+      <table>
+        <tr><th style="font-size:8px">TX</th><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Result</th><th class="r">Size</th><th class="r">PnL</th><th>Ended</th><th>Status</th></tr>
+      </table>
+      <table id="resolved-body"></table>
+      <div style="height:1px;background:var(--border);margin:8px 0"></div>
+    </div>
+    <!-- Signal-based Trades (JSONL) -->
     <table>
       <tr><th>ID</th><th>Mode</th><th>TF</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th><th style="font-size:9px">Opened</th><th style="font-size:9px">Closed</th></tr>
     </table>
@@ -546,6 +559,7 @@ function switchTab(btn, tab) {
 
   // --- P5: Live Positions & Trade History (from Polymarket API + Supabase) ---
   let _livePositions = [];
+  let _resolvedPositions = [];
   let _liveHistory = [];
 
   async function fetchLiveData() {
@@ -558,10 +572,11 @@ function switchTab(btn, tab) {
       const histData = await histRes.json();
 
       _livePositions = posData.positions || [];
+      _resolvedPositions = posData.resolved || [];
       _liveHistory = histData.trades || [];
 
       id('pos-ct').textContent = _livePositions.length;
-      id('hist-ct').textContent = _liveHistory.length;
+      id('hist-ct').textContent = _liveHistory.length + _resolvedPositions.length;
       const lv = histData.live || {};
       const lvPnl = (lv.total_pnl || 0);
       id('live-source').textContent = lv.count
@@ -569,16 +584,66 @@ function switchTab(btn, tab) {
         : `(${histData.source || 'api'} | ${histData.count || 0} trades | no live data yet)`;
 
       renderLivePositions();
+      renderResolvedPositions();
       renderLiveHistory(histData);
     } catch(e) {
       console.error('Live data fetch error:', e);
     }
   }
 
+  // Format tx hash as short clickable Polygonscan link + copy source badge
+  function txLink(p) {
+    const tx = p.txHash || p.latestTxHash || '';
+    const cnt = p.tradeCount || 0;
+    const src = p.copySource || '';
+    const srcTx = p.sourceTxHash || '';
+
+    let html = '';
+    if (!tx) {
+      html = '<span class="d">—</span>';
+    } else {
+      const short = tx.substring(0, 8);
+      const cntBadge = cnt > 1 ? `<span class="d" style="font-size:7px">×${cnt}</span>` : '';
+      html = `<a href="https://polygonscan.com/tx/${tx}" target="_blank" style="color:var(--accent);font-size:9px;text-decoration:none;font-family:var(--font)" title="Our TX: ${tx}">${short}…</a>${cntBadge}`;
+    }
+    // Copy source badge
+    if (src) {
+      const srcShort = srcTx ? srcTx.substring(0, 6) : '';
+      const srcLink = srcTx ? `<a href="https://polygonscan.com/tx/${srcTx}" target="_blank" style="color:var(--orange);font-size:7px;text-decoration:none" title="Source TX: ${srcTx}">⛓${srcShort}</a>` : '';
+      html += `<div style="margin-top:1px"><span style="font-size:7px;color:var(--yellow);background:var(--bg);padding:0 3px;border-radius:2px;border:1px solid var(--yellow)">📋${src}</span> ${srcLink}</div>`;
+    }
+    return html;
+  }
+
+  // Parse expiry time from crypto title: "Ethereum Up or Down - April 3, 2:55AM-3:00AM ET"
+  function parseExpiry(p) {
+    const title = p.title || '';
+    const endDate = p.endDate || '';
+    // Crypto BTC/ETH: extract end time from title
+    const m = title.match(/(\w+ \d+),\s*[\d:]+[AP]M\s*-\s*([\d:]+[AP]M)\s*(ET|UTC)/i);
+    if (m) {
+      return {text: m[1] + ' ' + m[2] + ' ' + m[3], isCrypto: true};
+    }
+    // Fallback: endDate
+    if (endDate) {
+      const d = new Date(endDate + 'T23:59:59Z');
+      const now = new Date();
+      const diffH = (d - now) / 3600000;
+      if (diffH < 0) return {text: endDate, isCrypto: false, expired: true};
+      if (diffH < 48) {
+        const h = Math.floor(diffH);
+        const min = Math.floor((diffH - h) * 60);
+        return {text: (h > 0 ? h + 'h ' : '') + min + 'm', isCrypto: false};
+      }
+      return {text: endDate, isCrypto: false};
+    }
+    return {text: '—', isCrypto: false};
+  }
+
   function renderLivePositions() {
     const pb = id('pos-body');
     if (!_livePositions.length) {
-      pb.innerHTML = '<tr><td colspan="8" class="empty">No open positions (all redeemed)</td></tr>';
+      pb.innerHTML = '<tr><td colspan="10" class="empty">No open positions (all redeemed)</td></tr>';
       // Embeds leeren
       const ec = document.getElementById('position-embeds');
       if (ec) ec.innerHTML = '<span class="d" style="font-size:10px">Keine offenen Positionen</span>';
@@ -593,7 +658,10 @@ function switchTab(btn, tab) {
       const status = p.redeemable ? (won ? '<span class="g b">REDEEMABLE</span>' : '<span class="rd">LOST</span>') : '<span class="y">OPEN</span>';
       const title = (p.title || '').substring(0, 35);
       const slug = p.eventSlug || p.slug || '';
+      const exp = parseExpiry(p);
+      const expCls = exp.expired ? 'rd' : exp.isCrypto ? 'y' : 'd';
       return `<tr>
+        <td style="white-space:nowrap">${txLink(p)}</td>
         <td style="font-size:10px">${title}</td>
         <td><span class="tag ${p.outcome==='Up'?'tag-up':'tag-dn'}">${p.outcome}</span></td>
         <td class="r">${(p.avgPrice||0).toFixed(3)}</td>
@@ -601,6 +669,7 @@ function switchTab(btn, tab) {
         <td class="r">$${(p.initialValue||0).toFixed(2)}</td>
         <td class="r b">$${(p.currentValue||0).toFixed(2)}</td>
         <td class="r ${pnlC} b">$${(p.cashPnl||0)>=0?'+':''}${(p.cashPnl||0).toFixed(2)}</td>
+        <td class="${expCls}" style="font-size:10px;white-space:nowrap">${exp.text}</td>
         <td>${status} ${slug ? '<a href="https://polymarket.com/event/'+slug+'" target="_blank" style="color:var(--accent);font-size:8px;text-decoration:none">↗</a>' : ''}</td>
       </tr>`;
     }).join('');
@@ -640,6 +709,38 @@ function switchTab(btn, tab) {
         '<iframe src="' + embedUrl + '" width="100%" height="260" frameborder="0" allowtransparency="true" style="display:block;background:var(--bg)"></iframe>' +
       '</div>';
     }).filter(Boolean).join('');
+  }
+
+  function renderResolvedPositions() {
+    const section = id('resolved-section');
+    const rb = id('resolved-body');
+    if (!_resolvedPositions.length) {
+      section.style.display = 'none';
+      return;
+    }
+    section.style.display = 'block';
+    const totalLoss = _resolvedPositions.reduce((s, p) => s + (p.cashPnl || 0), 0);
+    id('resolved-ct').textContent = _resolvedPositions.length + ' positions';
+    id('resolved-pnl').textContent = '$' + (totalLoss >= 0 ? '+' : '') + totalLoss.toFixed(2);
+    rb.innerHTML = _resolvedPositions.map(p => {
+      const won = p.curPrice === 1;
+      const pnlC = (p.cashPnl || 0) >= 0 ? 'g' : 'rd';
+      const status = won ? '<span class="g b">WON</span>' : '<span class="rd">LOST</span>';
+      const title = (p.title || '').substring(0, 40);
+      const slug = p.eventSlug || '';
+      const exp = parseExpiry(p);
+      return `<tr>
+        <td style="white-space:nowrap">${txLink(p)}</td>
+        <td style="font-size:10px">${title}</td>
+        <td><span class="tag ${p.outcome==='Up'?'tag-up':'tag-dn'}">${p.outcome}</span></td>
+        <td class="r">${(p.avgPrice||0).toFixed(3)}</td>
+        <td class="r">${(p.curPrice||0).toFixed(2)}</td>
+        <td class="r">$${(p.initialValue||0).toFixed(2)}</td>
+        <td class="r ${pnlC} b">$${(p.cashPnl||0)>=0?'+':''}${(p.cashPnl||0).toFixed(2)}</td>
+        <td class="d" style="font-size:10px;white-space:nowrap">${exp.text}</td>
+        <td>${status} ${slug ? '<a href="https://polymarket.com/event/'+slug+'" target="_blank" style="color:var(--accent);font-size:8px;text-decoration:none">↗</a>' : ''}</td>
+      </tr>`;
+    }).join('');
   }
 
   function renderLiveHistory(data) {

@@ -146,6 +146,8 @@ async def insert_trade(data: dict, max_retries: int = 3) -> bool:
         "markout_1s", "markout_5s", "markout_10s", "markout_30s",
         "markout_60s", "order_type", "live_order_id", "live_order_success",
         "live_error", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+        # Copy Trading Forensics
+        "condition_id", "source_wallet", "source_wallet_name", "source_tx_hash",
     }
     clean = {k: v for k, v in data.items() if k in allowed_fields}
 

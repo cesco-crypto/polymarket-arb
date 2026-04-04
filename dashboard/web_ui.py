@@ -351,9 +351,127 @@ async def api_live_trades() -> dict:
     return {"trades": [], "count": 0, "source": "none"}
 
 
+def _fetch_activity_lookup(wallet: str) -> dict:
+    """Activity API → Lookup: (conditionId, outcomeIndex) → {txHash, tradeCount, firstTx, usdcTotal}."""
+    import json as _json
+    from urllib.request import urlopen as _urlopen, Request as _Req
+    from collections import defaultdict
+
+    try:
+        url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=200&type=TRADE"
+        req = _Req(url, headers={"User-Agent": "polymarket-arb/2.0"})
+        with _urlopen(req, timeout=8) as resp:
+            trades = _json.loads(resp.read())
+    except Exception:
+        return {}
+
+    # Gruppieren nach (conditionId, outcomeIndex) → alle Trades für diese Position
+    groups: dict = defaultdict(list)
+    for t in trades:
+        key = (t.get("conditionId", ""), t.get("outcomeIndex", 0))
+        groups[key].append(t)
+
+    lookup = {}
+    for key, tlist in groups.items():
+        # Sortiert nach timestamp ascending (ältester zuerst)
+        tlist.sort(key=lambda x: x.get("timestamp", 0))
+        first = tlist[0]
+        latest = tlist[-1]
+        total_usdc = sum(t.get("usdcSize", 0) for t in tlist)
+        buys = [t for t in tlist if t.get("side") == "BUY"]
+        lookup[key] = {
+            "firstTxHash": first.get("transactionHash", ""),
+            "latestTxHash": latest.get("transactionHash", ""),
+            "tradeCount": len(tlist),
+            "buyCount": len(buys),
+            "totalUsdc": round(total_usdc, 2),
+            "firstTs": first.get("timestamp", 0),
+        }
+    return lookup
+
+
+_copy_source_cache: dict = {"data": {}, "ts": 0}
+
+
+def _fetch_copy_source_lookup() -> dict:
+    """Tracked Wallets Activity → Lookup: conditionId → {source_name, source_tx_hash, source_wallet}.
+
+    Checkt welche unserer Positionen von tracked Wallets kopiert wurden.
+    Cached für 5 Minuten (5 API Calls pro Refresh sind zu viel bei 30s Interval).
+    """
+    import json as _json
+    import time as _time
+    from urllib.request import urlopen as _urlopen, Request as _Req
+
+    # Cache: 5 Minuten
+    if _time.time() - _copy_source_cache["ts"] < 300 and _copy_source_cache["data"]:
+        return _copy_source_cache["data"]
+
+    # Import tracked wallets config
+    try:
+        from strategies.copy_trading import DEFAULT_TRACKED_WALLETS
+        wallets = DEFAULT_TRACKED_WALLETS
+    except Exception:
+        return {}
+
+    lookup: dict = {}  # conditionId → {source_name, source_tx_hash, ...}
+
+    for w in wallets:
+        addr = w["address"]
+        name = w["name"]
+        try:
+            url = f"https://data-api.polymarket.com/activity?user={addr}&limit=100&type=TRADE"
+            req = _Req(url, headers={"User-Agent": "polymarket-arb/2.0"})
+            with _urlopen(req, timeout=6) as resp:
+                trades = _json.loads(resp.read())
+        except Exception:
+            continue
+
+        for t in trades:
+            cid = t.get("conditionId", "")
+            if cid and cid not in lookup:
+                # Erster Match gewinnt (ältester Trade = wahrscheinlich der kopierte)
+                lookup[cid] = {
+                    "source_name": name,
+                    "source_wallet": addr,
+                    "source_tx_hash": t.get("transactionHash", ""),
+                    "source_price": t.get("price", 0),
+                    "source_size": t.get("usdcSize", 0),
+                    "source_side": t.get("side", ""),
+                }
+
+    _copy_source_cache["data"] = lookup
+    _copy_source_cache["ts"] = _time.time()
+    return lookup
+
+
+def _enrich_position(p: dict, activity_lookup: dict, copy_lookup: dict | None = None) -> dict:
+    """Position um Activity-Daten + Copy-Source anreichern."""
+    cid = p.get("conditionId", "")
+    oi = p.get("outcomeIndex", 0)
+    act = activity_lookup.get((cid, oi), {})
+    p["txHash"] = act.get("firstTxHash", "")
+    p["latestTxHash"] = act.get("latestTxHash", "")
+    p["tradeCount"] = act.get("tradeCount", 0)
+    p["totalUsdc"] = act.get("totalUsdc", 0)
+    p["positionId"] = cid[:10] if cid else "?"
+
+    # Copy Source Zuordnung
+    if copy_lookup and cid in copy_lookup:
+        src = copy_lookup[cid]
+        p["copySource"] = src["source_name"]
+        p["sourceTxHash"] = src["source_tx_hash"]
+        p["sourcePrice"] = src["source_price"]
+        p["sourceSize"] = src["source_size"]
+    else:
+        p["copySource"] = ""
+
+    return p
+
+
 @app.get("/api/positions")
 async def api_positions() -> dict:
-    """Echte Polymarket Positionen — direkt von der Data API."""
+    """Echte Polymarket Positionen — direkt von der Data API + Activity für Tx-Hashes."""
     import json
     from urllib.request import urlopen, Request
 
@@ -367,6 +485,14 @@ async def api_positions() -> dict:
         with urlopen(req, timeout=10) as resp:
             positions = json.loads(resp.read())
 
+        # Activity Lookup für Transaction Hashes + Copy Source Matching
+        activity = _fetch_activity_lookup(wallet)
+        copy_sources = _fetch_copy_source_lookup()
+
+        # Alle Positionen anreichern
+        for p in positions:
+            _enrich_position(p, activity, copy_sources)
+
         # Filter: Nur Positionen mit echtem Wert (>$0.01) anzeigen
         # LOST Positionen ($0 Value) werden ausgeblendet — auch redeemable mit $0
         active = [p for p in positions if p.get("currentValue", 0) > 0.01]
@@ -377,8 +503,32 @@ async def api_positions() -> dict:
         total_invested = sum(p.get("initialValue", 0) for p in active)
         total_pnl = sum(p.get("cashPnl", 0) for p in active)
 
+        # Resolved Positionen für Trade History aufbereiten
+        resolved_data = []
+        for p in resolved:
+            resolved_data.append({
+                "title": p.get("title", "?"),
+                "outcome": p.get("outcome", "?"),
+                "avgPrice": p.get("avgPrice", 0),
+                "curPrice": p.get("curPrice", 0),
+                "initialValue": p.get("initialValue", 0),
+                "currentValue": p.get("currentValue", 0),
+                "cashPnl": p.get("cashPnl", 0),
+                "eventSlug": p.get("eventSlug", ""),
+                "endDate": p.get("endDate", ""),
+                "redeemable": p.get("redeemable", False),
+                "resolved": True,
+                "txHash": p.get("txHash", ""),
+                "latestTxHash": p.get("latestTxHash", ""),
+                "tradeCount": p.get("tradeCount", 0),
+                "positionId": p.get("positionId", "?"),
+                "copySource": p.get("copySource", ""),
+                "sourceTxHash": p.get("sourceTxHash", ""),
+            })
+
         return {
-            "positions": active,  # Nur aktive/redeemable Positionen
+            "positions": active,  # Nur aktive/redeemable Positionen (inkl. txHash etc.)
+            "resolved": resolved_data,  # LOST Positionen → für Trade History
             "count": len(active),
             "resolved_count": len(resolved),
             "total_value": round(total_value, 2),

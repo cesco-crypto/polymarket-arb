@@ -141,30 +141,31 @@ class PolymarketExecutor:
     async def place_order(
         self,
         token_id: str,
-        side: str,  # "BUY"
+        side: str,  # "BUY" oder "SELL"
         price: float,
         size_usd: float,
         asset: str = "",
         direction: str = "",
     ) -> ExecutionResult:
-        """Platziert eine Limit Order auf dem CLOB.
+        """Platziert eine Limit Order auf dem CLOB (BUY oder SELL).
 
         Args:
-            token_id: Polymarket Token ID (UP oder DOWN)
-            side: "BUY" (wir kaufen immer)
+            token_id: Polymarket Token ID (UP/DOWN/Yes/No)
+            side: "BUY" oder "SELL"
             price: Limit Price (z.B. 0.55)
             size_usd: Position in USD
-            asset: "BTC"/"ETH" (für Logging)
-            direction: "UP"/"DOWN" (für Logging)
+            asset: "BTC"/"ETH"/Wallet-Name (für Logging)
+            direction: "UP"/"DOWN"/Outcome (für Logging)
         """
         if not self.is_live:
             return ExecutionResult(success=False, error="Executor nicht initialisiert")
 
-        # Safety Check: Max Position
-        max_pos = self.settings.max_live_position_usd
-        if size_usd > max_pos:
-            logger.warning(f"Position ${size_usd} > Max ${max_pos} — capped")
-            size_usd = max_pos
+        # Safety Check: Max Position (nur für BUY — SELL soll nie blockiert werden)
+        if side.upper() != "SELL":
+            max_pos = self.settings.max_live_position_usd
+            if size_usd > max_pos:
+                logger.warning(f"Position ${size_usd} > Max ${max_pos} — capped")
+                size_usd = max_pos
 
         # Safety Check: Minimum Order Size ($1)
         if size_usd < self.MIN_ORDER_SIZE_USD:
@@ -181,7 +182,10 @@ class PolymarketExecutor:
 
         try:
             from py_clob_client.clob_types import OrderArgs
-            from py_clob_client.order_builder.constants import BUY
+            from py_clob_client.order_builder.constants import BUY, SELL
+
+            # Side: BUY oder SELL
+            order_side = SELL if side.upper() == "SELL" else BUY
 
             # Shares berechnen
             size_shares = size_usd / price
@@ -189,7 +193,11 @@ class PolymarketExecutor:
             t0 = time.perf_counter()
 
             # Pre-Signed Order nutzen wenn vorhanden (spart ~20-50ms)
+            # SAFETY: Pre-signed Orders sind immer BUY — nie für SELL verwenden!
             pre_signed_data = self._pre_signed_orders.pop(token_id, None)
+            if pre_signed_data and order_side == SELL:
+                logger.warning(f"Pre-Signed BUY Order verworfen — SELL angefordert (token {token_id[:16]}...)")
+                pre_signed_data = None  # Force frische SELL Order
 
             if pre_signed_data:
                 signed_price = pre_signed_data["signed_price"]
@@ -208,15 +216,18 @@ class PolymarketExecutor:
                 order = self._client.post_order(pre_signed)
                 logger.debug(f"Pre-Signed Order verwendet (Latenz-Vorteil, drift={abs(pre_signed_data['signed_price'] - price)/price:.1%})")
             else:
-                # Maker vs Taker: Maker setzt Limit 1 Cent unter Ask (kassiert Rebate)
+                # Maker vs Taker: Maker BUY → 1 Cent unter Ask, Maker SELL → 1 Cent über Bid
                 is_maker = self.settings.order_type == "maker"
-                order_price = max(0.01, price - 0.01) if is_maker else price
+                if is_maker:
+                    order_price = min(0.99, price + 0.01) if side.upper() == "SELL" else max(0.01, price - 0.01)
+                else:
+                    order_price = price
 
                 order_args = OrderArgs(
                     token_id=token_id,
                     price=order_price,
                     size=round(size_shares, 2),
-                    side=BUY,
+                    side=order_side,
                 )
                 signed_order = self._client.create_order(order_args)
                 order = self._client.post_order(signed_order)
@@ -236,15 +247,17 @@ class PolymarketExecutor:
                 latency_ms=round(latency_ms, 1),
             )
 
+            side_tag = side.upper()
             logger.info(
-                f"LIVE ORDER #{self._orders_placed}: {asset} {direction} "
+                f"LIVE {side_tag} #{self._orders_placed}: {asset} {direction} "
                 f"@ {price:.3f} | ${size_usd:.2f} | "
                 f"Latency: {latency_ms:.0f}ms | ID: {order_id}"
             )
 
             # Telegram Alert
+            sell_emoji = "📤" if side_tag == "SELL" else "💰"
             await telegram.send_alert(
-                f"💰 <b>LIVE ORDER #{self._orders_placed}</b>\n"
+                f"{sell_emoji} <b>LIVE {side_tag} #{self._orders_placed}</b>\n"
                 f"{asset} {direction} @ {price:.3f}\n"
                 f"Size: ${size_usd:.2f}\n"
                 f"Latency: {latency_ms:.0f}ms\n"
