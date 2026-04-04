@@ -86,10 +86,11 @@ class CopyRiskManager:
             logger.warning(f"Risk state load error: {e}")
 
     def _save_state(self) -> None:
-        """Speichert Risk-State persistent auf Disk."""
+        """Speichert Risk-State persistent auf Disk (atomic write)."""
         try:
             RISK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(RISK_STATE_FILE, "w") as f:
+            tmp = RISK_STATE_FILE.with_suffix(".tmp")
+            with open(tmp, "w") as f:
                 json.dump({
                     "total_pnl_usd": round(self.total_pnl_usd, 4),
                     "daily_pnl_usd": round(self.daily_pnl_usd, 4),
@@ -101,6 +102,8 @@ class CopyRiskManager:
                     "consecutive_losses": self._consecutive_losses,
                     "saved_at": time.time(),
                 }, f)
+            import os
+            os.replace(str(tmp), str(RISK_STATE_FILE))  # Atomic on POSIX
         except Exception as e:
             logger.error(f"Risk state save error: {e}")
 

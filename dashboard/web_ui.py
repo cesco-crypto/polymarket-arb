@@ -204,6 +204,11 @@ async def shutdown() -> None:
             await strat.shutdown()
         except Exception:
             pass
+    # Shared HTTP Session schliessen
+    global _http_session
+    if _http_session and not _http_session.closed:
+        await _http_session.close()
+        _http_session = None
     logger.info("Dashboard beendet.")
 
 
