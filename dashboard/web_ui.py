@@ -203,11 +203,17 @@ async def api_backtest() -> dict:
 @app.get("/api/wallet")
 async def api_wallet() -> dict:
     """Wallet-Balance und Deposit-Info."""
-    if not strategy or not strategy.executor.is_live:
+    if not strategy or not hasattr(strategy, 'executor') or not strategy.executor.is_live:
         return {"live": False, "balance": 0, "wallet": "", "chain": "Polygon"}
     balance = await strategy.executor.get_balance()
     stats = strategy.executor.stats()
-    pnl = strategy.paper_trader.daily_pnl_usd()
+    # PnL sicher lesen (nicht jede Strategie hat paper_trader)
+    pnl = 0
+    if hasattr(strategy, 'paper_trader'):
+        try:
+            pnl = strategy.paper_trader.daily_pnl_usd()
+        except Exception:
+            pass
     return {
         "live": True,
         "balance": round(balance, 2),
