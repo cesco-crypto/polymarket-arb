@@ -37,10 +37,14 @@ import math
 from collections import Counter
 
 
+RISK_STATE_FILE = Path("data/copy_risk_state.json")
+
+
 class CopyRiskManager:
     """Kill-Switch + Drawdown-Limits für Copy Trading.
 
     Unabhängig vom Momentum-RiskManager — eigene Limits für Copy Trades.
+    PERSISTENT: State wird auf Disk gespeichert und überlebt Restarts.
     """
 
     def __init__(self) -> None:
@@ -59,6 +63,46 @@ class CopyRiskManager:
         self.max_consecutive_losses: int = 5       # 5 Verluste in Folge → Pause
 
         self._consecutive_losses: int = 0
+
+        # Load persistent state
+        self._load_state()
+
+    def _load_state(self) -> None:
+        """Lädt persistenten Risk-State von Disk."""
+        try:
+            if RISK_STATE_FILE.exists():
+                with open(RISK_STATE_FILE) as f:
+                    s = json.load(f)
+                self.total_pnl_usd = s.get("total_pnl_usd", 0.0)
+                self.daily_pnl_usd = s.get("daily_pnl_usd", 0.0)
+                self.daily_trades = s.get("daily_trades", 0)
+                self.daily_losses = s.get("daily_losses", 0)
+                self.last_reset_day = s.get("last_reset_day", "")
+                self.halted = s.get("halted", False)
+                self.halt_reason = s.get("halt_reason", "")
+                self._consecutive_losses = s.get("consecutive_losses", 0)
+                logger.info(f"RISK STATE LOADED: total_pnl=${self.total_pnl_usd:+.2f}, daily=${self.daily_pnl_usd:+.2f}, halted={self.halted}")
+        except Exception as e:
+            logger.warning(f"Risk state load error: {e}")
+
+    def _save_state(self) -> None:
+        """Speichert Risk-State persistent auf Disk."""
+        try:
+            RISK_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(RISK_STATE_FILE, "w") as f:
+                json.dump({
+                    "total_pnl_usd": round(self.total_pnl_usd, 4),
+                    "daily_pnl_usd": round(self.daily_pnl_usd, 4),
+                    "daily_trades": self.daily_trades,
+                    "daily_losses": self.daily_losses,
+                    "last_reset_day": self.last_reset_day,
+                    "halted": self.halted,
+                    "halt_reason": self.halt_reason,
+                    "consecutive_losses": self._consecutive_losses,
+                    "saved_at": time.time(),
+                }, f)
+        except Exception as e:
+            logger.error(f"Risk state save error: {e}")
 
     def _check_reset(self) -> None:
         today = time.strftime("%Y-%m-%d")
@@ -102,7 +146,7 @@ class CopyRiskManager:
         return True, "OK"
 
     def record_trade(self, pnl_usd: float = 0.0) -> None:
-        """Registriert einen abgeschlossenen Trade."""
+        """Registriert einen abgeschlossenen Trade + persistiert State."""
         self._check_reset()
         self.daily_trades += 1
         self.daily_pnl_usd += pnl_usd
@@ -112,6 +156,7 @@ class CopyRiskManager:
             self._consecutive_losses += 1
         else:
             self._consecutive_losses = 0
+        self._save_state()  # Persistent über Restarts
 
     def get_status(self) -> dict:
         self._check_reset()
@@ -437,6 +482,8 @@ class CopyTradingStrategy(StrategyBase):
 
     MAX_TRACKED_WALLETS = 20  # Hard cap — prevents poll loop DoS
 
+    PAPER_COPY_HOURS = 24  # Neue Wallets: 24h beobachten, dann erst Live-Copy
+
     def add_wallet(self, wallet: dict) -> bool:
         """Fügt eine Wallet zur Tracking-Liste hinzu (Runtime-only, nicht persistent)."""
         addr = wallet.get("address", "").lower()
@@ -448,9 +495,10 @@ class CopyTradingStrategy(StrategyBase):
         # Duplikat-Check
         if any(w["address"].lower() == addr for w in self.tracked_wallets):
             return False
+        wallet["added_ts"] = time.time()  # Für Paper-Copy Periode
         self.tracked_wallets.append(wallet)
         self._last_seen[addr] = int(time.time())  # Keine alten Trades kopieren
-        logger.info(f"WALLET ADDED: {wallet.get('name', addr[:10])} ({addr[:10]}...)")
+        logger.info(f"WALLET ADDED: {wallet.get('name', addr[:10])} ({addr[:10]}...) — Paper-Copy {self.PAPER_COPY_HOURS}h")
         return True
 
     def remove_wallet(self, address: str) -> bool:
@@ -720,6 +768,18 @@ class CopyTradingStrategy(StrategyBase):
                 except Exception:
                     pass  # Balance-Check optional, CLOB blockt auch
 
+            # ── GUARD 6b: Paper-Copy Period (neue Wallets 24h beobachten) ──
+            added_ts = wallet.get("added_ts", 0)
+            if added_ts > 0:
+                hours_since = (time.time() - added_ts) / 3600
+                if hours_since < self.PAPER_COPY_HOURS:
+                    logger.info(
+                        f"PAPER-COPY: {name} neu hinzugefügt ({hours_since:.1f}h/{self.PAPER_COPY_HOURS}h) "
+                        f"— beobachte: {trade.get('title','')[:35]} {trade.get('outcome','')} @ {price:.3f}"
+                    )
+                    # Registriere im Journal als Paper-Copy (nicht live ausführen)
+                    continue
+
             # ── GUARD 7: Kill-Switch (Daily/Total Loss Limits) ──
             can_trade, reason = self.risk.can_trade()
             if not can_trade:
@@ -732,9 +792,15 @@ class CopyTradingStrategy(StrategyBase):
                 logger.warning(f"Copy Skip (Bait): {name} — {bait_msg}")
                 continue
 
-            # ── GUARD 9: Slippage Protection (Preis-Drift seit Original-Trade) ──
-            slip_ok, slip_msg = self.guards.check_slippage(price, price)  # TODO: fetch current ask
-            # Für jetzt: Original-Price vs Original-Price = immer OK (Placeholder für echten Orderbook-Check)
+            # ── GUARD 9: Slippage Protection (Echter CLOB Orderbook-Check) ──
+            asset_id = trade.get("asset", "")
+            if asset_id:
+                current_ask = await self._fetch_current_ask(asset_id)
+                if current_ask > 0:
+                    slip_ok, slip_msg = self.guards.check_slippage(price, current_ask)
+                    if not slip_ok:
+                        logger.info(f"Copy Skip (Slippage): {name} — {slip_msg}")
+                        continue
 
             # ── GUARD 10: Liquidity Profiling ──
             liq_ok, liq_msg = self.guards.check_liquidity(trade)
@@ -786,15 +852,16 @@ class CopyTradingStrategy(StrategyBase):
             # Verwende Trader's historische Win-Rate für dynamische Sizing
             wallet_stats = {n: s for n, s in
                            ((p.source_name, None) for p in self._copied_positions[:0])}  # Placeholder
-            # Simple Kelly: adjustiere copy_size basierend auf Preis (implizierte Wahrscheinlichkeit)
+            # Kelly Position Sizing mit ECHTEN Trader-Daten
             if not is_hedge and price > 0:
+                real_wr = self._compute_wallet_win_rate(name)
                 implied_odds = 1.0 / price  # z.B. Price 0.60 → Odds 1.67
                 copy_size = kelly_copy_size(
-                    win_rate=0.55,  # Konservativ: 55% angenommen für Top-Wallets
+                    win_rate=real_wr,
                     avg_odds=implied_odds,
                     base_size=copy_size,
                 )
-                logger.debug(f"KELLY SIZING: ${copy_size:.2f} (price={price:.3f}, odds={implied_odds:.2f})")
+                logger.debug(f"KELLY SIZING: ${copy_size:.2f} (wr={real_wr:.1%}, price={price:.3f}, odds={implied_odds:.2f})")
 
             # Register copy in SmartGuards
             self.guards.register_copy(condition_id)
@@ -1118,6 +1185,35 @@ class CopyTradingStrategy(StrategyBase):
         except Exception as e:
             logger.debug(f"Fetch Activity Error: {e}")
             return []
+
+    async def _fetch_current_ask(self, token_id: str) -> float:
+        """Holt den aktuellen Best-Ask-Preis vom CLOB Orderbook."""
+        if not self._session or self._session.closed or not token_id:
+            return 0.0
+        try:
+            url = f"https://clob.polymarket.com/book?token_id={token_id}"
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    asks = book.get("asks", [])
+                    if asks:
+                        return float(asks[0].get("price", 0))
+                return 0.0
+        except Exception:
+            return 0.0
+
+    def _compute_wallet_win_rate(self, wallet_name: str) -> float:
+        """Berechnet echte Win-Rate eines Traders aus unseren Journal-Daten."""
+        wins = 0
+        total = 0
+        for p in self._copied_positions:
+            if p.source_name == wallet_name and p.resolved:
+                total += 1
+                if p.pnl_usd > 0:
+                    wins += 1
+        if total < 5:
+            return 0.50  # Nicht genug Daten → konservativ 50%
+        return round(wins / total, 3)
 
     # ═══════════════════════════════════════════════════════════════
     # STATUS

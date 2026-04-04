@@ -31,6 +31,37 @@ from utils.logger import setup_logger
 app = FastAPI(title="Polymarket Latency Arb")
 
 # ═══════════════════════════════════════════════════════════════════
+# SHARED ASYNC HTTP CLIENT (replaces blocking urlopen)
+# ═══════════════════════════════════════════════════════════════════
+_http_session: aiohttp.ClientSession | None = None
+_HTTP_HEADERS = {"User-Agent": "polymarket-arb/2.0"}
+
+
+async def _get_http_session() -> aiohttp.ClientSession:
+    """Lazy-init shared aiohttp session für Dashboard API calls."""
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        _http_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=12),
+            headers=_HTTP_HEADERS,
+        )
+    return _http_session
+
+
+async def _async_fetch_json(url: str, timeout: int = 10) -> list | dict:
+    """Async JSON fetch — ersetzt blockierendes urlopen."""
+    try:
+        session = await _get_http_session()
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            return []
+    except Exception as e:
+        logger.debug(f"Async fetch error ({url[:60]}...): {e}")
+        return []
+
+
+# ═══════════════════════════════════════════════════════════════════
 # SESSION AUTH — Cookie-basiert, 1x Login, 30 Tage gültig
 # Set DASHBOARD_PASSWORD env var to enable (disabled if not set)
 # ═══════════════════════════════════════════════════════════════════
@@ -1035,11 +1066,19 @@ async def api_copy_leaderboard(limit: int = 50) -> dict:
             "profile_url": f"https://polymarket.com/profile/{addr}",
         })
 
-    # AI Engine Score: PnL * activity_factor
+    # AI Engine Score — Recalibriert für Polymarket-Skala
+    # PnL: $100K = 100pts (Polymarket Top-Trader Range)
+    # Volume: $1M = 100pts
+    # Efficiency: PnL/Volume Ratio (Skill vs Luck)
+    # Negative PnL = negative Score (Penalty)
     for t in traders:
-        pnl_score = min(100, max(0, t["pnl"] / 10000))  # $1M = 100 points
-        vol_score = min(100, max(0, t["volume"] / 5000))  # $500K vol = 100 points
-        t["ai_score"] = round((pnl_score * 0.6 + vol_score * 0.4), 1)
+        pnl = t["pnl"]
+        vol = max(1, t["volume"])
+        pnl_score = min(100, max(-50, pnl / 1000))       # $100K = 100, -$50K = -50
+        vol_score = min(100, max(0, vol / 10000))          # $1M vol = 100
+        efficiency = min(50, max(0, (pnl / vol) * 100)) if vol > 100 else 0  # PnL/Vol ratio
+        t["ai_score"] = round(pnl_score * 0.4 + vol_score * 0.2 + efficiency * 0.4, 1)
+        t["efficiency_pct"] = round(pnl / vol * 100, 2) if vol > 100 else 0
 
     return {"traders": traders, "count": len(traders), "cached": now - _leaderboard_cache["ts"] < 5}
 
