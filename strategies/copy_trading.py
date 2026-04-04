@@ -212,20 +212,34 @@ class CopyTradingStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     async def _initialize_last_seen(self) -> None:
-        """Lade den letzten Trade jeder Wallet um altes nicht zu kopieren."""
+        """Lade die letzten 20 Trades jeder Wallet um Restart-Duplikate zu verhindern.
+
+        KRITISCHER FIX: Bei limit=1 wurden nach Restarts alle kürzlichen Trades
+        nochmal als "neu" erkannt und kopiert. Jetzt laden wir 20 Trades und
+        markieren ALLE als "gesehen" im _seen_trade_keys Set.
+        """
+        total_marked = 0
         for wallet in self.tracked_wallets:
+            addr = wallet["address"]
             try:
-                trades = await self._fetch_activity(wallet["address"], limit=1)
+                trades = await self._fetch_activity(addr, limit=20)
                 if trades:
-                    self._last_seen[wallet["address"]] = trades[0].get("timestamp", 0)
-                    logger.debug(f"Copy Init: {wallet['name']} last seen at {self._last_seen[wallet['address']]}")
+                    # Alle 20 Trades als "gesehen" markieren
+                    for t in trades:
+                        ts = t.get("timestamp", 0)
+                        cid = t.get("conditionId", "")
+                        trade_key = f"{addr}_{ts}_{cid}"
+                        self._seen_trade_keys.add(trade_key)
+                        total_marked += 1
+                    # Letzten Timestamp als Baseline
+                    self._last_seen[addr] = trades[0].get("timestamp", 0)
                 else:
-                    self._last_seen[wallet["address"]] = int(time.time())
+                    self._last_seen[addr] = int(time.time())
             except Exception as e:
                 logger.error(f"Copy Init Error for {wallet['name']}: {e}")
-                self._last_seen[wallet["address"]] = int(time.time())
+                self._last_seen[addr] = int(time.time())
 
-        logger.info(f"Copy Trading initialisiert: {len(self._last_seen)} Wallets tracked")
+        logger.info(f"Copy Trading initialisiert: {len(self._last_seen)} Wallets, {total_marked} Trades als gesehen markiert")
 
     # ═══════════════════════════════════════════════════════════════
     # POLL LOOP
@@ -285,28 +299,45 @@ class CopyTradingStrategy(StrategyBase):
                 ))
                 continue  # SELL-Trades nicht kopieren (nur alertieren)
 
-            # ── GUARD 2: Price Filter (keine Lotterietickets, kein schlechtes R/R) ──
+            # ── GUARD 2: Intra-Wallet Market-Dedup (keine Tranchen-Duplikate) ──
+            condition_id = trade.get("conditionId", "")
+            market_key = f"{addr}_{condition_id}"
+            if market_key in self._seen_trade_keys:
+                logger.debug(f"Copy Skip (Tranche, gleicher Markt): {name} {trade.get('title','')[:30]}")
+                continue
+            self._seen_trade_keys.add(market_key)
+
+            # ── GUARD 3: Price Filter (keine Lotterietickets, kein schlechtes R/R) ──
             price = float(trade.get("price", 0))
             if price < self.min_copy_price or price > self.max_copy_price:
                 logger.info(f"Copy Skip (Preis {price:.3f} ausserhalb {self.min_copy_price}-{self.max_copy_price}): {name} {trade.get('title','')[:40]}")
                 continue
 
-            # ── GUARD 3: Trade zu alt? ──
+            # ── GUARD 4: Trade zu alt? ──
             age = time.time() - ts
             if age > self.min_seconds_to_copy * 60:  # 5 Minuten
                 logger.debug(f"Copy Skip (zu alt: {age:.0f}s): {name}")
                 continue
 
-            # ── GUARD 4: Max concurrent? ──
+            # ── GUARD 5: Max concurrent? ──
             active = sum(1 for p in self._copied_positions if not p.resolved)
             if active >= self.max_concurrent:
                 logger.warning(f"Copy Skip (max {self.max_concurrent} erreicht): {name}")
                 continue
 
+            # ── GUARD 6: Balance-Check (nicht ordern wenn Wallet zu leer) ──
+            if self.executor.is_live:
+                try:
+                    balance = await self.executor.get_balance()
+                    if balance < self.max_copy_size_usd * 1.5:
+                        logger.warning(f"Copy Skip (Balance ${balance:.2f} < ${self.max_copy_size_usd*1.5:.2f}): {name}")
+                        continue
+                except Exception:
+                    pass  # Balance-Check optional, CLOB blockt auch
+
             # ── Alle Guards bestanden → Kopieren! ──
             # Cross-Wallet Confluence ERLAUBT: Wenn 2 Top-Wallets denselben
             # Markt kaufen ist das ein STÄRKERES Signal, nicht ein schwächeres.
-            condition_id = trade.get("conditionId", "")
             tracked = TrackedTrade(
                 wallet_name=name,
                 wallet_address=addr,
