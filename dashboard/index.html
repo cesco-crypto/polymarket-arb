@@ -258,7 +258,10 @@ function switchTab(btn, tab) {
 
   function connect() {
     const wsProt = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${wsProt}//${location.host}/ws`);
+    // Auth: Session-Cookie als Token für WebSocket mitsenden
+    const sessionCookie = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('session='));
+    const token = sessionCookie ? sessionCookie.split('=')[1] : '';
+    ws = new WebSocket(`${wsProt}//${location.host}/ws${token ? '?token='+token : ''}`);
     ws.onopen = () => { id('ws-dot').className='dot dot-g'; id('ws-txt').textContent='Live'; clearTimeout(rt); };
     ws.onclose = () => { id('ws-dot').className='dot dot-r'; id('ws-txt').textContent='...'; rt=setTimeout(connect,2000); };
     ws.onerror = () => ws.close();

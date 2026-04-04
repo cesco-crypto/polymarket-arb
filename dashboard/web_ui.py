@@ -7,15 +7,18 @@ The strategy runs its own async loops; the dashboard is a passive observer.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 
 import aiohttp
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from loguru import logger
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from config import settings
 from strategies.base import StrategyBase
@@ -26,6 +29,99 @@ import strategies.copy_trading        # noqa: F401 — registriert copy_trading
 from utils.logger import setup_logger
 
 app = FastAPI(title="Polymarket Latency Arb")
+
+# ═══════════════════════════════════════════════════════════════════
+# SESSION AUTH — Cookie-basiert, 1x Login, 30 Tage gültig
+# Set DASHBOARD_PASSWORD env var to enable (disabled if not set)
+# ═══════════════════════════════════════════════════════════════════
+
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+_SESSION_SECRET = secrets.token_hex(32)  # Random pro Server-Start
+_SESSION_MAX_AGE = 30 * 24 * 3600       # 30 Tage Cookie-Lebensdauer
+
+
+def _make_session_token(password: str) -> str:
+    """Generiert einen Session-Token aus Passwort + Server-Secret."""
+    return hashlib.sha256(f"{password}:{_SESSION_SECRET}".encode()).hexdigest()[:48]
+
+
+# Login Page (inline HTML — kein separates File nötig)
+_LOGIN_HTML = """<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Login — Polymarket Bot</title>
+<style>
+  :root{--bg:#0a0c10;--card:#13151c;--border:#1e2230;--text:#e1e4eb;--accent:#3b82f6;--red:#ef4444;--font:'SF Mono',monospace}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);display:flex;align-items:center;justify-content:center;min-height:100vh}
+  .box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:32px;width:320px;text-align:center}
+  h2{font-size:14px;letter-spacing:1.5px;margin-bottom:20px;color:var(--accent)}
+  input{width:100%;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:var(--font);font-size:13px;margin-bottom:12px}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{width:100%;padding:10px;background:var(--accent);color:#fff;border:none;border-radius:4px;font-family:var(--font);font-size:12px;font-weight:600;cursor:pointer;text-transform:uppercase;letter-spacing:1px}
+  button:hover{opacity:0.9}
+  .err{color:var(--red);font-size:11px;margin-bottom:8px;display:none}
+</style></head><body>
+<div class="box">
+  <h2>POLYMARKET BOT</h2>
+  <div class="err" id="err">Falsches Passwort</div>
+  <form method="POST" action="/auth/login">
+    <input type="password" name="password" placeholder="Dashboard Passwort" autofocus>
+    <button type="submit">LOGIN</button>
+  </form>
+</div>
+<script>if(location.search.includes('fail'))document.getElementById('err').style.display='block'</script>
+</body></html>"""
+
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    """Cookie-basierte Session Auth — 1x einloggen, 30 Tage gültig."""
+
+    # Paths die OHNE Auth erreichbar sein müssen
+    PUBLIC_PATHS = {"/auth/login", "/auth/logout", "/docs", "/openapi.json"}
+
+    async def dispatch(self, request: Request, call_next):
+        # Auth deaktiviert wenn kein Passwort gesetzt
+        if not DASHBOARD_PASSWORD:
+            return await call_next(request)
+
+        path = request.url.path
+
+        # Public paths durchlassen
+        if path in self.PUBLIC_PATHS:
+            return await call_next(request)
+
+        # Session-Cookie prüfen
+        session = request.cookies.get("session")
+        valid_token = _make_session_token(DASHBOARD_PASSWORD)
+
+        if session == valid_token:
+            return await call_next(request)
+
+        # WebSocket: Token als Query-Param (Cookies gehen nicht immer bei WS)
+        if path == "/ws":
+            token = request.query_params.get("token", "")
+            if token == valid_token:
+                return await call_next(request)
+            # WS ohne Auth → Connection refused (stille Ablehnung)
+            return Response(status_code=403)
+
+        # API Requests: JSON 401
+        if path.startswith("/api/"):
+            return JSONResponse(
+                status_code=401,
+                content={"error": "unauthorized", "login": "/auth/login"},
+            )
+
+        # HTML Pages: Redirect zu Login
+        return RedirectResponse(url="/auth/login", status_code=302)
+
+
+# Middleware NUR aktivieren wenn Passwort gesetzt
+if DASHBOARD_PASSWORD:
+    app.add_middleware(AuthMiddleware)
+    logger.info(f"Dashboard Auth AKTIV — Passwort gesetzt ({len(DASHBOARD_PASSWORD)} Zeichen)")
+else:
+    logger.warning("Dashboard Auth DEAKTIVIERT — kein DASHBOARD_PASSWORD gesetzt!")
 
 # --- Global State ---
 strategy: StrategyBase | None = None  # Primary strategy (für Dashboard-Status Broadcast)
@@ -175,6 +271,53 @@ async def _broadcast(payload: dict) -> None:
 
 
 # --- Routes ---
+
+# ═══════════════════════════════════════════════════════════════════
+# AUTH ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/auth/login", response_class=HTMLResponse)
+async def login_page() -> HTMLResponse:
+    """Login Page — zeigt Passwort-Feld."""
+    if not DASHBOARD_PASSWORD:
+        return RedirectResponse(url="/", status_code=302)
+    return HTMLResponse(_LOGIN_HTML)
+
+
+@app.post("/auth/login")
+async def login_submit(request: Request) -> Response:
+    """Prüft Passwort, setzt Session-Cookie (30 Tage)."""
+    form = await request.form()
+    password = form.get("password", "")
+
+    if password == DASHBOARD_PASSWORD:
+        token = _make_session_token(DASHBOARD_PASSWORD)
+        response = RedirectResponse(url="/", status_code=302)
+        response.set_cookie(
+            key="session",
+            value=token,
+            max_age=_SESSION_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+        )
+        logger.info(f"Dashboard Login OK — IP: {request.client.host}")
+        return response
+    else:
+        logger.warning(f"Dashboard Login FAILED — IP: {request.client.host}")
+        return RedirectResponse(url="/auth/login?fail=1", status_code=302)
+
+
+@app.get("/auth/logout")
+async def logout() -> Response:
+    """Löscht Session-Cookie."""
+    response = RedirectResponse(url="/auth/login", status_code=302)
+    response.delete_cookie("session")
+    return response
+
+
+# ═══════════════════════════════════════════════════════════════════
+# PAGES
+# ═══════════════════════════════════════════════════════════════════
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
