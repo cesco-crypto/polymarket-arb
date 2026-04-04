@@ -461,9 +461,11 @@ async def api_strategies() -> dict:
 
 @app.post("/api/strategy/enable")
 async def enable_strategy(body: dict) -> dict:
-    """Aktiviert eine Strategie — deaktiviert alle anderen (Radio-Button Logik).
+    """Aktiviert eine Strategie mit Smart-Conflict-Resolution.
 
-    Nur EINE Strategie darf gleichzeitig aktiv sein um Doppel-Trades zu vermeiden.
+    Regeln:
+    - copy_trading kann PARALLEL zu einer Momentum-Strategie laufen (keine Überlappung)
+    - momentum_latency_v2 und hmsf_decision_engine schliessen sich aus (gleiche Signale)
     """
     global strategy
 
@@ -476,23 +478,30 @@ async def enable_strategy(body: dict) -> dict:
     if name in active_strategies:
         return {"status": "already_active", "active": list(active_strategies.keys())}
 
-    # Radio-Button: ALLE anderen Strategien zuerst deaktivieren
-    for other_name in list(active_strategies.keys()):
-        if other_name != name:
-            task = _strategy_tasks.pop(other_name, None)
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            strat_old = active_strategies.pop(other_name, None)
-            if strat_old:
-                try:
-                    await strat_old.shutdown()
-                except Exception as e:
-                    logger.error(f"Shutdown {other_name}: {e}")
-            logger.info(f"Strategie DEAKTIVIERT (Radio-Button): {other_name}")
+    # Smart Conflict Resolution:
+    # copy_trading = eigene Kategorie (Sport, Politik, Events)
+    # momentum_latency_v2 + hmsf_decision_engine = gleiche Kategorie (5-Min Crypto)
+    MOMENTUM_GROUP = {"momentum_latency_v2", "hmsf_decision_engine"}
+
+    if name in MOMENTUM_GROUP:
+        # Deaktiviere NUR die andere Momentum-Strategie (nicht Copy Trading)
+        for other_name in list(active_strategies.keys()):
+            if other_name in MOMENTUM_GROUP and other_name != name:
+                task = _strategy_tasks.pop(other_name, None)
+                if task:
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                strat_old = active_strategies.pop(other_name, None)
+                if strat_old:
+                    try:
+                        await strat_old.shutdown()
+                    except Exception as e:
+                        logger.error(f"Shutdown {other_name}: {e}")
+                logger.info(f"Strategie DEAKTIVIERT (Momentum-Conflict): {other_name}")
+    # copy_trading kann immer parallel laufen — kein Conflict
 
     # Neue Strategie erstellen und starten
     strat = create_strategy(name, settings)
