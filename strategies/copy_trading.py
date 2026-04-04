@@ -237,6 +237,13 @@ class SmartGuards:
             return f"DRIFT: {wallet_name} usually trades {dominant_cat} ({dominant_pct:.0f}%), now trading {cat}"
         return None
 
+    def release_market(self, condition_id: str) -> None:
+        """Decrements market correlation counter when a position resolves."""
+        if condition_id in self._active_markets:
+            self._active_markets[condition_id] = max(0, self._active_markets[condition_id] - 1)
+            if self._active_markets[condition_id] == 0:
+                del self._active_markets[condition_id]
+
     def get_status(self) -> dict:
         return {
             "blacklisted": list(self._blacklisted),
@@ -689,7 +696,7 @@ class CopyTradingStrategy(StrategyBase):
             for p in self._copied_positions:
                 if not p.resolved:
                     if now - p.copied_at > MAX_POSITION_AGE_S:
-                        p.resolved = True  # Auto-expire stale position
+                        self._resolve_position(p, 0.0)
                         logger.info(f"AUTO-RESOLVE: {p.trade_id} ({p.market_title[:30]}) — älter als 7d")
                     else:
                         active_markets.add(p.condition_id)
@@ -815,6 +822,16 @@ class CopyTradingStrategy(StrategyBase):
     # SELL-COPY (Auto-Exit wenn Source Wallet verkauft)
     # ═══════════════════════════════════════════════════════════════
 
+    def _resolve_position(self, pos: CopiedPosition, pnl_usd: float = 0.0) -> None:
+        """Zentrale Resolution: Kill-Switch + Market Counter + Position markieren."""
+        if pos.resolved:
+            return
+        pos.resolved = True
+        pos.pnl_usd = pnl_usd
+        self.risk.record_trade(pnl_usd)
+        self.guards.release_market(pos.condition_id)
+        logger.info(f"RESOLVED: {pos.trade_id} | PnL: ${pnl_usd:+.2f} | Market released: {pos.condition_id[:12]}...")
+
     async def _handle_sell_signal(self, trade: dict, name: str, addr: str) -> None:
         """Verarbeitet SELL-Trade eines Trackers: verkauft unsere Position.
 
@@ -832,22 +849,19 @@ class CopyTradingStrategy(StrategyBase):
         sell_price = float(trade.get("price", 0))
         source_tx = trade.get("transactionHash", "")
 
-        # BAIT DETECTION: Trader verkauft kurz nach unserem Copy → Dump Alert
-        self.guards.report_dump(addr, condition_id)
-
-        # FIX: Source wallet filter — nur Positionen von DIESEM Trader
+        # FIX: Source wallet filter — nur Positionen von DIESEM Trader + DIESEM Outcome
         matching = [
             p for p in self._copied_positions
             if p.condition_id == condition_id
             and p.outcome_index == outcome_index
-            and p.source_wallet == addr  # FIX: nur von diesem Wallet
+            and p.source_wallet == addr
             and not p.resolved
         ]
 
         # FIX: Phantom cleanup — Positionen ohne token_id (failed BUYs) auflösen
         phantoms = [p for p in matching if not p.token_id]
         for ph in phantoms:
-            ph.resolved = True
+            self._resolve_position(ph, 0.0)
             logger.warning(f"PHANTOM CLEANUP: {ph.trade_id} — no token_id, marked resolved")
         matching = [p for p in matching if p.token_id]
 
@@ -860,6 +874,10 @@ class CopyTradingStrategy(StrategyBase):
                 f"ℹ️ Wir haben keine Position auf diesem Outcome von {name}"
             ))
             return
+
+        # BAIT DETECTION: Nur feuern wenn wir wirklich eine Position von DIESEM Wallet haben
+        # (nicht bei unmatched sells oder hedge-management)
+        self.guards.report_dump(addr, condition_id)
 
         for pos in matching:
             # FIX: Simplified — bei $5 Positionen immer komplett verkaufen
@@ -887,7 +905,7 @@ class CopyTradingStrategy(StrategyBase):
                     if res.success:
                         sell_success = True
                         sell_order_id = res.order_id
-                        pos.resolved = True
+                        self._resolve_position(pos, -pos.size_usd * 0.1)  # Estimated loss on exit
                         logger.info(f"SELL-COPY LIVE OK: {pos.trade_id} — {res.order_id}")
                     else:
                         logger.error(f"SELL-COPY LIVE FAILED: {pos.trade_id} — {res.error}")
@@ -923,7 +941,7 @@ class CopyTradingStrategy(StrategyBase):
                                 direction=f"SELL_{hedge.outcome}",
                             )
                             if hr.success:
-                                hedge.resolved = True
+                                self._resolve_position(hedge, -hedge.size_usd * 0.1)
                                 logger.info(f"HEDGE UNWIND OK: {hedge.trade_id} — {hr.order_id}")
                         except Exception as e:
                             logger.error(f"HEDGE UNWIND FAILED: {hedge.trade_id} — {e}")

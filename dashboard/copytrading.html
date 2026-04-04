@@ -253,7 +253,19 @@ let _currentSort = 'pnl';
 let _analyzeAddr = '';
 
 function id(s) { return document.getElementById(s); }
-function fmt(n) { return n >= 1000000 ? '$' + (n/1000000).toFixed(1) + 'M' : n >= 1000 ? '$' + (n/1000).toFixed(1) + 'K' : '$' + n.toFixed(2); }
+
+// XSS-safe: HTML entities escapen
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+// Format numbers: handles negative, undefined, zero
+function fmt(n) {
+  if (n == null || isNaN(n)) return '$0.00';
+  const abs = Math.abs(n);
+  const sign = n < 0 ? '-' : '';
+  if (abs >= 1000000) return sign + '$' + (abs/1000000).toFixed(1) + 'M';
+  if (abs >= 1000) return sign + '$' + (abs/1000).toFixed(1) + 'K';
+  return sign + '$' + abs.toFixed(2);
+}
 function shortAddr(a) { return a ? a.slice(0,6) + '...' + a.slice(-4) : '—'; }
 function toast(msg, ok) {
   const t = id('toast');
@@ -297,7 +309,7 @@ function renderWallets(d) {
     const st = stats[w.name] || {};
     const isPaused = w.status === 'paused';
     return `<div class="wcard ${isPaused ? 'paused' : 'active'}">
-      <div class="wcard-name">${w.name}</div>
+      <div class="wcard-name">${esc(w.name)}</div>
       <div class="wcard-addr">${shortAddr(w.address)}</div>
       <div class="wcard-pnl g">${fmt(w.pnl)}</div>
       <div class="wcard-meta">
@@ -312,7 +324,7 @@ function renderWallets(d) {
           ? `<button class="btn btn-green btn-sm" onclick="resumeWallet('${w.address}')">RESUME</button>`
           : `<button class="btn btn-sm" style="border-color:var(--yellow);color:var(--yellow)" onclick="pauseWallet('${w.address}')">PAUSE</button>`
         }
-        <button class="btn btn-red btn-sm" onclick="removeWallet('${w.address}','${w.name}')">REMOVE</button>
+        <button class="btn btn-red btn-sm" onclick="removeWallet('${w.address}','${esc(w.name)}')">REMOVE</button>
         <a href="https://polymarket.com/profile/${w.address}" target="_blank" class="btn btn-sm">PROFILE</a>
       </div>
     </div>`;
@@ -345,8 +357,12 @@ function renderPerformance(d) {
   </tr>`).join('');
 }
 
+let _configLoaded = false;
 function renderConfig(cfg) {
   if (!cfg || !Object.keys(cfg).length) return;
+  // FIX: Nur beim ersten Laden setzen, nicht bei Auto-Refresh (überschreibt User-Edits)
+  if (_configLoaded) return;
+  _configLoaded = true;
   id('cfg-size').value = cfg.max_copy_size_usd || 5;
   id('cfg-concurrent').value = cfg.max_concurrent || 10;
   id('cfg-poll').value = cfg.poll_interval_s || 5;
@@ -438,7 +454,7 @@ function renderLeaderboard() {
     return `<tr>
       <td class="d">${t.rank}</td>
       <td>
-        <span class="b">${t.name}</span>
+        <span class="b">${esc(t.name)}</span>
         ${t.verified ? ' <span style="color:var(--accent)">&#10003;</span>' : ''}
         <br><span class="d" style="font-size:9px">${shortAddr(t.address)}</span>
       </td>
@@ -460,7 +476,7 @@ function renderAIPicks() {
   id('ai-banner').style.display = 'flex';
   id('ai-picks').innerHTML = top.map(t =>
     `<div class="ai-pick" onclick="analyzeTrader('${t.address}','${t.name.replace(/'/g,"\\'")}')">
-      <span class="b">${t.name}</span> — ${fmt(t.pnl)} — Score: ${t.ai_score}
+      <span class="b">${esc(t.name)}</span> — ${fmt(t.pnl)} — Score: ${t.ai_score}
     </div>`
   ).join('');
 }
@@ -508,14 +524,14 @@ function renderAnalysis(d, name) {
       <td>${t.outcome}</td>
       <td class="r">${(t.price||0).toFixed(3)}</td>
       <td class="r">${fmt(t.size_usd||0)}</td>
-      <td class="d" style="font-size:10px">${t.title}</td>
+      <td class="d" style="font-size:10px">${esc(t.title)}</td>
     </tr>`;
   }).join('');
 
   const posHtml = (d.positions || []).slice(0,8).map(p => {
     const pnlC = p.pnl >= 0 ? 'g' : 'rd';
     return `<tr>
-      <td style="font-size:10px">${p.title}</td>
+      <td style="font-size:10px">${esc(p.title)}</td>
       <td>${p.outcome}</td>
       <td class="r">${fmt(p.current_value||0)}</td>
       <td class="r ${pnlC}">${p.pnl>=0?'+':''}$${(p.pnl||0).toFixed(2)}</td>
