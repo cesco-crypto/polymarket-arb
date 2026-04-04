@@ -261,14 +261,33 @@ async function loadHMSFModules() {
         </div>
         <span style="margin-left:auto;font-size:8px;padding:2px 6px;border-radius:3px;background:${enabled ? 'var(--green-dim)' : 'var(--bg)'};color:${enabled ? 'var(--green)' : 'var(--text-dim)'};border:1px solid ${enabled ? 'var(--green)' : 'var(--border)'}">${enabled ? 'AN' : 'AUS'}</span>
       </div>`;
-    }).join('') + `<div style="margin-top:8px;display:flex;gap:8px">
-      <div style="display:flex;align-items:center;gap:4px;cursor:pointer" onclick="toggleHMSFMode('conservative')">
-        <span style="font-size:12px;color:${cfg.conservative_mode ? 'var(--green)' : 'var(--text-dim)'}">${cfg.conservative_mode ? '●' : '○'}</span>
-        <span style="font-size:10px;color:${cfg.conservative_mode ? 'var(--text)' : 'var(--text-dim)'}">Conservative</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:4px;cursor:pointer" onclick="toggleHMSFMode('aggressive')">
-        <span style="font-size:12px;color:${cfg.aggressive_mode ? 'var(--red)' : 'var(--text-dim)'}">${cfg.aggressive_mode ? '●' : '○'}</span>
-        <span style="font-size:10px;color:${cfg.aggressive_mode ? 'var(--text)' : 'var(--text-dim)'}">Aggressive</span>
+    }).join('') + `<div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border)">
+      <div style="font-size:10px;color:var(--text-mid);margin-bottom:6px;font-weight:600">TRADING MODE</div>
+      <div style="display:flex;gap:12px">
+        <div style="flex:1;padding:8px;border-radius:4px;cursor:pointer;border:1px solid ${cfg.conservative_mode ? 'var(--green)' : 'var(--border)'};background:${cfg.conservative_mode ? 'var(--green-dim)' : 'var(--bg)'}" onclick="toggleHMSFMode('conservative')">
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
+            <span style="font-size:12px;color:${cfg.conservative_mode ? 'var(--green)' : 'var(--text-dim)'}">${cfg.conservative_mode ? '●' : '○'}</span>
+            <span style="font-size:11px;font-weight:600;color:${cfg.conservative_mode ? 'var(--green)' : 'var(--text-dim)'}">Conservative</span>
+          </div>
+          <div style="font-size:9px;color:var(--text-dim);line-height:1.4">
+            Quarter-Kelly (max 2.5% pro Trade)<br>
+            Globale Filter aktiv (EV, Spread, Latenz)<br>
+            Regime-Malus auf ETH UP in Downtrend<br>
+            <b>Sicherer — weniger Trades, hoeherer EV</b>
+          </div>
+        </div>
+        <div style="flex:1;padding:8px;border-radius:4px;cursor:pointer;border:1px solid ${cfg.aggressive_mode ? 'var(--red)' : 'var(--border)'};background:${cfg.aggressive_mode ? 'var(--red-dim)' : 'var(--bg)'}" onclick="toggleHMSFMode('aggressive')">
+          <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
+            <span style="font-size:12px;color:${cfg.aggressive_mode ? 'var(--red)' : 'var(--text-dim)'}">${cfg.aggressive_mode ? '●' : '○'}</span>
+            <span style="font-size:11px;font-weight:600;color:${cfg.aggressive_mode ? 'var(--red)' : 'var(--text-dim)'}">Aggressive</span>
+          </div>
+          <div style="font-size:9px;color:var(--text-dim);line-height:1.4">
+            Kein globaler Filter (nur Modul-Filter)<br>
+            Keine Regime-Anpassung<br>
+            Rohe Modul-Signals ohne Bestaetigung<br>
+            <b>Riskanter — mehr Trades, niedrigerer EV</b>
+          </div>
+        </div>
       </div>
     </div>`;
   } catch(e) { console.error('HMSF config error:', e); }
