@@ -367,9 +367,10 @@ async def api_positions() -> dict:
         with urlopen(req, timeout=10) as resp:
             positions = json.loads(resp.read())
 
-        # Filter: Nur aktive Positionen (nicht resolved/wertlos)
-        active = [p for p in positions if p.get("currentValue", 0) > 0 or p.get("redeemable")]
-        resolved = [p for p in positions if p.get("currentValue", 0) == 0 and not p.get("redeemable")]
+        # Filter: Nur Positionen mit echtem Wert (>$0.01) anzeigen
+        # LOST Positionen ($0 Value) werden ausgeblendet — auch redeemable mit $0
+        active = [p for p in positions if p.get("currentValue", 0) > 0.01]
+        resolved = [p for p in positions if p.get("currentValue", 0) <= 0.01]
 
         total_value = sum(p.get("currentValue", 0) for p in active)
         redeemable = sum(p.get("currentValue", 0) for p in active if p.get("redeemable") and p.get("currentValue", 0) > 0)
