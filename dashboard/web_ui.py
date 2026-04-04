@@ -129,7 +129,7 @@ def _build_payload() -> dict:
     trading = status.get("paper_trading", {})
 
     # Wenn Live-Trading aktiv: Balance async holen
-    if executor.get("live") and strategy and strategy.executor.is_live:
+    if executor.get("live") and strategy and hasattr(strategy, 'executor') and strategy.executor.is_live:
         try:
             import asyncio
             loop = asyncio.get_event_loop()
