@@ -110,10 +110,10 @@ class OracleDelayArbStrategy(StrategyBase):
 
         # Config
         self.trade_size_usd = 5.0          # $5 pro Trade (Daten sammeln, später skalieren)
-        self.min_entry_price = 0.95        # Nur kaufen wenn Preis >= 0.95
-        self.max_entry_price = 0.995       # Nicht über 0.995 (zu teuer)
-        self.delay_after_close_s = 3.0     # 3 Sekunden nach Window-Close warten
-        self.max_delay_s = 60.0            # Max 60s nach Close (danach zu spät)
+        self.min_entry_price = 0.90        # Kaufen wenn Preis >= 0.90 (mehr Profit, etwas mehr Risiko)
+        self.max_entry_price = 0.99        # Max 0.99 (CLOB Limit)
+        self.delay_after_close_s = 2.0     # 2 Sekunden nach Window-Close warten
+        self.max_delay_s = 45.0            # Max 45s nach Close (schneller sein als Sharky's 71s)
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
 
         # State
@@ -290,22 +290,60 @@ class OracleDelayArbStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     async def _get_token_ids(self, slug: str, asset: str) -> tuple | None:
-        """Holt Token-IDs für ein Window von der laufenden Momentum-Discovery."""
+        """Holt Token-IDs — zuerst Discovery, dann DIREKT vom Polymarket CLOB."""
+        # 1. Versuche von der laufenden Discovery
         try:
             from dashboard.web_ui import active_strategies
             momentum = active_strategies.get("momentum_latency_v2")
             if momentum and hasattr(momentum, "discovery"):
-                # Exact slug match
-                w = momentum.discovery.windows.get(slug)
-                if w:
-                    return (w.up_token_id, w.down_token_id, w.condition_id)
-
-                # Fuzzy match: gleicher Asset + ähnlicher Timestamp
                 for s, w in momentum.discovery.windows.items():
-                    if w.asset.upper() == asset and abs(w.window_end_ts - int(slug.split("-")[-1]) - 300) < 30:
-                        return (w.up_token_id, w.down_token_id, w.condition_id)
+                    if w.asset.upper() == asset and w.up_token_id and w.down_token_id:
+                        start_ts = int(slug.split("-")[-1])
+                        if abs(w.window_start_ts - start_ts) < 30:
+                            return (w.up_token_id, w.down_token_id, w.condition_id)
+        except Exception:
+            pass
+
+        # 2. Fallback: Direkt von Polymarket CLOB Markets API
+        if not self._session or self._session.closed:
+            return None
+        try:
+            # Suche den Market über die CLOB API
+            url = f"https://clob.polymarket.com/markets?next_cursor=LTE%3D"
+            async with self._session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                markets = await resp.json()
+
+            asset_lower = asset.lower()
+            start_ts = int(slug.split("-")[-1])
+            end_ts = start_ts + 300
+
+            for m in markets if isinstance(markets, list) else markets.get("data", []):
+                q = m.get("question", "").lower()
+                cid = m.get("condition_id", "")
+                tokens = m.get("tokens", [])
+
+                if asset_lower not in q or "up or down" not in q:
+                    continue
+                if len(tokens) < 2:
+                    continue
+
+                # Match by end date/time in question
+                up_tid = ""
+                down_tid = ""
+                for tok in tokens:
+                    outcome = tok.get("outcome", "").lower()
+                    if outcome in ("up", "yes"):
+                        up_tid = tok.get("token_id", "")
+                    elif outcome in ("down", "no"):
+                        down_tid = tok.get("token_id", "")
+
+                if up_tid and down_tid:
+                    logger.info(f"ODA Token-IDs via CLOB: {asset} up={up_tid[:16]}... dn={down_tid[:16]}...")
+                    return (up_tid, down_tid, cid)
         except Exception as e:
-            logger.debug(f"ODA get_token_ids error: {e}")
+            logger.debug(f"ODA CLOB token fetch error: {e}")
 
         return None
 
@@ -485,7 +523,19 @@ class OracleDelayArbStrategy(StrategyBase):
                 if res.success:
                     trade.live_order_id = res.order_id
                     trade.live_success = True
-                    logger.info(f"SNIPE LIVE OK: {trade_id} — {res.order_id}")
+                    logger.info(f"SNIPE ORDER PLACED: {trade_id} — {res.order_id}")
+
+                    # FILL VERIFICATION: Check if order actually filled
+                    await asyncio.sleep(2)  # Give CLOB time to match
+                    fill_status = await self._check_fill(res.order_id)
+                    if fill_status == "FILLED":
+                        logger.info(f"SNIPE FILLED ✅: {trade_id}")
+                    elif fill_status == "UNFILLED":
+                        logger.warning(f"SNIPE NOT FILLED ⚠️: {trade_id} — cancelling")
+                        await self._cancel_order(res.order_id)
+                        trade.live_success = False
+                    else:
+                        logger.info(f"SNIPE STATUS: {trade_id} — {fill_status}")
                 else:
                     logger.error(f"SNIPE LIVE FAILED: {trade_id} — {res.error}")
             except Exception as e:
@@ -519,6 +569,43 @@ class OracleDelayArbStrategy(StrategyBase):
             live_order_success=trade.live_success,
             condition_id=condition_id,
         ))
+
+    async def _check_fill(self, order_id: str) -> str:
+        """Prüft ob eine Order gefüllt wurde via CLOB API."""
+        if not self.executor.is_live or not self.executor._client:
+            return "NO_CLIENT"
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            order = await loop.run_in_executor(None, self.executor._client.get_order, order_id)
+            if order:
+                status = order.get("status", "unknown")
+                filled = float(order.get("size_matched", 0))
+                total = float(order.get("original_size", 0))
+                if status == "MATCHED" or (filled > 0 and filled >= total * 0.9):
+                    return "FILLED"
+                elif filled > 0:
+                    return f"PARTIAL ({filled}/{total})"
+                else:
+                    return "UNFILLED"
+            return "UNKNOWN"
+        except Exception as e:
+            logger.debug(f"Fill check error: {e}")
+            return f"ERROR: {e}"
+
+    async def _cancel_order(self, order_id: str) -> bool:
+        """Cancelt eine unfilled Order."""
+        if not self.executor.is_live or not self.executor._client:
+            return False
+        try:
+            import asyncio
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.executor._client.cancel, order_id)
+            logger.info(f"ODA: Order {order_id[:16]}... cancelled")
+            return True
+        except Exception as e:
+            logger.debug(f"Cancel error: {e}")
+            return False
 
     # ═══════════════════════════════════════════════════════════════
     # STATUS
