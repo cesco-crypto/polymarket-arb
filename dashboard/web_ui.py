@@ -361,14 +361,19 @@ async def api_positions() -> dict:
         with urlopen(req, timeout=10) as resp:
             positions = json.loads(resp.read())
 
-        total_value = sum(p.get("currentValue", 0) for p in positions)
-        redeemable = sum(p.get("currentValue", 0) for p in positions if p.get("redeemable") and p.get("currentValue", 0) > 0)
-        total_invested = sum(p.get("initialValue", 0) for p in positions)
-        total_pnl = sum(p.get("cashPnl", 0) for p in positions)
+        # Filter: Nur aktive Positionen (nicht resolved/wertlos)
+        active = [p for p in positions if p.get("currentValue", 0) > 0 or p.get("redeemable")]
+        resolved = [p for p in positions if p.get("currentValue", 0) == 0 and not p.get("redeemable")]
+
+        total_value = sum(p.get("currentValue", 0) for p in active)
+        redeemable = sum(p.get("currentValue", 0) for p in active if p.get("redeemable") and p.get("currentValue", 0) > 0)
+        total_invested = sum(p.get("initialValue", 0) for p in active)
+        total_pnl = sum(p.get("cashPnl", 0) for p in active)
 
         return {
-            "positions": positions,
-            "count": len(positions),
+            "positions": active,  # Nur aktive/redeemable Positionen
+            "count": len(active),
+            "resolved_count": len(resolved),
             "total_value": round(total_value, 2),
             "redeemable": round(redeemable, 2),
             "total_invested": round(total_invested, 2),

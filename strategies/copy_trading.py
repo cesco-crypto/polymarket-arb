@@ -145,9 +145,10 @@ class CopyTradingStrategy(StrategyBase):
         self.poll_interval_s = 5.0         # Poll alle 5 Sekunden
         self.max_copy_size_usd = 5.0       # Fix $5 pro Copy-Trade
         self.max_concurrent = 10           # Max 10 gleichzeitige Positionen
-        self.max_price_drift = 0.10        # Max 10% Preisdrift seit Original
         self.min_seconds_to_copy = 5       # Trade muss < 5 Min alt sein
         self.only_buys = True              # Nur BUY-Trades kopieren (nicht SELL)
+        self.min_copy_price = 0.15         # Nicht unter 15¢ (>85% Verlustchance)
+        self.max_copy_price = 0.90         # Nicht über 90¢ (schlechtes Risk/Reward)
 
         # Tracked Wallets
         self.tracked_wallets = list(DEFAULT_TRACKED_WALLETS)
@@ -155,6 +156,8 @@ class CopyTradingStrategy(StrategyBase):
         # State
         self._running = False
         self._last_seen: dict[str, int] = {}  # wallet → last seen timestamp
+        self._copied_markets: set = set()      # condition_id Set → verhindert Doppel-Trades
+        self._seen_trade_keys: set = set()     # unique Trade-Keys → verhindert Duplikate
         self._copied_positions: list[CopiedPosition] = []
         self._copy_count = 0
         self._recent_copies: deque = deque(maxlen=50)
@@ -244,7 +247,7 @@ class CopyTradingStrategy(StrategyBase):
             await asyncio.sleep(self.poll_interval_s)
 
     async def _check_wallet(self, wallet: dict) -> None:
-        """Prüft eine Wallet auf neue Trades."""
+        """Prüft eine Wallet auf neue Trades — mit allen Safety Guards."""
         addr = wallet["address"]
         name = wallet["name"]
 
@@ -266,32 +269,54 @@ class CopyTradingStrategy(StrategyBase):
             if self.only_buys and side != "BUY":
                 continue  # Nur BUY kopieren
 
-            # Trade zu alt?
-            age = time.time() - ts
-            if age > self.min_seconds_to_copy * 60:  # 5 Minuten
-                logger.debug(f"Copy Skip (zu alt: {age:.0f}s): {name} {side} {trade.get('title','')[:40]}")
+            # ── GUARD 1: Unique Trade Key (verhindert Duplikate) ──
+            trade_key = f"{addr}_{ts}_{trade.get('conditionId','')}"
+            if trade_key in self._seen_trade_keys:
+                continue
+            self._seen_trade_keys.add(trade_key)
+
+            # ── GUARD 2: Market-Deduplizierung (kein doppelter Trade pro Markt) ──
+            condition_id = trade.get("conditionId", "")
+            if condition_id and condition_id in self._copied_markets:
+                logger.info(f"Copy Skip (Markt bereits kopiert): {name} {trade.get('title','')[:40]}")
                 continue
 
-            # Max concurrent?
+            # ── GUARD 3: Price Filter (keine Lotterietickets) ──
+            price = float(trade.get("price", 0))
+            if price < self.min_copy_price or price > self.max_copy_price:
+                logger.info(f"Copy Skip (Preis {price:.3f} ausserhalb {self.min_copy_price}-{self.max_copy_price}): {name} {trade.get('title','')[:40]}")
+                continue
+
+            # ── GUARD 4: Trade zu alt? ──
+            age = time.time() - ts
+            if age > self.min_seconds_to_copy * 60:  # 5 Minuten
+                logger.debug(f"Copy Skip (zu alt: {age:.0f}s): {name}")
+                continue
+
+            # ── GUARD 5: Max concurrent? ──
             active = sum(1 for p in self._copied_positions if not p.resolved)
             if active >= self.max_concurrent:
                 logger.warning(f"Copy Skip (max {self.max_concurrent} erreicht): {name}")
                 continue
 
-            # Kopieren!
+            # ── Alle Guards bestanden → Kopieren! ──
             tracked = TrackedTrade(
                 wallet_name=name,
                 wallet_address=addr,
                 side=side,
                 outcome=trade.get("outcome", ""),
-                price=float(trade.get("price", 0)),
+                price=price,
                 size_usd=float(trade.get("usdcSize", trade.get("size", 0))),
                 title=trade.get("title", ""),
                 slug=trade.get("slug", ""),
-                condition_id=trade.get("conditionId", ""),
+                condition_id=condition_id,
                 timestamp=ts,
                 asset_id=trade.get("asset", ""),
             )
+
+            # Market als kopiert markieren
+            if condition_id:
+                self._copied_markets.add(condition_id)
 
             await self._copy_trade(tracked)
 
@@ -338,12 +363,18 @@ class CopyTradingStrategy(StrategyBase):
             "original_size": round(trade.size_usd, 0),
         })
 
-        # Telegram Alert
+        # Telegram Alert — zeige Wallet-PnL aus Config
+        wallet_pnl = 0
+        for w in self.tracked_wallets:
+            if w["address"] == trade.wallet_address:
+                wallet_pnl = w.get("pnl", 0)
+                break
+        size_str = f"${trade.size_usd:,.0f}" if trade.size_usd > 0 else "N/A"
         asyncio.create_task(telegram.send_alert(
             f"📋 <b>COPY TRADE #{self._copy_count}</b>\n"
             f"{'─'*26}\n"
-            f"👤 Source: <b>{trade.wallet_name}</b> (${trade.size_usd:,.0f})\n"
-            f"📊 {trade.side} {trade.outcome} @ {trade.price:.3f}\n"
+            f"👤 Source: <b>{trade.wallet_name}</b> (${wallet_pnl:,.0f} Lifetime PnL)\n"
+            f"📊 {trade.side} {trade.outcome} @ {trade.price:.3f} (Orig: {size_str})\n"
             f"💰 Copy Size: ${self.max_copy_size_usd:.2f}\n"
             f"📍 {trade.title[:50]}\n"
             f"🔗 <code>{trade.slug}</code>"
