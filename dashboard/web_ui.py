@@ -186,6 +186,9 @@ async def startup() -> None:
     # Self-Ping Keep-Alive (nur auf Render, verhindert Sleep nach 15 Min)
     asyncio.create_task(_keep_alive_loop())
 
+    # Auto-Collect: Redeem + Merge alle 60 Sekunden
+    asyncio.create_task(_auto_collect_loop())
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
@@ -210,6 +213,43 @@ async def shutdown() -> None:
         await _http_session.close()
         _http_session = None
     logger.info("Dashboard beendet.")
+
+
+_last_collect_result: dict = {}
+
+
+async def _auto_collect_loop() -> None:
+    """Alle 60 Sekunden: Redeem gewonnene Positionen + Merge beide-Seiten-Positionen."""
+    global _last_collect_result
+    await asyncio.sleep(15)  # Warte auf Strategy-Start
+
+    while True:
+        try:
+            # Finde einen Redeemer in den aktiven Strategien
+            redeemer = None
+            for name, strat in active_strategies.items():
+                if hasattr(strat, "redeemer"):
+                    redeemer = strat.redeemer
+                    break
+
+            if redeemer:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, redeemer.check_and_collect)
+                _last_collect_result = result
+
+                if result.get("redeemed", 0) > 0 or result.get("merged", 0) > 0:
+                    from utils import telegram
+                    await telegram.send_alert(
+                        f"💰 <b>AUTO-COLLECT</b>\n"
+                        f"Redeemed: {result.get('redeemed', 0)} (${result.get('redeem_usd', 0):.2f})\n"
+                        f"Merged: {result.get('merged', 0)} (${result.get('merge_usd', 0):.2f})\n"
+                        f"Stuck: ${result.get('stuck_usd', 0):.2f}\n"
+                        f"Pending Merge: ${result.get('pending_merge_usd', 0):.2f}"
+                    )
+        except Exception as e:
+            logger.error(f"Auto-Collect Loop Error: {e}")
+
+        await asyncio.sleep(60)  # Alle 60 Sekunden
 
 
 async def _keep_alive_loop() -> None:
@@ -1245,6 +1285,44 @@ async def api_copy_resume_wallet(body: dict) -> dict:
     if strat.resume_wallet(body.get("address", "")):
         return {"status": "resumed"}
     return {"error": "wallet not found or not paused"}
+
+
+@app.get("/api/collect/status")
+async def api_collect_status() -> dict:
+    """Auto-Collect Status: Redeem + Merge + Stuck Positionen."""
+    result = dict(_last_collect_result) if _last_collect_result else {}
+
+    # Redeemer stats
+    for name, strat in active_strategies.items():
+        if hasattr(strat, "redeemer"):
+            result["redeemer_stats"] = strat.redeemer.stats()
+            break
+
+    # Mergeable pairs
+    for name, strat in active_strategies.items():
+        if hasattr(strat, "redeemer"):
+            try:
+                pairs = strat.redeemer.get_mergeable_pairs()
+                result["mergeable_pairs"] = pairs
+                result["mergeable_total_usd"] = round(sum(p["merge_value_usd"] for p in pairs), 2)
+            except Exception:
+                pass
+            break
+
+    return result
+
+
+@app.post("/api/collect/now")
+async def api_collect_now() -> dict:
+    """Manueller Trigger: Sofort Redeem + Merge ausführen."""
+    for name, strat in active_strategies.items():
+        if hasattr(strat, "redeemer"):
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, strat.redeemer.check_and_collect)
+            global _last_collect_result
+            _last_collect_result = result
+            return result
+    return {"error": "no redeemer available"}
 
 
 @app.post("/api/copy/config")

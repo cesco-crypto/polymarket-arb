@@ -215,6 +215,18 @@
       </div>
       <div id="redeem-list" style="margin-top:4px;font-size:9px;color:var(--text-dim)"></div>
     </div>
+    <!-- Auto-Collect Status -->
+    <div id="collect-panel" style="margin-top:6px;padding:8px 10px;background:var(--bg-card2);border:1px solid var(--border);border-radius:6px">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div style="display:flex;gap:12px;align-items:center">
+          <span style="font-size:10px;font-weight:600;color:var(--accent)">AUTO-COLLECT (60s)</span>
+          <span class="d" style="font-size:10px" id="collect-stuck">Stuck: $—</span>
+          <span class="d" style="font-size:10px" id="collect-merge">Merge: $—</span>
+          <span class="d" style="font-size:10px" id="collect-redeemed">Redeemed: $—</span>
+        </div>
+        <button onclick="manualCollect()" style="background:var(--accent);color:#fff;border:none;padding:4px 10px;border-radius:4px;font-family:var(--font);font-size:9px;font-weight:600;cursor:pointer">COLLECT NOW</button>
+      </div>
+    </div>
     <div style="margin-top:10px">
       <div style="font-size:10px;color:var(--text-mid);margin-bottom:6px;font-weight:600">LIVE CHARTS — Offene Positionen</div>
       <div id="position-embeds" style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;min-height:40px;align-items:center">
@@ -863,6 +875,32 @@ function switchTab(btn, tab) {
   }
   checkRedeemable();
   setInterval(checkRedeemable, 60000);
+
+  // Auto-Collect Status
+  async function checkCollect() {
+    try {
+      const r = await fetch('/api/collect/status');
+      const d = await r.json();
+      const s = id('collect-stuck');
+      const m = id('collect-merge');
+      const rd = id('collect-redeemed');
+      if (s) s.textContent = 'Stuck: $' + (d.stuck_usd || 0).toFixed(2);
+      if (m) m.textContent = 'Merge: $' + (d.mergeable_total_usd || d.pending_merge_usd || 0).toFixed(2);
+      const stats = d.redeemer_stats || {};
+      if (rd) rd.textContent = 'Redeemed: $' + (stats.total_redeemed_usd || 0).toFixed(2) + ' + Merged: $' + (stats.total_merged_usd || 0).toFixed(2);
+    } catch(e) {}
+  }
+  async function manualCollect() {
+    try {
+      const r = await fetch('/api/collect/now', {method:'POST'});
+      const d = await r.json();
+      alert('Collected: Redeemed ' + (d.redeemed||0) + ' ($' + (d.redeem_usd||0).toFixed(2) + ') | Merged ' + (d.merged||0) + ' ($' + (d.merge_usd||0).toFixed(2) + ')');
+      checkCollect();
+      checkRedeemable();
+    } catch(e) { alert('Collect error: ' + e); }
+  }
+  checkCollect();
+  setInterval(checkCollect, 30000);
 
   // Order Type Toggle
   async function toggleOrderType() {
