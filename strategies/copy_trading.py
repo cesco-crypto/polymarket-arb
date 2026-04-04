@@ -170,6 +170,54 @@ class CopyTradingStrategy(StrategyBase):
         self._copy_count = 0
         self._recent_copies: deque = deque(maxlen=50)
         self._session: Optional[aiohttp.ClientSession] = None
+        self._paused_wallets: set[str] = set()  # Paused wallet addresses
+
+    # ═══════════════════════════════════════════════════════════════
+    # WALLET MANAGEMENT (Dashboard API)
+    # ═══════════════════════════════════════════════════════════════
+
+    def add_wallet(self, wallet: dict) -> bool:
+        """Fügt eine Wallet zur Tracking-Liste hinzu (Runtime-only, nicht persistent)."""
+        addr = wallet.get("address", "").lower()
+        if not addr or len(addr) != 42:
+            return False
+        # Duplikat-Check
+        if any(w["address"].lower() == addr for w in self.tracked_wallets):
+            return False
+        self.tracked_wallets.append(wallet)
+        self._last_seen[addr] = int(time.time())  # Keine alten Trades kopieren
+        logger.info(f"WALLET ADDED: {wallet.get('name', addr[:10])} ({addr[:10]}...)")
+        return True
+
+    def remove_wallet(self, address: str) -> bool:
+        """Entfernt eine Wallet aus der Tracking-Liste."""
+        addr = address.lower()
+        before = len(self.tracked_wallets)
+        self.tracked_wallets = [w for w in self.tracked_wallets if w["address"].lower() != addr]
+        self._last_seen.pop(addr, None)
+        self._paused_wallets.discard(addr)
+        removed = len(self.tracked_wallets) < before
+        if removed:
+            logger.info(f"WALLET REMOVED: {addr[:10]}...")
+        return removed
+
+    def pause_wallet(self, address: str) -> bool:
+        """Pausiert eine Wallet (keine neuen Copies, bestehende bleiben)."""
+        addr = address.lower()
+        if any(w["address"].lower() == addr for w in self.tracked_wallets):
+            self._paused_wallets.add(addr)
+            logger.info(f"WALLET PAUSED: {addr[:10]}...")
+            return True
+        return False
+
+    def resume_wallet(self, address: str) -> bool:
+        """Reaktiviert eine pausierte Wallet."""
+        addr = address.lower()
+        if addr in self._paused_wallets:
+            self._paused_wallets.discard(addr)
+            logger.info(f"WALLET RESUMED: {addr[:10]}...")
+            return True
+        return False
 
     # ═══════════════════════════════════════════════════════════════
     # LIFECYCLE
@@ -293,9 +341,11 @@ class CopyTradingStrategy(StrategyBase):
         """Hauptloop: Pollt alle Wallets auf neue Trades."""
         logger.info("Copy Trading Poll-Loop gestartet")
         while self._running:
-            for wallet in self.tracked_wallets:
+            for wallet in list(self.tracked_wallets):  # list() copy: safe against mutation
                 if not self._running:
                     break
+                if wallet["address"].lower() in self._paused_wallets:
+                    continue  # Paused wallet — skip
                 try:
                     await self._check_wallet(wallet)
                 except Exception as e:
@@ -755,20 +805,44 @@ class CopyTradingStrategy(StrategyBase):
 
     def get_status(self) -> dict:
         active = sum(1 for p in self._copied_positions if not p.resolved)
+
+        # Per-wallet stats
+        per_wallet: dict[str, dict] = {}
+        for p in self._copied_positions:
+            name = p.source_name or "unknown"
+            if name not in per_wallet:
+                per_wallet[name] = {"copies": 0, "active": 0, "resolved": 0, "pnl": 0.0}
+            per_wallet[name]["copies"] += 1
+            if p.resolved:
+                per_wallet[name]["resolved"] += 1
+            else:
+                per_wallet[name]["active"] += 1
+            per_wallet[name]["pnl"] += p.pnl_usd
+
         return {
             "strategy": self.STRATEGY_NAME,
             "running": self._running,
             "tracked_wallets": [
-                {"name": w["name"], "address": w["address"][:10] + "...", "pnl": w["pnl"]}
+                {
+                    "name": w["name"],
+                    "address": w["address"],
+                    "pnl": w.get("pnl", 0),
+                    "category": w.get("category", "mixed"),
+                    "notes": w.get("notes", ""),
+                    "status": "paused" if w["address"].lower() in self._paused_wallets else "active",
+                }
                 for w in self.tracked_wallets
             ],
             "copies_total": self._copy_count,
             "copies_active": active,
             "recent_copies": list(self._recent_copies),
+            "per_wallet_stats": per_wallet,
             "config": {
                 "poll_interval_s": self.poll_interval_s,
                 "max_copy_size_usd": self.max_copy_size_usd,
                 "max_concurrent": self.max_concurrent,
+                "min_copy_price": self.min_copy_price,
+                "max_copy_price": self.max_copy_price,
                 "only_buys": self.only_buys,
             },
         }

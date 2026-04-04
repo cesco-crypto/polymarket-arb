@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Copy Trading — Polymarket Bot</title>
+<style>
+  :root {
+    --bg:#0a0c10;--card:#13151c;--card2:#181b24;--border:#1e2230;--border-hi:#2a3040;
+    --text:#e1e4eb;--dim:#6b7080;--mid:#9298a8;
+    --accent:#3b82f6;--green:#22c55e;--green-dim:#0a2f1a;--red:#ef4444;--red-dim:#2d0f0f;
+    --yellow:#eab308;--orange:#f97316;--purple:#a855f7;
+    --font:'SF Mono','JetBrains Mono','Cascadia Code','Fira Code',monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:12px;line-height:1.5}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+
+  /* Header */
+  .hdr{display:flex;align-items:center;justify-content:space-between;padding:10px 20px;background:var(--card);border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100}
+  .hdr-l{display:flex;align-items:center;gap:16px}
+  .logo{font-size:14px;font-weight:700;letter-spacing:1.5px;color:var(--orange)}
+  .nav{display:flex;gap:14px;font-size:11px}
+  .nav a{color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+  .nav a:hover,.nav a.on{color:var(--text);text-decoration:none}
+
+  /* Layout */
+  .container{max-width:1400px;margin:0 auto;padding:16px 20px}
+  .section{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+  .section-hdr{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+  .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--dim)}
+
+  /* Cards */
+  .card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px}
+  .wcard{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:12px;position:relative}
+  .wcard.active{border-color:var(--green)} .wcard.paused{border-color:var(--yellow);opacity:.7}
+  .wcard-name{font-size:13px;font-weight:700;margin-bottom:4px}
+  .wcard-addr{font-size:9px;color:var(--dim);margin-bottom:6px;font-family:var(--font)}
+  .wcard-pnl{font-size:16px;font-weight:700;margin-bottom:4px}
+  .wcard-meta{display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap}
+  .wcard-actions{display:flex;gap:6px}
+
+  /* Badges */
+  .badge{display:inline-block;padding:2px 8px;border-radius:3px;font-size:9px;font-weight:600;text-transform:uppercase}
+  .badge-sports{background:#22c55e18;color:var(--green)}
+  .badge-crypto{background:#f9731618;color:var(--orange)}
+  .badge-politics{background:#a855f718;color:var(--purple)}
+  .badge-mixed{background:#3b82f618;color:var(--accent)}
+  .badge-active{background:var(--green-dim);color:var(--green)}
+  .badge-paused{background:#eab30818;color:var(--yellow)}
+  .badge-tracked{background:var(--green-dim);color:var(--green)}
+
+  /* Buttons */
+  .btn{padding:4px 10px;border:1px solid var(--border);border-radius:4px;font-family:var(--font);font-size:10px;font-weight:600;cursor:pointer;text-transform:uppercase;letter-spacing:.5px;background:transparent;color:var(--text)}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .btn-green{border-color:var(--green);color:var(--green)} .btn-green:hover{background:var(--green);color:#000}
+  .btn-red{border-color:var(--red);color:var(--red)} .btn-red:hover{background:var(--red);color:#fff}
+  .btn-orange{border-color:var(--orange);color:var(--orange)} .btn-orange:hover{background:var(--orange);color:#000}
+  .btn-accent{border-color:var(--accent);color:var(--accent)} .btn-accent:hover{background:var(--accent);color:#fff}
+  .btn-sm{padding:2px 6px;font-size:9px}
+
+  /* KPI Row */
+  .kpi-row{display:flex;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+  .kpi{text-align:center;min-width:100px}
+  .kpi-val{font-size:20px;font-weight:700}
+  .kpi-lbl{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+
+  /* Tables */
+  table{width:100%;border-collapse:collapse;font-size:11px}
+  th{text-align:left;padding:4px 8px;font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);border-bottom:1px solid var(--border);font-weight:600}
+  td{padding:5px 8px;border-bottom:1px solid var(--border)}
+  tr:hover{background:var(--card2)}
+  .r{text-align:right} .g{color:var(--green)} .rd{color:var(--red)} .d{color:var(--dim)} .b{font-weight:700} .y{color:var(--yellow)}
+
+  /* Filter Bar */
+  .filter-bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px;padding:10px;background:var(--card2);border-radius:6px}
+  .filter-group{display:flex;flex-direction:column;gap:2px}
+  .filter-lbl{font-size:8px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .filter-input{padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--font);font-size:11px;width:90px}
+  .filter-input:focus{outline:none;border-color:var(--accent)}
+  .search-input{width:220px}
+
+  /* Tags */
+  .tag-bar{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .tag{padding:3px 10px;border-radius:12px;font-size:9px;font-weight:600;cursor:pointer;border:1px solid var(--border);color:var(--dim);background:transparent;font-family:var(--font);transition:all .15s}
+  .tag:hover{border-color:var(--accent);color:var(--text)}
+  .tag.on{background:var(--accent);border-color:var(--accent);color:#fff}
+
+  /* Sort Buttons */
+  .sort-bar{display:flex;gap:6px;margin-bottom:8px}
+  .sort-btn{padding:3px 10px;border-radius:3px;font-size:9px;font-weight:600;cursor:pointer;border:1px solid var(--border);color:var(--dim);background:transparent;font-family:var(--font)}
+  .sort-btn:hover{border-color:var(--accent)} .sort-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+  /* AI Banner */
+  .ai-banner{background:linear-gradient(135deg,#1a1040,#0f2040);border:1px solid var(--purple);border-radius:6px;padding:12px 16px;margin-bottom:12px;display:flex;align-items:center;gap:12px}
+  .ai-icon{font-size:24px}
+  .ai-title{font-size:11px;font-weight:700;color:var(--purple);text-transform:uppercase;letter-spacing:1px}
+  .ai-picks{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+  .ai-pick{background:#a855f718;border:1px solid var(--purple);border-radius:4px;padding:4px 10px;font-size:10px;cursor:pointer}
+  .ai-pick:hover{background:var(--purple);color:#fff}
+
+  /* Analyze Panel */
+  .analyze-panel{background:var(--bg);border:1px solid var(--border-hi);border-radius:6px;padding:14px;margin:8px 0;display:none}
+  .analyze-panel.open{display:block}
+
+  /* Config Panel */
+  .config-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+  .config-item{display:flex;flex-direction:column;gap:4px}
+  .config-item label{font-size:9px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+  .config-item input{padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:var(--font);font-size:12px}
+
+  /* Toast */
+  .toast{position:fixed;top:60px;right:20px;padding:10px 20px;border-radius:6px;font-size:11px;font-weight:600;z-index:200;display:none;animation:slideIn .3s}
+  .toast-ok{background:var(--green);color:#000} .toast-err{background:var(--red);color:#fff}
+  @keyframes slideIn{from{transform:translateX(100px);opacity:0}to{transform:translateX(0);opacity:1}}
+
+  .empty{color:var(--dim);text-align:center;padding:20px;font-size:11px}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="hdr">
+  <div class="hdr-l">
+    <span class="logo">COPY TRADING</span>
+    <span class="badge badge-active" id="ct-status">LOADING</span>
+  </div>
+  <div class="nav">
+    <a href="/">Dashboard</a>
+    <a href="/strategy">Strategies</a>
+    <a href="/copytrading" class="on">Copy Trading</a>
+    <a href="/wallet">Wallet</a>
+    <a href="/auth/logout" style="color:var(--red)">Logout</a>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="container">
+
+<!-- Section 1: Tracked Wallets -->
+<div class="section">
+  <div class="section-hdr">
+    <span class="section-title">Tracked Wallets <span id="wallet-count" class="d">0</span></span>
+  </div>
+  <div class="card-grid" id="wallet-grid">
+    <div class="empty">Loading tracked wallets...</div>
+  </div>
+</div>
+
+<!-- Section 2: Copy Performance -->
+<div class="section">
+  <div class="section-hdr">
+    <span class="section-title">Copy Performance</span>
+  </div>
+  <div class="kpi-row" id="kpi-row">
+    <div class="kpi"><div class="kpi-val" id="kpi-total">—</div><div class="kpi-lbl">Total Copies</div></div>
+    <div class="kpi"><div class="kpi-val" id="kpi-active">—</div><div class="kpi-lbl">Active</div></div>
+    <div class="kpi"><div class="kpi-val g" id="kpi-wr">—</div><div class="kpi-lbl">Win Rate</div></div>
+    <div class="kpi"><div class="kpi-val" id="kpi-pnl">—</div><div class="kpi-lbl">PnL</div></div>
+  </div>
+  <div style="font-size:10px;color:var(--dim);margin-bottom:6px;font-weight:600">RECENT COPIES</div>
+  <table>
+    <tr><th>Time</th><th>ID</th><th>Source</th><th>Side</th><th>Outcome</th><th class="r">Price</th><th>Market</th></tr>
+  </table>
+  <table id="recent-body"><tr><td colspan="7" class="empty">No copies yet</td></tr></table>
+</div>
+
+<!-- Section 3: Discover Top Traders -->
+<div class="section">
+  <div class="section-hdr">
+    <span class="section-title">Discover Top Traders</span>
+    <button class="btn btn-accent btn-sm" onclick="loadLeaderboard()">REFRESH</button>
+  </div>
+
+  <!-- AI Engine Picks -->
+  <div class="ai-banner" id="ai-banner" style="display:none">
+    <div class="ai-icon">🤖</div>
+    <div>
+      <div class="ai-title">AI Engine Picks</div>
+      <div class="ai-picks" id="ai-picks"></div>
+    </div>
+  </div>
+
+  <!-- Search + Filters -->
+  <div class="filter-bar">
+    <div class="filter-group">
+      <span class="filter-lbl">Search</span>
+      <input class="filter-input search-input" id="f-search" placeholder="Name or address..." oninput="applyFilters()">
+    </div>
+    <div class="filter-group">
+      <span class="filter-lbl">Min PnL ($)</span>
+      <input class="filter-input" id="f-pnl-min" type="number" value="0" onchange="applyFilters()">
+    </div>
+    <div class="filter-group">
+      <span class="filter-lbl">Max PnL ($)</span>
+      <input class="filter-input" id="f-pnl-max" type="number" value="99999999" onchange="applyFilters()">
+    </div>
+    <div class="filter-group">
+      <span class="filter-lbl">Min Volume ($)</span>
+      <input class="filter-input" id="f-vol-min" type="number" value="0" onchange="applyFilters()">
+    </div>
+  </div>
+
+  <!-- Sort Buttons -->
+  <div class="sort-bar">
+    <button class="sort-btn on" data-sort="pnl" onclick="setSort(this,'pnl')">PnL</button>
+    <button class="sort-btn" data-sort="volume" onclick="setSort(this,'volume')">Volume</button>
+    <button class="sort-btn" data-sort="ai_score" onclick="setSort(this,'ai_score')">AI Score</button>
+    <button class="sort-btn" data-sort="rank" onclick="setSort(this,'rank')">Rank</button>
+  </div>
+
+  <!-- Leaderboard Table -->
+  <table>
+    <tr><th>#</th><th>Trader</th><th class="r">PnL</th><th class="r">Volume</th><th class="r">AI Score</th><th>Actions</th></tr>
+  </table>
+  <table id="lb-body"><tr><td colspan="6" class="empty">Click REFRESH to load leaderboard</td></tr></table>
+
+  <!-- Analyze Panel (inline, shown when ANALYZE clicked) -->
+  <div class="analyze-panel" id="analyze-panel">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <span style="font-size:12px;font-weight:700" id="az-name">Analyzing...</span>
+      <button class="btn btn-sm" onclick="closeAnalyze()">CLOSE</button>
+    </div>
+    <div id="az-content"><div class="empty">Loading analysis...</div></div>
+  </div>
+</div>
+
+<!-- Section 4: Configuration -->
+<div class="section">
+  <div class="section-hdr">
+    <span class="section-title">Configuration</span>
+    <button class="btn btn-green btn-sm" onclick="saveConfig()">SAVE</button>
+  </div>
+  <div class="config-grid">
+    <div class="config-item"><label>Copy Size (USD)</label><input id="cfg-size" type="number" step="0.5"></div>
+    <div class="config-item"><label>Max Concurrent Markets</label><input id="cfg-concurrent" type="number"></div>
+    <div class="config-item"><label>Poll Interval (seconds)</label><input id="cfg-poll" type="number" step="0.5"></div>
+    <div class="config-item"><label>Min Copy Price</label><input id="cfg-min-price" type="number" step="0.01"></div>
+    <div class="config-item"><label>Max Copy Price</label><input id="cfg-max-price" type="number" step="0.01"></div>
+  </div>
+</div>
+
+</div><!-- container -->
+
+<script>
+// ═══════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════
+let _status = null;
+let _leaderboard = [];
+let _currentSort = 'pnl';
+let _analyzeAddr = '';
+
+function id(s) { return document.getElementById(s); }
+function fmt(n) { return n >= 1000000 ? '$' + (n/1000000).toFixed(1) + 'M' : n >= 1000 ? '$' + (n/1000).toFixed(1) + 'K' : '$' + n.toFixed(2); }
+function shortAddr(a) { return a ? a.slice(0,6) + '...' + a.slice(-4) : '—'; }
+function toast(msg, ok) {
+  const t = id('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+function catBadge(c) {
+  const cls = {'sports':'badge-sports','crypto':'badge-crypto','politics':'badge-politics'}[c] || 'badge-mixed';
+  return `<span class="badge ${cls}">${c}</span>`;
+}
+
+// ═══════════════════════════════════════════
+// SECTION 1+2+4: STATUS
+// ═══════════════════════════════════════════
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/copy/status');
+    const d = await r.json();
+    _status = d;
+    id('ct-status').textContent = d.running ? 'LIVE' : 'OFFLINE';
+    id('ct-status').className = 'badge ' + (d.running ? 'badge-active' : 'badge-paused');
+    renderWallets(d);
+    renderPerformance(d);
+    renderConfig(d.config || {});
+  } catch(e) { console.error('Status error:', e); }
+}
+
+function renderWallets(d) {
+  const wallets = d.tracked_wallets || [];
+  const stats = d.per_wallet_stats || {};
+  id('wallet-count').textContent = wallets.length;
+
+  if (!wallets.length) {
+    id('wallet-grid').innerHTML = '<div class="empty">No tracked wallets</div>';
+    return;
+  }
+
+  id('wallet-grid').innerHTML = wallets.map(w => {
+    const st = stats[w.name] || {};
+    const isPaused = w.status === 'paused';
+    return `<div class="wcard ${isPaused ? 'paused' : 'active'}">
+      <div class="wcard-name">${w.name}</div>
+      <div class="wcard-addr">${shortAddr(w.address)}</div>
+      <div class="wcard-pnl g">${fmt(w.pnl)}</div>
+      <div class="wcard-meta">
+        ${catBadge(w.category)}
+        <span class="badge ${isPaused?'badge-paused':'badge-active'}">${w.status}</span>
+      </div>
+      <div style="font-size:9px;color:var(--dim);margin-bottom:6px">
+        Copies: ${st.copies||0} | Active: ${st.active||0}
+      </div>
+      <div class="wcard-actions">
+        ${isPaused
+          ? `<button class="btn btn-green btn-sm" onclick="resumeWallet('${w.address}')">RESUME</button>`
+          : `<button class="btn btn-sm" style="border-color:var(--yellow);color:var(--yellow)" onclick="pauseWallet('${w.address}')">PAUSE</button>`
+        }
+        <button class="btn btn-red btn-sm" onclick="removeWallet('${w.address}','${w.name}')">REMOVE</button>
+        <a href="https://polymarket.com/profile/${w.address}" target="_blank" class="btn btn-sm">PROFILE</a>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderPerformance(d) {
+  id('kpi-total').textContent = d.copies_total || 0;
+  id('kpi-active').textContent = d.copies_active || 0;
+  const total = d.copies_total || 0;
+  const stats = d.per_wallet_stats || {};
+  let wins=0, losses=0, pnl=0;
+  for (const [k,v] of Object.entries(stats)) { pnl += v.pnl || 0; }
+  id('kpi-pnl').textContent = '$' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+  id('kpi-pnl').className = 'kpi-val ' + (pnl >= 0 ? 'g' : 'rd');
+
+  const copies = d.recent_copies || [];
+  if (!copies.length) {
+    id('recent-body').innerHTML = '<tr><td colspan="7" class="empty">No copies yet</td></tr>';
+    return;
+  }
+  id('recent-body').innerHTML = copies.slice(0,20).map(c => `<tr>
+    <td class="d">${c.ts || '—'}</td>
+    <td>${c.trade_id || '—'}</td>
+    <td style="color:var(--yellow)">${c.source || '—'}</td>
+    <td>${c.side || '—'}</td>
+    <td>${c.outcome || '—'}</td>
+    <td class="r">${(c.price||0).toFixed(3)}</td>
+    <td class="d" style="font-size:10px">${(c.market||'').substring(0,35)}</td>
+  </tr>`).join('');
+}
+
+function renderConfig(cfg) {
+  if (!cfg || !Object.keys(cfg).length) return;
+  id('cfg-size').value = cfg.max_copy_size_usd || 5;
+  id('cfg-concurrent').value = cfg.max_concurrent || 10;
+  id('cfg-poll').value = cfg.poll_interval_s || 5;
+  id('cfg-min-price').value = cfg.min_copy_price || 0.25;
+  id('cfg-max-price').value = cfg.max_copy_price || 0.85;
+}
+
+// ═══════════════════════════════════════════
+// WALLET ACTIONS
+// ═══════════════════════════════════════════
+async function pauseWallet(addr) {
+  const r = await fetch('/api/copy/pause-wallet', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({address:addr})});
+  const d = await r.json();
+  toast(d.status === 'paused' ? 'Wallet paused' : d.error, d.status === 'paused');
+  loadStatus();
+}
+async function resumeWallet(addr) {
+  const r = await fetch('/api/copy/resume-wallet', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({address:addr})});
+  const d = await r.json();
+  toast(d.status === 'resumed' ? 'Wallet resumed' : d.error, d.status === 'resumed');
+  loadStatus();
+}
+async function removeWallet(addr, name) {
+  if (!confirm(`Remove ${name} from tracking? Existing positions will resolve naturally.`)) return;
+  const r = await fetch('/api/copy/remove-wallet', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({address:addr})});
+  const d = await r.json();
+  toast(d.status === 'removed' ? 'Wallet removed' : d.error, d.status === 'removed');
+  loadStatus();
+}
+async function saveConfig() {
+  const body = {
+    max_copy_size_usd: parseFloat(id('cfg-size').value),
+    max_concurrent: parseInt(id('cfg-concurrent').value),
+    poll_interval_s: parseFloat(id('cfg-poll').value),
+    min_copy_price: parseFloat(id('cfg-min-price').value),
+    max_copy_price: parseFloat(id('cfg-max-price').value),
+  };
+  const r = await fetch('/api/copy/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  const d = await r.json();
+  toast(d.status === 'updated' ? 'Config saved!' : d.error, d.status === 'updated');
+}
+
+// ═══════════════════════════════════════════
+// SECTION 3: LEADERBOARD
+// ═══════════════════════════════════════════
+async function loadLeaderboard() {
+  id('lb-body').innerHTML = '<tr><td colspan="6" class="empty">Loading leaderboard...</td></tr>';
+  try {
+    const r = await fetch('/api/copy/leaderboard?limit=50');
+    const d = await r.json();
+    _leaderboard = d.traders || [];
+    renderLeaderboard();
+    renderAIPicks();
+  } catch(e) {
+    id('lb-body').innerHTML = '<tr><td colspan="6" class="empty">Error loading leaderboard</td></tr>';
+  }
+}
+
+function renderLeaderboard() {
+  let data = [..._leaderboard];
+
+  // Apply filters
+  const search = id('f-search').value.toLowerCase();
+  const pnlMin = parseFloat(id('f-pnl-min').value) || 0;
+  const pnlMax = parseFloat(id('f-pnl-max').value) || 99999999;
+  const volMin = parseFloat(id('f-vol-min').value) || 0;
+
+  data = data.filter(t =>
+    (t.name.toLowerCase().includes(search) || t.address.toLowerCase().includes(search)) &&
+    t.pnl >= pnlMin && t.pnl <= pnlMax &&
+    t.volume >= volMin
+  );
+
+  // Sort
+  data.sort((a,b) => (b[_currentSort] || 0) - (a[_currentSort] || 0));
+  if (_currentSort === 'rank') data.sort((a,b) => a.rank - b.rank);
+
+  if (!data.length) {
+    id('lb-body').innerHTML = '<tr><td colspan="6" class="empty">No traders match filters</td></tr>';
+    return;
+  }
+
+  id('lb-body').innerHTML = data.map((t,i) => {
+    const pnlC = t.pnl >= 0 ? 'g' : 'rd';
+    const actions = t.already_tracked
+      ? '<span class="badge badge-tracked">TRACKED</span>'
+      : `<button class="btn btn-accent btn-sm" onclick="analyzeTrader('${t.address}','${t.name.replace(/'/g,"\\'")}')">ANALYZE</button>
+         <button class="btn btn-green btn-sm" onclick="quickCopy('${t.address}','${t.name.replace(/'/g,"\\'")}',${t.pnl})">COPY</button>`;
+    return `<tr>
+      <td class="d">${t.rank}</td>
+      <td>
+        <span class="b">${t.name}</span>
+        ${t.verified ? ' <span style="color:var(--accent)">&#10003;</span>' : ''}
+        <br><span class="d" style="font-size:9px">${shortAddr(t.address)}</span>
+      </td>
+      <td class="r ${pnlC} b">${fmt(t.pnl)}</td>
+      <td class="r d">${fmt(t.volume)}</td>
+      <td class="r"><span style="color:var(--purple);font-weight:600">${t.ai_score}</span></td>
+      <td>${actions}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderAIPicks() {
+  const top = [..._leaderboard]
+    .filter(t => !t.already_tracked && t.ai_score > 50)
+    .sort((a,b) => b.ai_score - a.ai_score)
+    .slice(0, 5);
+
+  if (!top.length) { id('ai-banner').style.display = 'none'; return; }
+  id('ai-banner').style.display = 'flex';
+  id('ai-picks').innerHTML = top.map(t =>
+    `<div class="ai-pick" onclick="analyzeTrader('${t.address}','${t.name.replace(/'/g,"\\'")}')">
+      <span class="b">${t.name}</span> — ${fmt(t.pnl)} — Score: ${t.ai_score}
+    </div>`
+  ).join('');
+}
+
+function applyFilters() { renderLeaderboard(); }
+function setSort(btn, field) {
+  document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  _currentSort = field;
+  renderLeaderboard();
+}
+
+// ═══════════════════════════════════════════
+// ANALYZE + COPY
+// ═══════════════════════════════════════════
+async function analyzeTrader(addr, name) {
+  _analyzeAddr = addr;
+  const panel = id('analyze-panel');
+  panel.classList.add('open');
+  id('az-name').textContent = `Analyzing: ${name} (${shortAddr(addr)})`;
+  id('az-content').innerHTML = '<div class="empty">Loading analysis...</div>';
+
+  // Scroll to panel
+  panel.scrollIntoView({behavior:'smooth', block:'nearest'});
+
+  try {
+    const r = await fetch('/api/copy/analyze?wallet=' + addr);
+    const d = await r.json();
+    renderAnalysis(d, name);
+  } catch(e) {
+    id('az-content').innerHTML = '<div class="empty">Error loading analysis</div>';
+  }
+}
+
+function renderAnalysis(d, name) {
+  const s = d.summary || {};
+  const cats = s.categories || {};
+  const catHtml = Object.entries(cats).map(([k,v]) => `<span class="badge badge-${k}">${k}: ${v}</span>`).join(' ');
+
+  const tradesHtml = (d.recent_trades || []).slice(0,10).map(t => {
+    const ago = t.timestamp ? timeAgo(t.timestamp) : '—';
+    return `<tr>
+      <td class="d">${ago}</td>
+      <td><span class="${t.side==='BUY'?'g':'rd'}">${t.side}</span></td>
+      <td>${t.outcome}</td>
+      <td class="r">${(t.price||0).toFixed(3)}</td>
+      <td class="r">${fmt(t.size_usd||0)}</td>
+      <td class="d" style="font-size:10px">${t.title}</td>
+    </tr>`;
+  }).join('');
+
+  const posHtml = (d.positions || []).slice(0,8).map(p => {
+    const pnlC = p.pnl >= 0 ? 'g' : 'rd';
+    return `<tr>
+      <td style="font-size:10px">${p.title}</td>
+      <td>${p.outcome}</td>
+      <td class="r">${fmt(p.current_value||0)}</td>
+      <td class="r ${pnlC}">${p.pnl>=0?'+':''}$${(p.pnl||0).toFixed(2)}</td>
+    </tr>`;
+  }).join('');
+
+  id('az-content').innerHTML = `
+    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:12px">
+      <div><span class="d">Last Active:</span> <span class="b">${s.last_active || '—'}</span></div>
+      <div><span class="d">Trades Analyzed:</span> <span class="b">${s.total_trades || 0}</span></div>
+      <div><span class="d">Avg Trade Size:</span> <span class="b">${fmt(s.avg_trade_size_usd || 0)}</span></div>
+      <div><span class="d">Active Positions:</span> <span class="b">${s.active_positions || 0}</span></div>
+      <div><span class="d">Portfolio Value:</span> <span class="b g">${fmt(s.portfolio_value || 0)}</span></div>
+      <div><span class="d">Portfolio PnL:</span> <span class="b ${(s.portfolio_pnl||0)>=0?'g':'rd'}">${fmt(s.portfolio_pnl||0)}</span></div>
+    </div>
+    <div style="margin-bottom:10px">${catHtml}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <div>
+        <div style="font-size:10px;color:var(--dim);font-weight:600;margin-bottom:4px">RECENT TRADES</div>
+        <table><tr><th>When</th><th>Side</th><th>Outcome</th><th class="r">Price</th><th class="r">Size</th><th>Market</th></tr></table>
+        <table>${tradesHtml || '<tr><td colspan="6" class="empty">No trades</td></tr>'}</table>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--dim);font-weight:600;margin-bottom:4px">ACTIVE POSITIONS</div>
+        <table><tr><th>Market</th><th>Outcome</th><th class="r">Value</th><th class="r">PnL</th></tr></table>
+        <table>${posHtml || '<tr><td colspan="4" class="empty">No positions</td></tr>'}</table>
+      </div>
+    </div>
+    <div style="margin-top:12px;display:flex;gap:8px;align-items:center">
+      <button class="btn btn-green" onclick="startCopying('${d.address}','${name}')">START COPYING THIS TRADER</button>
+      <a href="https://polymarket.com/profile/${d.address}" target="_blank" class="btn">VIEW PROFILE</a>
+      <select id="az-category" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--font);font-size:11px">
+        <option value="mixed">Mixed</option><option value="sports">Sports</option>
+        <option value="crypto">Crypto</option><option value="politics">Politics</option>
+      </select>
+    </div>
+  `;
+}
+
+function closeAnalyze() {
+  id('analyze-panel').classList.remove('open');
+  _analyzeAddr = '';
+}
+
+async function startCopying(addr, name) {
+  const cat = id('az-category') ? id('az-category').value : 'mixed';
+  const r = await fetch('/api/copy/add-wallet', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({address: addr, name: name, category: cat, pnl: 0}),
+  });
+  const d = await r.json();
+  if (d.status === 'added') {
+    toast(`Now copying ${name}!`, true);
+    closeAnalyze();
+    loadStatus();
+    renderLeaderboard();
+  } else {
+    toast(d.error || 'Failed to add', false);
+  }
+}
+
+async function quickCopy(addr, name, pnl) {
+  if (!confirm(`Start copying ${name}?`)) return;
+  const r = await fetch('/api/copy/add-wallet', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({address: addr, name: name, category: 'mixed', pnl: pnl}),
+  });
+  const d = await r.json();
+  toast(d.status === 'added' ? `Now copying ${name}!` : (d.error||'Failed'), d.status === 'added');
+  loadStatus();
+  if (d.status === 'added') loadLeaderboard();
+}
+
+function timeAgo(ts) {
+  const s = Math.floor(Date.now()/1000 - ts);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+
+// ═══════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════
+loadStatus();
+loadLeaderboard();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>

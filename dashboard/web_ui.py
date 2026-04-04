@@ -956,6 +956,292 @@ async def masterplan() -> HTMLResponse:
     return HTMLResponse(html_path.read_text(encoding="utf-8"))
 
 
+# ═══════════════════════════════════════════════════════════════════
+# COPY TRADING DASHBOARD — /copytrading
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/copytrading", response_class=HTMLResponse)
+async def copytrading_page() -> HTMLResponse:
+    html_path = Path(__file__).parent / "copytrading.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/copy/status")
+async def api_copy_status() -> dict:
+    """Status der Copy Trading Strategie — Wallets, Performance, Config."""
+    strat = active_strategies.get("copy_trading")
+    if strat and hasattr(strat, "get_status"):
+        return strat.get_status()
+    # Fallback: static defaults
+    try:
+        from strategies.copy_trading import DEFAULT_TRACKED_WALLETS
+        return {
+            "running": False,
+            "tracked_wallets": [
+                {"name": w["name"], "address": w["address"], "pnl": w.get("pnl", 0),
+                 "category": w.get("category", "mixed"), "status": "inactive"}
+                for w in DEFAULT_TRACKED_WALLETS
+            ],
+            "copies_total": 0, "copies_active": 0, "recent_copies": [],
+            "per_wallet_stats": {},
+            "config": {},
+        }
+    except Exception:
+        return {"running": False, "tracked_wallets": [], "error": "not loaded"}
+
+
+_leaderboard_cache: dict = {"data": [], "ts": 0}
+
+
+@app.get("/api/copy/leaderboard")
+async def api_copy_leaderboard(limit: int = 50) -> dict:
+    """Polymarket Top Traders Leaderboard (cached 10 min)."""
+    import json as _json
+    from urllib.request import urlopen as _urlopen, Request as _Req
+
+    now = time.time()
+    if now - _leaderboard_cache["ts"] < 600 and _leaderboard_cache["data"]:
+        data = _leaderboard_cache["data"]
+    else:
+        try:
+            url = f"https://data-api.polymarket.com/v1/leaderboard?limit={min(limit, 100)}"
+            req = _Req(url, headers={"User-Agent": "polymarket-arb/2.0"})
+            with _urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+            _leaderboard_cache["data"] = data
+            _leaderboard_cache["ts"] = now
+        except Exception as e:
+            logger.error(f"Leaderboard fetch error: {e}")
+            data = _leaderboard_cache.get("data", [])
+
+    # Enrich: mark already-tracked wallets
+    tracked_addrs = set()
+    strat = active_strategies.get("copy_trading")
+    if strat and hasattr(strat, "tracked_wallets"):
+        tracked_addrs = {w["address"].lower() for w in strat.tracked_wallets}
+
+    traders = []
+    for t in data[:limit]:
+        addr = t.get("proxyWallet", "")
+        traders.append({
+            "rank": int(t.get("rank", 0)),
+            "address": addr,
+            "name": t.get("userName", addr[:10] + "..."),
+            "pnl": round(t.get("pnl", 0), 2),
+            "volume": round(t.get("vol", 0), 2),
+            "profile_image": t.get("profileImage", ""),
+            "verified": t.get("verifiedBadge", False),
+            "already_tracked": addr.lower() in tracked_addrs,
+            "profile_url": f"https://polymarket.com/profile/{addr}",
+        })
+
+    # AI Engine Score: PnL * activity_factor
+    for t in traders:
+        pnl_score = min(100, max(0, t["pnl"] / 10000))  # $1M = 100 points
+        vol_score = min(100, max(0, t["volume"] / 5000))  # $500K vol = 100 points
+        t["ai_score"] = round((pnl_score * 0.6 + vol_score * 0.4), 1)
+
+    return {"traders": traders, "count": len(traders), "cached": now - _leaderboard_cache["ts"] < 5}
+
+
+_analyze_cache: dict = {}  # wallet -> {data, ts}
+
+
+@app.get("/api/copy/analyze")
+async def api_copy_analyze(wallet: str = "") -> dict:
+    """Deep-Dive Analyse einer Wallet: Trades, Positionen, Kategorien."""
+    import json as _json
+    from urllib.request import urlopen as _urlopen, Request as _Req
+    from collections import Counter
+
+    if not wallet or len(wallet) < 10:
+        return {"error": "wallet address required"}
+
+    # Cache 2 min
+    now = time.time()
+    cached = _analyze_cache.get(wallet)
+    if cached and now - cached["ts"] < 120:
+        return cached["data"]
+
+    result = {"address": wallet, "recent_trades": [], "positions": [], "summary": {}}
+
+    # Fetch activity
+    try:
+        url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=100&type=TRADE"
+        req = _Req(url, headers={"User-Agent": "polymarket-arb/2.0"})
+        with urlopen(req, timeout=10) as resp:
+            trades = _json.loads(resp.read())
+
+        categories = Counter()
+        total_usd = 0
+        for t in trades:
+            title = t.get("title", "")
+            total_usd += t.get("usdcSize", 0)
+            # Simple category detection
+            tl = title.lower()
+            if any(w in tl for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana"]):
+                categories["crypto"] += 1
+            elif any(w in tl for w in ["nba", "nfl", "mlb", "nhl", "soccer", "football", "basketball", "hockey", "tennis"]):
+                categories["sports"] += 1
+            elif any(w in tl for w in ["trump", "biden", "election", "president", "congress"]):
+                categories["politics"] += 1
+            else:
+                categories["other"] += 1
+
+        result["recent_trades"] = [
+            {
+                "timestamp": t.get("timestamp", 0),
+                "side": t.get("side", ""),
+                "outcome": t.get("outcome", ""),
+                "price": t.get("price", 0),
+                "size_usd": round(t.get("usdcSize", 0), 2),
+                "title": t.get("title", "")[:60],
+                "tx_hash": t.get("transactionHash", ""),
+            }
+            for t in trades[:20]
+        ]
+
+        last_ts = trades[0]["timestamp"] if trades else 0
+        age_s = now - last_ts if last_ts > 0 else 999999
+        if age_s < 3600:
+            last_active = f"{int(age_s/60)}m ago"
+        elif age_s < 86400:
+            last_active = f"{int(age_s/3600)}h ago"
+        else:
+            last_active = f"{int(age_s/86400)}d ago"
+
+        result["summary"] = {
+            "total_trades": len(trades),
+            "last_active": last_active,
+            "last_active_ts": last_ts,
+            "categories": dict(categories),
+            "avg_trade_size_usd": round(total_usd / max(1, len(trades)), 2),
+            "buys": sum(1 for t in trades if t.get("side") == "BUY"),
+            "sells": sum(1 for t in trades if t.get("side") == "SELL"),
+        }
+    except Exception as e:
+        result["summary"]["error"] = str(e)
+
+    # Fetch positions
+    try:
+        url2 = f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"
+        req2 = _Req(url2, headers={"User-Agent": "polymarket-arb/2.0"})
+        with urlopen(req2, timeout=10) as resp2:
+            positions = _json.loads(resp2.read())
+
+        active_pos = [p for p in positions if p.get("currentValue", 0) > 0.01]
+        total_value = sum(p.get("currentValue", 0) for p in active_pos)
+        total_invested = sum(p.get("initialValue", 0) for p in active_pos)
+        total_pnl = sum(p.get("cashPnl", 0) for p in active_pos)
+
+        result["positions"] = [
+            {
+                "title": p.get("title", "")[:50],
+                "outcome": p.get("outcome", ""),
+                "size": round(p.get("initialValue", 0), 2),
+                "current_value": round(p.get("currentValue", 0), 2),
+                "pnl": round(p.get("cashPnl", 0), 2),
+                "avg_price": round(p.get("avgPrice", 0), 3),
+            }
+            for p in active_pos[:15]
+        ]
+        result["summary"]["active_positions"] = len(active_pos)
+        result["summary"]["portfolio_value"] = round(total_value, 2)
+        result["summary"]["portfolio_invested"] = round(total_invested, 2)
+        result["summary"]["portfolio_pnl"] = round(total_pnl, 2)
+    except Exception as e:
+        result["summary"]["positions_error"] = str(e)
+
+    _analyze_cache[wallet] = {"data": result, "ts": now}
+    return result
+
+
+@app.post("/api/copy/add-wallet")
+async def api_copy_add_wallet(body: dict) -> dict:
+    """Fügt einen Trader zur Tracking-Liste hinzu."""
+    strat = active_strategies.get("copy_trading")
+    if not strat or not hasattr(strat, "add_wallet"):
+        return {"error": "copy trading strategy not running"}
+
+    wallet = {
+        "address": body.get("address", ""),
+        "name": body.get("name", body.get("address", "")[:10]),
+        "pnl": body.get("pnl", 0),
+        "category": body.get("category", "mixed"),
+        "notes": body.get("notes", "Added via dashboard"),
+    }
+
+    if strat.add_wallet(wallet):
+        return {"status": "added", "wallet": wallet["name"], "total": len(strat.tracked_wallets)}
+    return {"error": "failed (duplicate or invalid address)"}
+
+
+@app.post("/api/copy/remove-wallet")
+async def api_copy_remove_wallet(body: dict) -> dict:
+    """Entfernt einen Trader aus der Tracking-Liste."""
+    strat = active_strategies.get("copy_trading")
+    if not strat or not hasattr(strat, "remove_wallet"):
+        return {"error": "copy trading strategy not running"}
+
+    if strat.remove_wallet(body.get("address", "")):
+        return {"status": "removed", "total": len(strat.tracked_wallets)}
+    return {"error": "wallet not found"}
+
+
+@app.post("/api/copy/pause-wallet")
+async def api_copy_pause_wallet(body: dict) -> dict:
+    """Pausiert einen Trader (keine neuen Copies)."""
+    strat = active_strategies.get("copy_trading")
+    if not strat:
+        return {"error": "copy trading not running"}
+    if strat.pause_wallet(body.get("address", "")):
+        return {"status": "paused"}
+    return {"error": "wallet not found"}
+
+
+@app.post("/api/copy/resume-wallet")
+async def api_copy_resume_wallet(body: dict) -> dict:
+    """Reaktiviert einen pausierten Trader."""
+    strat = active_strategies.get("copy_trading")
+    if not strat:
+        return {"error": "copy trading not running"}
+    if strat.resume_wallet(body.get("address", "")):
+        return {"status": "resumed"}
+    return {"error": "wallet not found or not paused"}
+
+
+@app.post("/api/copy/config")
+async def api_copy_config(body: dict) -> dict:
+    """Aktualisiert Copy Trading Konfiguration zur Laufzeit."""
+    strat = active_strategies.get("copy_trading")
+    if not strat:
+        return {"error": "copy trading not running"}
+
+    updated = {}
+    if "max_copy_size_usd" in body:
+        v = max(1.0, min(100.0, float(body["max_copy_size_usd"])))
+        strat.max_copy_size_usd = v
+        updated["max_copy_size_usd"] = v
+    if "max_concurrent" in body:
+        v = max(1, min(50, int(body["max_concurrent"])))
+        strat.max_concurrent = v
+        updated["max_concurrent"] = v
+    if "poll_interval_s" in body:
+        v = max(1.0, min(60.0, float(body["poll_interval_s"])))
+        strat.poll_interval_s = v
+        updated["poll_interval_s"] = v
+    if "min_copy_price" in body:
+        v = max(0.01, min(0.99, float(body["min_copy_price"])))
+        strat.min_copy_price = v
+        updated["min_copy_price"] = v
+    if "max_copy_price" in body:
+        v = max(0.01, min(0.99, float(body["max_copy_price"])))
+        strat.max_copy_price = v
+        updated["max_copy_price"] = v
+
+    return {"status": "updated", "config": updated}
+
+
 @app.get("/api/backtest/realistic")
 async def api_backtest_realistic() -> dict:
     """Realistische Backtest-Ergebnisse (kalibriert mit echten Polymarket-Daten)."""
