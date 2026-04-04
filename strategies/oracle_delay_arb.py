@@ -109,7 +109,7 @@ class OracleDelayArbStrategy(StrategyBase):
         self.journal = TradeJournal()
 
         # Config
-        self.trade_size_usd = 10.0         # $10 pro Trade (skalierbar)
+        self.trade_size_usd = 5.0          # $5 pro Trade (Daten sammeln, später skalieren)
         self.min_entry_price = 0.95        # Nur kaufen wenn Preis >= 0.95
         self.max_entry_price = 0.995       # Nicht über 0.995 (zu teuer)
         self.delay_after_close_s = 3.0     # 3 Sekunden nach Window-Close warten
@@ -477,7 +477,7 @@ class OracleDelayArbStrategy(StrategyBase):
                 res = await self.executor.place_order(
                     token_id=token_id,
                     side="BUY",
-                    price=min(0.995, ask_price + 0.005),  # Aggressive: ask + 0.5 Cent
+                    price=min(0.99, ask_price),  # Max 0.99 (CLOB Limit!)
                     size_usd=self.trade_size_usd,
                     asset=asset,
                     direction=winner,
@@ -492,8 +492,8 @@ class OracleDelayArbStrategy(StrategyBase):
                 logger.error(f"SNIPE EXCEPTION: {trade_id} — {e}")
 
         # Telegram Alert
-        fee_pct = 1.80 * 4 * ask_price * (1 - ask_price) * 100
-        expected_profit = self.trade_size_usd * (1.0 / ask_price - 1.0) - self.trade_size_usd * fee_pct / 10000
+        fee_pct = 1.80 * 4 * ask_price * (1 - ask_price)  # z.B. 0.99 → 0.07%
+        expected_profit = self.trade_size_usd * (1.0 / ask_price - 1.0) - self.trade_size_usd * fee_pct / 100
         asyncio.create_task(telegram.send_alert(
             f"🎯 <b>ORACLE SNIPE #{self._trade_count}</b>\n"
             f"{'─'*26}\n"
