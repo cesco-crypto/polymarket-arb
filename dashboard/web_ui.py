@@ -26,6 +26,7 @@ from strategies.registry import create_strategy, list_strategies
 import strategies.polymarket_latency  # noqa: F401 — registriert momentum_latency_v2
 import strategies.hmsf_strategy       # noqa: F401 — registriert hmsf_decision_engine
 import strategies.copy_trading        # noqa: F401 — registriert copy_trading
+import strategies.oracle_delay_arb    # noqa: F401 — registriert oracle_delay_arb
 from utils.logger import setup_logger
 
 app = FastAPI(title="Polymarket Latency Arb")

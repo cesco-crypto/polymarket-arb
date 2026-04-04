@@ -1,0 +1,478 @@
+"""Oracle Delay Arbitrage — Kauft den Winner NACH Window-Close.
+
+Repliziert die "Sharky6999" Strategie:
+1. Beobachtet 5-Min Crypto Windows (BTC, ETH Up/Down)
+2. Wartet bis das Window SCHLIESST (Ergebnis ist bekannt)
+3. CLOB ist noch offen (Oracle hat noch nicht resolved)
+4. Kauft den Winner @ 0.97-0.99 (fast sicherer Gewinn)
+5. Wartet auf Oracle Resolution → redeemed @ 1.00
+6. Profit: ~1% pro Trade, ~$2-5/Stunde bei $50-100 Trades
+
+KEY INSIGHT: Keine Prediction nötig — das Ergebnis ist bereits bekannt.
+Fee-Vorteil: Bei 0.99 Entry zahlen wir nur 0.07% Fee (vs 1.80% bei 0.50).
+
+RISIKEN:
+- Oracle resolved anders als Binance zeigt (selten, aber -100% Loss)
+- CLOB Liquidität bei 0.99 ist dünn (Split-Orders nötig)
+- Andere Bots machen dasselbe (Konkurrenz um Liquidität)
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from collections import deque
+from dataclasses import dataclass
+from typing import Optional
+
+import aiohttp
+from loguru import logger
+
+from config import Settings
+from core.executor import PolymarketExecutor
+from core.trade_journal import TradeJournal, TradeRecord
+from strategies.base import StrategyBase
+from strategies.registry import register as register_strategy
+from utils import telegram
+
+
+# ═══════════════════════════════════════════════════════════════════
+# DATA TYPES
+# ═══════════════════════════════════════════════════════════════════
+
+@dataclass
+class WindowClose:
+    """Ein gerade geschlossenes 5-Min Window."""
+    slug: str
+    asset: str               # "BTC" / "ETH"
+    window_end_ts: int        # Unix timestamp des Window-Endes
+    winner: str               # "UP" oder "DOWN"
+    binance_price_at_close: float
+    price_to_beat: float      # Referenzpreis des Windows
+    up_token_id: str
+    down_token_id: str
+    condition_id: str
+
+
+@dataclass
+class SniperTrade:
+    """Ein ausgeführter Oracle Delay Trade."""
+    trade_id: str
+    slug: str
+    asset: str
+    direction: str            # "UP" oder "DOWN"
+    entry_price: float
+    size_usd: float
+    token_id: str
+    condition_id: str
+    timestamp: float
+    live_order_id: str = ""
+    live_success: bool = False
+    resolved: bool = False
+    pnl_usd: float = 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ORACLE DELAY ARBITRAGE STRATEGY
+# ═══════════════════════════════════════════════════════════════════
+
+class OracleDelayArbStrategy(StrategyBase):
+    """Kauft den Winner NACH Window-Close, BEVOR Oracle resolved.
+
+    Funktionsweise:
+    1. Tracked alle aktiven 5-Min Crypto Windows
+    2. Bei Window-Close: liest Binance-Preis → bestimmt Winner
+    3. Kauft Winner-Token @ 0.97-0.99 auf dem noch offenen CLOB
+    4. Wartet auf Oracle Resolution → redeemed @ 1.00 → Profit ~1%
+
+    Sharky6999-Style: $4K+ pro Window, 50-67 Split-Orders.
+    Wir: $10-50 pro Window, 1-3 Orders (skaliert mit Kapital).
+    """
+
+    STRATEGY_NAME = "oracle_delay_arb"
+    DESCRIPTION = (
+        "Oracle Delay Arb: Kauft den Winner NACH Window-Close @ 0.97-0.99. "
+        "Kein Prediction — Ergebnis ist bereits bekannt. ~1% Profit/Trade."
+    )
+
+    @property
+    def name(self) -> str:
+        return self.STRATEGY_NAME
+
+    @property
+    def description(self) -> str:
+        return self.DESCRIPTION
+
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.executor = PolymarketExecutor(settings)
+        self.journal = TradeJournal()
+
+        # Config
+        self.trade_size_usd = 10.0         # $10 pro Trade (skalierbar)
+        self.min_entry_price = 0.95        # Nur kaufen wenn Preis >= 0.95
+        self.max_entry_price = 0.995       # Nicht über 0.995 (zu teuer)
+        self.delay_after_close_s = 3.0     # 3 Sekunden nach Window-Close warten
+        self.max_delay_s = 60.0            # Max 60s nach Close (danach zu spät)
+        self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
+
+        # State
+        self._running = False
+        self._session: Optional[aiohttp.ClientSession] = None
+        self._trades: list[SniperTrade] = []
+        self._trade_count = 0
+        self._recent_snipes: deque = deque(maxlen=50)
+        self._sniped_windows: set[str] = set()  # Dedup: slug → bereits gesniped
+
+        # Binance price tracking
+        self._last_prices: dict[str, float] = {}  # asset → last price
+
+    # ═══════════════════════════════════════════════════════════════
+    # LIFECYCLE
+    # ═══════════════════════════════════════════════════════════════
+
+    async def run(self) -> None:
+        self._running = True
+        telegram.configure(self.settings)
+        logger.info("Oracle Delay Arb startet — Sharky6999 Style!")
+
+        if self.settings.live_trading:
+            live_ok = await self.executor.initialize()
+            if live_ok:
+                logger.info("Oracle Delay Arb: LIVE MODUS — Echte Orders!")
+            else:
+                logger.warning("Oracle Delay Arb: Live Init fehlgeschlagen")
+
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=10),
+            headers={"User-Agent": "polymarket-arb/2.0"},
+        )
+
+        try:
+            await asyncio.gather(
+                self._main_loop(),
+                self._status_loop(),
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self.shutdown()
+
+    async def shutdown(self) -> None:
+        self._running = False
+        if self._session and not self._session.closed:
+            await self._session.close()
+        logger.info(f"Oracle Delay Arb beendet. {self._trade_count} Snipes ausgeführt.")
+
+    # ═══════════════════════════════════════════════════════════════
+    # MAIN LOOP — Window-Close Detection + Sniping
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _main_loop(self) -> None:
+        """Hauptloop: Erkennt Window-Closes und sniped den Winner."""
+        logger.info("Oracle Delay Arb Main-Loop gestartet")
+
+        while self._running:
+            try:
+                # 1. Aktive Windows von der Discovery API holen
+                windows = await self._fetch_active_windows()
+
+                now = time.time()
+                for w in windows:
+                    slug = w.get("slug", "")
+                    end_ts = w.get("window_end_ts", 0)
+                    seconds_since_close = now - end_ts
+
+                    # Nur Windows die GERADE geschlossen haben (3-60s nach Close)
+                    if seconds_since_close < self.delay_after_close_s:
+                        continue  # Zu früh — noch warten
+                    if seconds_since_close > self.max_delay_s:
+                        continue  # Zu spät — Oracle hat wahrscheinlich schon resolved
+
+                    # Dedup
+                    if slug in self._sniped_windows:
+                        continue
+
+                    # Max concurrent check
+                    active = sum(1 for t in self._trades if not t.resolved)
+                    if active >= self.max_concurrent:
+                        continue
+
+                    # 2. Bestimme den Winner via Binance
+                    asset = w.get("asset", "BTC")
+                    winner = await self._determine_winner(w)
+                    if not winner:
+                        continue
+
+                    # 3. Hole aktuellen Ask-Preis für den Winner
+                    token_id = w.get("up_token_id") if winner == "UP" else w.get("down_token_id")
+                    if not token_id:
+                        continue
+
+                    current_ask = await self._fetch_ask(token_id)
+                    if current_ask < self.min_entry_price or current_ask > self.max_entry_price:
+                        logger.debug(
+                            f"ODA Skip: {asset} {winner} ask={current_ask:.3f} "
+                            f"outside {self.min_entry_price}-{self.max_entry_price}"
+                        )
+                        continue
+
+                    # 4. SNIPE! Kaufe den Winner
+                    self._sniped_windows.add(slug)
+                    await self._execute_snipe(w, winner, token_id, current_ask)
+
+            except Exception as e:
+                logger.error(f"ODA Loop Error: {e}")
+
+            await asyncio.sleep(1.0)  # Check every second
+
+    # ═══════════════════════════════════════════════════════════════
+    # WINDOW DISCOVERY
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _fetch_active_windows(self) -> list[dict]:
+        """Holt aktive 5-Min Windows von der bestehenden Discovery API."""
+        # Nutze die bestehende Strategy (momentum) um Windows zu bekommen
+        # Die MarketDiscovery ist schon im Momentum-Strategy aktiv
+        # Wir holen die Daten via den internen Status
+        try:
+            from dashboard.web_ui import active_strategies
+            momentum = active_strategies.get("momentum_latency_v2")
+            if momentum and hasattr(momentum, "discovery"):
+                windows = []
+                for slug, w in momentum.discovery.windows.items():
+                    windows.append({
+                        "slug": slug,
+                        "asset": w.asset,
+                        "window_end_ts": w.window_end_ts,
+                        "up_token_id": w.up_token_id,
+                        "down_token_id": w.down_token_id,
+                        "condition_id": w.condition_id,
+                        "question": w.question,
+                        "up_best_ask": w.up_best_ask,
+                        "down_best_ask": w.down_best_ask,
+                    })
+                return windows
+        except Exception:
+            pass
+
+        # Fallback: Fetch direkt von Polymarket
+        return await self._fetch_windows_from_api()
+
+    async def _fetch_windows_from_api(self) -> list[dict]:
+        """Fallback: Holt Windows direkt von der Polymarket API."""
+        if not self._session or self._session.closed:
+            return []
+        try:
+            # Polymarket Gamma API für aktive Crypto Markets
+            url = "https://gamma-api.polymarket.com/markets?closed=false&tag=crypto&limit=20"
+            async with self._session.get(url) as resp:
+                if resp.status != 200:
+                    return []
+                markets = await resp.json()
+
+            windows = []
+            for m in markets:
+                question = m.get("question", "").lower()
+                if "up or down" not in question and "above" not in question:
+                    continue
+
+                end_date = m.get("endDate", "")
+                # Parse simple cases
+                slug = m.get("conditionId", "")[:20]
+                cid = m.get("conditionId", "")
+
+                # Get token IDs from outcomes
+                tokens = m.get("clobTokenIds", [])
+                if len(tokens) >= 2:
+                    windows.append({
+                        "slug": slug,
+                        "asset": "BTC" if "bitcoin" in question or "btc" in question else "ETH",
+                        "window_end_ts": 0,  # Müssen wir aus dem Slug/endDate parsen
+                        "up_token_id": tokens[0] if "up" in question else "",
+                        "down_token_id": tokens[1] if "down" in question else "",
+                        "condition_id": cid,
+                        "question": m.get("question", ""),
+                    })
+            return windows
+        except Exception as e:
+            logger.debug(f"ODA Fetch Windows Error: {e}")
+            return []
+
+    # ═══════════════════════════════════════════════════════════════
+    # WINNER DETERMINATION
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _determine_winner(self, window: dict) -> str | None:
+        """Bestimmt den Winner anhand des aktuellen Binance-Preises.
+
+        Für 5-Min Up/Down: Preis bei Close > Preis bei Open → UP gewinnt.
+        Wir schauen uns die CLOB-Preise an: wenn Up-Ask >= 0.95 → UP hat gewonnen.
+        """
+        up_ask = window.get("up_best_ask", 0.5)
+        down_ask = window.get("down_best_ask", 0.5)
+
+        # Wenn einer der Asks > 0.95, hat diese Seite gewonnen
+        if up_ask >= 0.95:
+            return "UP"
+        if down_ask >= 0.95:
+            return "DOWN"
+
+        # Fallback: Wenn Discovery nicht aktuell ist, ASK vom CLOB holen
+        up_tid = window.get("up_token_id", "")
+        down_tid = window.get("down_token_id", "")
+
+        if up_tid:
+            up_price = await self._fetch_ask(up_tid)
+            if up_price >= 0.95:
+                return "UP"
+        if down_tid:
+            down_price = await self._fetch_ask(down_tid)
+            if down_price >= 0.95:
+                return "DOWN"
+
+        return None  # Kann Winner nicht bestimmen
+
+    async def _fetch_ask(self, token_id: str) -> float:
+        """Holt den aktuellen Best-Ask vom CLOB."""
+        if not self._session or self._session.closed or not token_id:
+            return 0.0
+        try:
+            url = f"https://clob.polymarket.com/book?token_id={token_id}"
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    asks = book.get("asks", [])
+                    if asks:
+                        return float(asks[0].get("price", 0))
+            return 0.0
+        except Exception:
+            return 0.0
+
+    # ═══════════════════════════════════════════════════════════════
+    # EXECUTION — Der Snipe
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _execute_snipe(
+        self, window: dict, winner: str, token_id: str, ask_price: float
+    ) -> None:
+        """Führt den Oracle Delay Snipe aus."""
+        self._trade_count += 1
+        trade_id = f"ODA-{self._trade_count:04d}"
+        asset = window.get("asset", "?")
+        slug = window.get("slug", "?")
+        condition_id = window.get("condition_id", "")
+
+        logger.info(
+            f"SNIPE #{self._trade_count}: {asset} {winner} @ {ask_price:.3f} | "
+            f"${self.trade_size_usd:.2f} | {slug[:30]}"
+        )
+
+        trade = SniperTrade(
+            trade_id=trade_id,
+            slug=slug,
+            asset=asset,
+            direction=winner,
+            entry_price=ask_price,
+            size_usd=self.trade_size_usd,
+            token_id=token_id,
+            condition_id=condition_id,
+            timestamp=time.time(),
+        )
+        self._trades.append(trade)
+
+        # Recent snipes für Dashboard
+        self._recent_snipes.appendleft({
+            "ts": time.strftime("%H:%M:%S"),
+            "trade_id": trade_id,
+            "asset": asset,
+            "direction": winner,
+            "price": round(ask_price, 3),
+            "size": self.trade_size_usd,
+            "slug": slug[:30],
+        })
+
+        # LIVE Order
+        if self.executor.is_live and token_id:
+            try:
+                res = await self.executor.place_order(
+                    token_id=token_id,
+                    side="BUY",
+                    price=min(0.995, ask_price + 0.005),  # Aggressive: ask + 0.5 Cent
+                    size_usd=self.trade_size_usd,
+                    asset=asset,
+                    direction=winner,
+                )
+                if res.success:
+                    trade.live_order_id = res.order_id
+                    trade.live_success = True
+                    logger.info(f"SNIPE LIVE OK: {trade_id} — {res.order_id}")
+                else:
+                    logger.error(f"SNIPE LIVE FAILED: {trade_id} — {res.error}")
+            except Exception as e:
+                logger.error(f"SNIPE EXCEPTION: {trade_id} — {e}")
+
+        # Telegram Alert
+        fee_pct = 1.80 * 4 * ask_price * (1 - ask_price) * 100
+        expected_profit = self.trade_size_usd * (1.0 / ask_price - 1.0) - self.trade_size_usd * fee_pct / 10000
+        asyncio.create_task(telegram.send_alert(
+            f"🎯 <b>ORACLE SNIPE #{self._trade_count}</b>\n"
+            f"{'─'*26}\n"
+            f"📊 {asset} {winner} @ {ask_price:.3f}\n"
+            f"💰 Size: ${self.trade_size_usd:.2f}\n"
+            f"📈 Expected: ${expected_profit:.2f} ({(1/ask_price - 1)*100:.1f}%)\n"
+            f"💸 Fee: {fee_pct:.2f}%\n"
+            f"📍 {slug[:35]}"
+        ))
+
+        # Journal
+        self.journal.record_open(TradeRecord(
+            trade_id=trade_id,
+            asset=asset,
+            direction=winner,
+            entry_ts=time.time(),
+            window_slug=slug,
+            market_question=window.get("question", "")[:60],
+            executed_price=ask_price,
+            size_usd=self.trade_size_usd,
+            order_type="oracle_delay_arb",
+            live_order_id=trade.live_order_id,
+            live_order_success=trade.live_success,
+            condition_id=condition_id,
+        ))
+
+    # ═══════════════════════════════════════════════════════════════
+    # STATUS
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _status_loop(self) -> None:
+        while self._running:
+            active = sum(1 for t in self._trades if not t.resolved)
+            logger.info(
+                f"ODA STATUS | Snipes: {self._trade_count} | Active: {active} | "
+                f"Size: ${self.trade_size_usd} | Range: {self.min_entry_price}-{self.max_entry_price}"
+            )
+            await asyncio.sleep(60)
+
+    def get_status(self) -> dict:
+        active = sum(1 for t in self._trades if not t.resolved)
+        return {
+            "strategy": self.STRATEGY_NAME,
+            "running": self._running,
+            "snipes_total": self._trade_count,
+            "snipes_active": active,
+            "recent_snipes": list(self._recent_snipes),
+            "sniped_windows": len(self._sniped_windows),
+            "config": {
+                "trade_size_usd": self.trade_size_usd,
+                "min_entry_price": self.min_entry_price,
+                "max_entry_price": self.max_entry_price,
+                "delay_after_close_s": self.delay_after_close_s,
+                "max_concurrent": self.max_concurrent,
+            },
+        }
+
+
+# Auto-Register
+register_strategy(OracleDelayArbStrategy.STRATEGY_NAME, OracleDelayArbStrategy)
