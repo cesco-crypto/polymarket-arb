@@ -435,10 +435,15 @@ class CopyTradingStrategy(StrategyBase):
     # WALLET MANAGEMENT (Dashboard API)
     # ═══════════════════════════════════════════════════════════════
 
+    MAX_TRACKED_WALLETS = 20  # Hard cap — prevents poll loop DoS
+
     def add_wallet(self, wallet: dict) -> bool:
         """Fügt eine Wallet zur Tracking-Liste hinzu (Runtime-only, nicht persistent)."""
         addr = wallet.get("address", "").lower()
-        if not addr or len(addr) != 42:
+        if not addr or len(addr) != 42 or not addr.startswith("0x"):
+            return False
+        if len(self.tracked_wallets) >= self.MAX_TRACKED_WALLETS:
+            logger.warning(f"WALLET ADD REJECTED: max {self.MAX_TRACKED_WALLETS} reached")
             return False
         # Duplikat-Check
         if any(w["address"].lower() == addr for w in self.tracked_wallets):
