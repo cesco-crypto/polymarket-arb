@@ -152,7 +152,7 @@ class CopyTradingStrategy(StrategyBase):
         # Config
         self.poll_interval_s = 5.0         # Poll alle 5 Sekunden
         self.max_copy_size_usd = 5.0       # Fix $5 pro Copy-Trade
-        self.max_concurrent = 5            # Max 5 gleichzeitig (25% von $94 = vertretbar)
+        self.max_concurrent = 10           # Max 10 Markets (bei $5/Trade = $50-$100 max exposure)
         self.min_seconds_to_copy = 5       # Trade muss < 5 Min alt sein
         self.only_buys = False             # BUY + SELL kopieren (SELL = Exit-Signal)
         self.min_copy_price = 0.25         # Nicht unter 25¢ (>75% Verlustchance)

@@ -81,6 +81,13 @@ class PolymarketExecutor:
             self._creds = self._client.create_or_derive_api_creds()
             self._client.set_api_creds(self._creds)
 
+            # USDC.e Allowance setzen (nötig für CLOB Trading)
+            try:
+                self._client.set_allowances()
+                logger.info("Executor: USDC.e Allowance gesetzt für CLOB")
+            except Exception as ae:
+                logger.warning(f"Executor: Allowance setzen fehlgeschlagen (evtl. schon OK): {ae}")
+
             self._ready = True
             logger.info("Executor: LIVE MODE AKTIV — echte Orders werden platziert!")
 
@@ -97,7 +104,7 @@ class PolymarketExecutor:
 
     # --- Minimum Order Constants (Polymarket CLOB) ---
     MIN_ORDER_SIZE_USD = 1.0    # Minimum $1 order
-    MIN_SHARES = 5.0            # Minimum 5 shares for limit orders
+    MIN_SHARES = 1.0            # Minimum 1 share (war 5, aber blockte Hedge-Orders)
     MAX_PRE_SIGN_PRICE_DRIFT = 0.05  # 5% max drift between pre-signed and actual price
 
     def pre_sign_order(self, token_id: str, price: float, size_usd: float) -> None:
