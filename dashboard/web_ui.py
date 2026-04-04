@@ -518,9 +518,16 @@ async def enable_strategy(body: dict) -> dict:
     strat = create_strategy(name, settings)
     active_strategies[name] = strat
     _strategy_tasks[name] = asyncio.create_task(strat.run())
-    strategy = strat  # Immer primär
 
-    logger.info(f"Strategie AKTIVIERT: {name} (einzige aktive)")
+    # Primäre Strategie für Dashboard-Broadcast:
+    # Momentum-Strategien haben Oracle/Discovery Daten → bevorzugt als primär
+    # Copy Trading hat keine Dashboard-Daten → nie als primär setzen
+    MOMENTUM_GROUP_NAMES = {"momentum_latency_v2", "hmsf_decision_engine"}
+    if name in MOMENTUM_GROUP_NAMES or strategy is None:
+        strategy = strat
+    # Wenn Copy Trading aktiviert wird und eine Momentum bereits läuft → primär bleibt Momentum
+
+    logger.info(f"Strategie AKTIVIERT: {name} | Primär für Dashboard: {strategy.name if strategy else '?'}")
     return {"status": "enabled", "strategy": name, "active": list(active_strategies.keys())}
 
 
