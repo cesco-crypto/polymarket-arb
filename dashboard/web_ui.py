@@ -646,22 +646,19 @@ def _enrich_position(p: dict, activity_lookup: dict, copy_lookup: dict | None = 
 @app.get("/api/positions")
 async def api_positions() -> dict:
     """Echte Polymarket Positionen — direkt von der Data API + Activity für Tx-Hashes."""
-    import json
-    from urllib.request import urlopen, Request
+    import asyncio
 
     wallet = settings.polymarket_funder
     if not wallet:
         return {"positions": [], "error": "no wallet configured"}
 
     try:
-        url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"
-        req = Request(url, headers={"User-Agent": "polymarket-arb/2.0"})
-        with urlopen(req, timeout=10) as resp:
-            positions = json.loads(resp.read())
-
-        # Activity Lookup für Transaction Hashes + Copy Source Matching
-        activity = _fetch_activity_lookup(wallet)
-        copy_sources = _fetch_copy_source_lookup()
+        # ASYNC: Alle 3 Fetches parallel (statt sequentiell blocking)
+        positions, activity, copy_sources = await asyncio.gather(
+            _async_fetch_json(f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"),
+            asyncio.to_thread(_fetch_activity_lookup, wallet),
+            asyncio.to_thread(_fetch_copy_source_lookup),
+        )
 
         # Alle Positionen anreichern
         for p in positions:
@@ -1027,20 +1024,16 @@ _leaderboard_cache: dict = {"data": [], "ts": 0}
 @app.get("/api/copy/leaderboard")
 async def api_copy_leaderboard(limit: int = 50) -> dict:
     """Polymarket Top Traders Leaderboard (cached 10 min)."""
-    import json as _json
-    from urllib.request import urlopen as _urlopen, Request as _Req
-
     now = time.time()
     if now - _leaderboard_cache["ts"] < 600 and _leaderboard_cache["data"]:
         data = _leaderboard_cache["data"]
     else:
         try:
             url = f"https://data-api.polymarket.com/v1/leaderboard?limit={min(limit, 100)}"
-            req = _Req(url, headers={"User-Agent": "polymarket-arb/2.0"})
-            with _urlopen(req, timeout=15) as resp:
-                data = _json.loads(resp.read())
-            _leaderboard_cache["data"] = data
-            _leaderboard_cache["ts"] = now
+            data = await _async_fetch_json(url, timeout=15)
+            if data:
+                _leaderboard_cache["data"] = data
+                _leaderboard_cache["ts"] = now
         except Exception as e:
             logger.error(f"Leaderboard fetch error: {e}")
             data = _leaderboard_cache.get("data", [])
@@ -1089,8 +1082,7 @@ _analyze_cache: dict = {}  # wallet -> {data, ts}
 @app.get("/api/copy/analyze")
 async def api_copy_analyze(wallet: str = "") -> dict:
     """Deep-Dive Analyse einer Wallet: Trades, Positionen, Kategorien."""
-    import json as _json
-    from urllib.request import urlopen as _urlopen, Request as _Req
+    import asyncio
     from collections import Counter
 
     if not wallet or len(wallet) < 10:
@@ -1104,12 +1096,17 @@ async def api_copy_analyze(wallet: str = "") -> dict:
 
     result = {"address": wallet, "recent_trades": [], "positions": [], "summary": {}}
 
+    # Fetch activity + positions PARALLEL (async!)
+    activity_url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=100&type=TRADE"
+    positions_url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"
+    trades_raw, positions_raw = await asyncio.gather(
+        _async_fetch_json(activity_url, timeout=10),
+        _async_fetch_json(positions_url, timeout=10),
+    )
+
     # Fetch activity
     try:
-        url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=100&type=TRADE"
-        req = _Req(url, headers={"User-Agent": "polymarket-arb/2.0"})
-        with urlopen(req, timeout=10) as resp:
-            trades = _json.loads(resp.read())
+        trades = trades_raw if isinstance(trades_raw, list) else []
 
         categories = Counter()
         total_usd = 0
@@ -1161,13 +1158,9 @@ async def api_copy_analyze(wallet: str = "") -> dict:
     except Exception as e:
         result["summary"]["error"] = str(e)
 
-    # Fetch positions
+    # Process positions (already fetched in parallel above)
     try:
-        url2 = f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"
-        req2 = _Req(url2, headers={"User-Agent": "polymarket-arb/2.0"})
-        with urlopen(req2, timeout=10) as resp2:
-            positions = _json.loads(resp2.read())
-
+        positions = positions_raw if isinstance(positions_raw, list) else []
         active_pos = [p for p in positions if p.get("currentValue", 0) > 0.01]
         total_value = sum(p.get("currentValue", 0) for p in active_pos)
         total_invested = sum(p.get("initialValue", 0) for p in active_pos)

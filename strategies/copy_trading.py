@@ -201,10 +201,12 @@ class SmartGuards:
         """Prüft ob sich der Preis seit dem Original-Trade zu stark verschlechtert hat."""
         if original_price <= 0 or current_ask <= 0:
             return True, "no price data"
-        drift_pct = abs(current_ask - original_price) / original_price * 100
+        # Nur GEGEN uns (Preis gestiegen = schlechter für BUY) blocken
+        # Preis gefallen = besser für uns → NICHT blocken
+        drift_pct = (current_ask - original_price) / original_price * 100
         if drift_pct > self.max_slippage_pct:
-            return False, f"Slippage {drift_pct:.1f}% > {self.max_slippage_pct}% (orig: {original_price:.3f}, now: {current_ask:.3f})"
-        return True, f"Slippage OK ({drift_pct:.1f}%)"
+            return False, f"Slippage +{drift_pct:.1f}% > {self.max_slippage_pct}% (orig: {original_price:.3f}, now: {current_ask:.3f})"
+        return True, f"Slippage OK ({drift_pct:+.1f}%)"
 
     def check_liquidity(self, trade: dict) -> tuple[bool, str]:
         """Prüft ob der Market genug Liquidität hat für unseren Copy-Trade."""
@@ -1203,17 +1205,23 @@ class CopyTradingStrategy(StrategyBase):
             return 0.0
 
     def _compute_wallet_win_rate(self, wallet_name: str) -> float:
-        """Berechnet echte Win-Rate eines Traders aus unseren Journal-Daten."""
+        """Berechnet echte Win-Rate mit Bayesian Prior.
+
+        Verwendet Beta(3,3) Prior (= 50% Erwartung) + beobachtete Daten.
+        Auch pnl_usd=0 (unresolved/unknown) wird als neutral behandelt, nicht als Verlust.
+        """
         wins = 0
-        total = 0
+        losses = 0
         for p in self._copied_positions:
             if p.source_name == wallet_name and p.resolved:
-                total += 1
                 if p.pnl_usd > 0:
                     wins += 1
-        if total < 5:
-            return 0.50  # Nicht genug Daten → konservativ 50%
-        return round(wins / total, 3)
+                elif p.pnl_usd < 0:
+                    losses += 1
+                # pnl_usd == 0 → unbekannt, ignorieren
+        # Bayesian: Beta(prior_a + wins, prior_b + losses)
+        prior_a, prior_b = 3.0, 3.0  # Prior: 50% mit Konfidenz von ~6 Pseudobeobachtungen
+        return round((prior_a + wins) / (prior_a + prior_b + wins + losses), 3)
 
     # ═══════════════════════════════════════════════════════════════
     # STATUS
