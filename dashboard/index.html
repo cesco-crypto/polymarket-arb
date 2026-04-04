@@ -203,6 +203,12 @@
       <tr><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Now @</th><th class="r">Size</th><th class="r">Value</th><th class="r">PnL</th><th>Status</th></tr>
     </table>
     <table id="pos-body"><tr><td colspan="8" class="empty">Loading positions...</td></tr></table>
+    <div style="margin-top:10px">
+      <div style="font-size:10px;color:var(--text-mid);margin-bottom:6px;font-weight:600">LIVE CHARTS — Offene Positionen</div>
+      <div id="position-embeds" style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;min-height:40px;align-items:center">
+        <span class="d" style="font-size:10px">Lade Positionen...</span>
+      </div>
+    </div>
   </div>
   <div id="tab-history" class="tab-panel">
     <div id="hist-summary" style="margin-bottom:6px">
@@ -562,14 +568,20 @@ function switchTab(btn, tab) {
     const pb = id('pos-body');
     if (!_livePositions.length) {
       pb.innerHTML = '<tr><td colspan="8" class="empty">No open positions (all redeemed)</td></tr>';
+      // Embeds leeren
+      const ec = document.getElementById('position-embeds');
+      if (ec) ec.innerHTML = '<span class="d" style="font-size:10px">Keine offenen Positionen</span>';
       return;
     }
+
+    // Tabelle
     pb.innerHTML = _livePositions.map(p => {
       const won = p.curPrice === 1;
       const lost = p.curPrice === 0;
       const pnlC = p.cashPnl >= 0 ? 'g' : 'rd';
       const status = p.redeemable ? (won ? '<span class="g b">REDEEMABLE</span>' : '<span class="rd">LOST</span>') : '<span class="y">OPEN</span>';
       const title = (p.title || '').substring(0, 35);
+      const slug = p.eventSlug || p.slug || '';
       return `<tr>
         <td style="font-size:10px">${title}</td>
         <td><span class="tag ${p.outcome==='Up'?'tag-up':'tag-dn'}">${p.outcome}</span></td>
@@ -578,9 +590,45 @@ function switchTab(btn, tab) {
         <td class="r">$${(p.initialValue||0).toFixed(2)}</td>
         <td class="r b">$${(p.currentValue||0).toFixed(2)}</td>
         <td class="r ${pnlC} b">$${(p.cashPnl||0)>=0?'+':''}${(p.cashPnl||0).toFixed(2)}</td>
-        <td>${status}</td>
+        <td>${status} ${slug ? '<a href="https://polymarket.com/event/'+slug+'" target="_blank" style="color:var(--accent);font-size:8px;text-decoration:none">↗</a>' : ''}</td>
       </tr>`;
     }).join('');
+
+    // Embeds für offene Positionen (nicht resolved)
+    const openPositions = _livePositions.filter(p => !p.redeemable && p.currentValue > 0);
+    const ec = document.getElementById('position-embeds');
+    if (!ec) return;
+
+    // Nur rebuilden wenn sich die Positionen geändert haben
+    const embedKey = openPositions.map(p => p.eventSlug || '').join(',');
+    if (ec.dataset.lastKey === embedKey) return;
+    ec.dataset.lastKey = embedKey;
+
+    if (!openPositions.length) {
+      ec.innerHTML = '<span class="d" style="font-size:10px">Keine offenen Positionen zum Anzeigen</span>';
+      return;
+    }
+
+    ec.innerHTML = openPositions.slice(0, 6).map(p => {
+      const slug = p.eventSlug || p.slug || '';
+      if (!slug) return '';
+      const pnlC = p.cashPnl >= 0 ? 'var(--green)' : 'var(--red)';
+      const pnlStr = (p.cashPnl||0) >= 0 ? '+' : '';
+      const embedUrl = 'https://embed.polymarket.com/market?market=' + slug + '&theme=dark&liveactivity=true&border=true&height=260';
+      return '<div style="flex:0 0 auto;min-width:300px;max-width:360px;background:var(--bg-card);border:2px solid ' + pnlC + ';border-radius:6px;overflow:hidden">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;border-bottom:1px solid var(--border)">' +
+          '<div style="display:flex;align-items:center;gap:6px">' +
+            '<span class="tag" style="font-size:8px;background:var(--accent)">' + (p.outcome||'?') + '</span>' +
+            '<span style="font-size:9px;color:var(--text-mid)">' + (p.title||'').substring(0,25) + '</span>' +
+          '</div>' +
+          '<div style="display:flex;align-items:center;gap:6px">' +
+            '<span style="font-size:10px;color:' + pnlC + ';font-weight:600">' + pnlStr + '$' + (p.cashPnl||0).toFixed(2) + '</span>' +
+            '<a href="https://polymarket.com/event/' + slug + '" target="_blank" style="color:var(--accent);font-size:9px;text-decoration:none">↗</a>' +
+          '</div>' +
+        '</div>' +
+        '<iframe src="' + embedUrl + '" width="100%" height="260" frameborder="0" allowtransparency="true" style="display:block;background:var(--bg)"></iframe>' +
+      '</div>';
+    }).filter(Boolean).join('');
   }
 
   function renderLiveHistory(data) {
