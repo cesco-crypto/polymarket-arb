@@ -169,26 +169,57 @@ class OracleDelayArbStrategy(StrategyBase):
     # MAIN LOOP — Window-Close Detection + Sniping
     # ═══════════════════════════════════════════════════════════════
 
+    def _compute_next_window_closes(self) -> list[dict]:
+        """Berechnet die nächsten Window-Close-Zeiten (5-Min Intervall).
+
+        Polymarket 5-Min Windows starten alle 5 Minuten (aligned to epoch).
+        Window start = floor(time / 300) * 300
+        Window end = start + 300
+        """
+        now = time.time()
+        interval = 300  # 5 Minuten
+        results = []
+
+        # Letzte 3 abgelaufene Windows + nächste 2 kommende
+        base_ts = int(now // interval) * interval
+        for offset in range(-3, 2):
+            start_ts = base_ts + offset * interval
+            end_ts = start_ts + interval
+            seconds_since_close = now - end_ts
+
+            for asset in ["btc", "eth"]:
+                slug = f"{asset}-updown-5m-{start_ts}"
+                results.append({
+                    "slug": slug,
+                    "asset": asset.upper(),
+                    "window_start_ts": start_ts,
+                    "window_end_ts": end_ts,
+                    "seconds_since_close": seconds_since_close,
+                })
+        return results
+
     async def _main_loop(self) -> None:
-        """Hauptloop: Erkennt Window-Closes und sniped den Winner."""
+        """Hauptloop: Erkennt Window-Closes und sniped den Winner.
+
+        Berechnet Window-End-Zeiten SELBST (nicht von Discovery abhängig).
+        Alle 5 Minuten gibt es ein neues Window das schliesst.
+        """
         logger.info("Oracle Delay Arb Main-Loop gestartet")
 
         while self._running:
             try:
-                # 1. Aktive Windows von der Discovery API holen
-                windows = await self._fetch_active_windows()
-
+                windows = self._compute_next_window_closes()
                 now = time.time()
+
                 for w in windows:
-                    slug = w.get("slug", "")
-                    end_ts = w.get("window_end_ts", 0)
-                    seconds_since_close = now - end_ts
+                    slug = w["slug"]
+                    seconds_since_close = w["seconds_since_close"]
 
                     # Nur Windows die GERADE geschlossen haben (3-60s nach Close)
                     if seconds_since_close < self.delay_after_close_s:
-                        continue  # Zu früh — noch warten
+                        continue  # Zu früh
                     if seconds_since_close > self.max_delay_s:
-                        continue  # Zu spät — Oracle hat wahrscheinlich schon resolved
+                        continue  # Zu spät
 
                     # Dedup
                     if slug in self._sniped_windows:
@@ -199,37 +230,84 @@ class OracleDelayArbStrategy(StrategyBase):
                     if active >= self.max_concurrent:
                         continue
 
-                    # 2. Bestimme den Winner via Binance
-                    asset = w.get("asset", "BTC")
-                    winner = await self._determine_winner(w)
-                    if not winner:
+                    asset = w["asset"]
+
+                    # Hole Market-Daten von der Momentum-Discovery
+                    token_ids = await self._get_token_ids(slug, asset)
+                    if not token_ids:
                         continue
 
-                    # 3. Hole aktuellen Ask-Preis für den Winner
-                    token_id = w.get("up_token_id") if winner == "UP" else w.get("down_token_id")
-                    if not token_id:
-                        continue
+                    up_tid, down_tid, condition_id = token_ids
 
-                    current_ask = await self._fetch_ask(token_id)
-                    if current_ask < self.min_entry_price or current_ask > self.max_entry_price:
+                    # 2. Bestimme den Winner: Welcher Ask ist >= 0.95?
+                    up_ask = await self._fetch_ask(up_tid) if up_tid else 0
+                    down_ask = await self._fetch_ask(down_tid) if down_tid else 0
+
+                    winner = None
+                    winner_ask = 0
+                    winner_tid = ""
+
+                    if up_ask >= self.min_entry_price:
+                        winner = "UP"
+                        winner_ask = up_ask
+                        winner_tid = up_tid
+                    elif down_ask >= self.min_entry_price:
+                        winner = "DOWN"
+                        winner_ask = down_ask
+                        winner_tid = down_tid
+                    else:
                         logger.debug(
-                            f"ODA Skip: {asset} {winner} ask={current_ask:.3f} "
-                            f"outside {self.min_entry_price}-{self.max_entry_price}"
+                            f"ODA Skip: {asset} {slug[-15:]} — asks too low "
+                            f"(up={up_ask:.3f}, dn={down_ask:.3f}) < {self.min_entry_price}"
                         )
+                        self._sniped_windows.add(slug)  # Don't retry
                         continue
 
-                    # 4. SNIPE! Kaufe den Winner
+                    if winner_ask > self.max_entry_price:
+                        logger.debug(f"ODA Skip: {asset} {winner} ask={winner_ask:.3f} > {self.max_entry_price}")
+                        self._sniped_windows.add(slug)
+                        continue
+
+                    # 3. SNIPE! Kaufe den Winner
                     self._sniped_windows.add(slug)
-                    await self._execute_snipe(w, winner, token_id, current_ask)
+                    window_data = {
+                        "slug": slug,
+                        "asset": asset,
+                        "question": f"{asset} Up or Down 5m",
+                        "condition_id": condition_id,
+                        "up_token_id": up_tid,
+                        "down_token_id": down_tid,
+                    }
+                    await self._execute_snipe(window_data, winner, winner_tid, winner_ask)
 
             except Exception as e:
                 logger.error(f"ODA Loop Error: {e}")
 
-            await asyncio.sleep(1.0)  # Check every second
+            await asyncio.sleep(2.0)  # Check every 2 seconds
 
     # ═══════════════════════════════════════════════════════════════
     # WINDOW DISCOVERY
     # ═══════════════════════════════════════════════════════════════
+
+    async def _get_token_ids(self, slug: str, asset: str) -> tuple | None:
+        """Holt Token-IDs für ein Window von der laufenden Momentum-Discovery."""
+        try:
+            from dashboard.web_ui import active_strategies
+            momentum = active_strategies.get("momentum_latency_v2")
+            if momentum and hasattr(momentum, "discovery"):
+                # Exact slug match
+                w = momentum.discovery.windows.get(slug)
+                if w:
+                    return (w.up_token_id, w.down_token_id, w.condition_id)
+
+                # Fuzzy match: gleicher Asset + ähnlicher Timestamp
+                for s, w in momentum.discovery.windows.items():
+                    if w.asset.upper() == asset and abs(w.window_end_ts - int(slug.split("-")[-1]) - 300) < 30:
+                        return (w.up_token_id, w.down_token_id, w.condition_id)
+        except Exception as e:
+            logger.debug(f"ODA get_token_ids error: {e}")
+
+        return None
 
     async def _fetch_active_windows(self) -> list[dict]:
         """Holt aktive 5-Min Windows von der bestehenden Discovery API."""
