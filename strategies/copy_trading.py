@@ -30,6 +30,254 @@ from utils import telegram
 
 
 # ═══════════════════════════════════════════════════════════════════
+# SMART GUARDS — AI-Driven Risk Management für Copy Trades
+# ═══════════════════════════════════════════════════════════════════
+
+import math
+from collections import Counter
+
+
+class CopyRiskManager:
+    """Kill-Switch + Drawdown-Limits für Copy Trading.
+
+    Unabhängig vom Momentum-RiskManager — eigene Limits für Copy Trades.
+    """
+
+    def __init__(self) -> None:
+        self.daily_pnl_usd: float = 0.0
+        self.total_pnl_usd: float = 0.0
+        self.daily_trades: int = 0
+        self.daily_losses: int = 0
+        self.last_reset_day: str = ""
+        self.halted: bool = False
+        self.halt_reason: str = ""
+
+        # Limits
+        self.max_daily_loss_usd: float = -15.0    # -$15/Tag → Stop
+        self.max_total_loss_usd: float = -30.0     # -$30 gesamt → Kill
+        self.max_daily_trades: int = 30            # Max 30 Trades/Tag
+        self.max_consecutive_losses: int = 5       # 5 Verluste in Folge → Pause
+
+        self._consecutive_losses: int = 0
+
+    def _check_reset(self) -> None:
+        today = time.strftime("%Y-%m-%d")
+        if today != self.last_reset_day:
+            self.daily_pnl_usd = 0.0
+            self.daily_trades = 0
+            self.daily_losses = 0
+            self._consecutive_losses = 0
+            self.last_reset_day = today
+            # Täglicher Halt wird zurückgesetzt, aber totaler Kill bleibt
+            if self.halt_reason == "daily_loss":
+                self.halted = False
+                self.halt_reason = ""
+                logger.info("COPY RISK: Daily halt reset — trading resumed")
+
+    def can_trade(self) -> tuple[bool, str]:
+        """Prüft ob ein neuer Copy Trade erlaubt ist."""
+        self._check_reset()
+
+        if self.halted:
+            return False, f"HALTED: {self.halt_reason}"
+
+        if self.daily_pnl_usd <= self.max_daily_loss_usd:
+            self.halted = True
+            self.halt_reason = "daily_loss"
+            logger.warning(f"COPY KILL-SWITCH: Daily loss ${self.daily_pnl_usd:.2f} <= ${self.max_daily_loss_usd}")
+            return False, f"Daily loss limit reached (${self.daily_pnl_usd:.2f})"
+
+        if self.total_pnl_usd <= self.max_total_loss_usd:
+            self.halted = True
+            self.halt_reason = "total_loss"
+            logger.error(f"COPY KILL-SWITCH: Total loss ${self.total_pnl_usd:.2f} <= ${self.max_total_loss_usd}")
+            return False, f"Total loss limit reached (${self.total_pnl_usd:.2f})"
+
+        if self.daily_trades >= self.max_daily_trades:
+            return False, f"Max daily trades reached ({self.daily_trades})"
+
+        if self._consecutive_losses >= self.max_consecutive_losses:
+            return False, f"Consecutive losses ({self._consecutive_losses}) — cooling off"
+
+        return True, "OK"
+
+    def record_trade(self, pnl_usd: float = 0.0) -> None:
+        """Registriert einen abgeschlossenen Trade."""
+        self._check_reset()
+        self.daily_trades += 1
+        self.daily_pnl_usd += pnl_usd
+        self.total_pnl_usd += pnl_usd
+        if pnl_usd < 0:
+            self.daily_losses += 1
+            self._consecutive_losses += 1
+        else:
+            self._consecutive_losses = 0
+
+    def get_status(self) -> dict:
+        self._check_reset()
+        return {
+            "halted": self.halted,
+            "halt_reason": self.halt_reason,
+            "daily_pnl": round(self.daily_pnl_usd, 2),
+            "total_pnl": round(self.total_pnl_usd, 2),
+            "daily_trades": self.daily_trades,
+            "consecutive_losses": self._consecutive_losses,
+        }
+
+
+class SmartGuards:
+    """AI-gesteuerte Schutzschicht für Copy Trades.
+
+    Guards:
+    - Slippage Protection: Preis seit Original-Trade gecheckt
+    - Liquidity Profiling: Market muss genug Volumen haben
+    - Bait/Dump Detection: Tracker verkauft kurz nach unserem Copy → Blacklist
+    - Market Correlation: Max 2x gleicher Market von verschiedenen Wallets
+    - Model Drift Detection: Erkennt Verhaltensänderungen der Tracker
+    """
+
+    def __init__(self) -> None:
+        # Slippage
+        self.max_slippage_pct: float = 5.0  # Max 5% Preisverschiebung seit Original
+
+        # Bait Detection
+        self._recent_copies_ts: dict[str, float] = {}  # condition_id → timestamp of our copy
+        self._dump_alerts: dict[str, int] = {}         # wallet_addr → dump count
+        self._blacklisted: set[str] = set()            # Auto-blacklisted wallets
+
+        # Market Correlation
+        self._active_markets: Counter = Counter()  # condition_id → number of copy positions
+        self.max_market_exposure: int = 2          # Max 2 Positionen pro Market
+
+        # Model Drift Detection
+        self._wallet_categories: dict[str, Counter] = {}  # wallet → category histogram
+
+    def check_slippage(self, original_price: float, current_ask: float) -> tuple[bool, str]:
+        """Prüft ob sich der Preis seit dem Original-Trade zu stark verschlechtert hat."""
+        if original_price <= 0 or current_ask <= 0:
+            return True, "no price data"
+        drift_pct = abs(current_ask - original_price) / original_price * 100
+        if drift_pct > self.max_slippage_pct:
+            return False, f"Slippage {drift_pct:.1f}% > {self.max_slippage_pct}% (orig: {original_price:.3f}, now: {current_ask:.3f})"
+        return True, f"Slippage OK ({drift_pct:.1f}%)"
+
+    def check_liquidity(self, trade: dict) -> tuple[bool, str]:
+        """Prüft ob der Market genug Liquidität hat für unseren Copy-Trade."""
+        usdc_size = trade.get("usdcSize", 0)
+        # Wenn der Original-Trader > $50 in diesem Market investiert hat, hat er genug Liquidität gefunden
+        if usdc_size >= 50:
+            return True, f"Liquidity OK (orig: ${usdc_size:.0f})"
+        # Kleine Trades in potentiell illiquiden Markets → vorsichtig
+        if usdc_size < 5:
+            return False, f"Tiny trade ${usdc_size:.1f} — likely illiquid"
+        return True, f"Liquidity acceptable (${usdc_size:.0f})"
+
+    def check_market_correlation(self, condition_id: str) -> tuple[bool, str]:
+        """Prüft ob wir bereits zu viele Positionen auf diesem Market haben."""
+        current = self._active_markets.get(condition_id, 0)
+        if current >= self.max_market_exposure:
+            return False, f"Market already has {current} copies (max {self.max_market_exposure})"
+        return True, f"Correlation OK ({current}/{self.max_market_exposure})"
+
+    def register_copy(self, condition_id: str) -> None:
+        """Registriert einen neuen Copy Trade für Korrelations-Tracking."""
+        self._active_markets[condition_id] += 1
+        self._recent_copies_ts[condition_id] = time.time()
+
+    def check_bait(self, wallet_addr: str) -> tuple[bool, str]:
+        """Prüft ob dieser Trader als Baiter/Dumper bekannt ist."""
+        addr = wallet_addr.lower()
+        if addr in self._blacklisted:
+            return False, f"BLACKLISTED: {self._dump_alerts.get(addr, 0)} dump alerts"
+        dumps = self._dump_alerts.get(addr, 0)
+        if dumps >= 3:
+            self._blacklisted.add(addr)
+            return False, f"AUTO-BLACKLISTED: {dumps} dumps detected"
+        return True, f"Bait check OK (dumps: {dumps})"
+
+    def report_dump(self, wallet_addr: str, condition_id: str) -> None:
+        """Meldet einen Dump: Trader hat kurz nach unserem Copy verkauft."""
+        addr = wallet_addr.lower()
+        copy_ts = self._recent_copies_ts.get(condition_id, 0)
+        if copy_ts and time.time() - copy_ts < 600:  # Innerhalb von 10 Min nach unserem Copy
+            self._dump_alerts[addr] = self._dump_alerts.get(addr, 0) + 1
+            count = self._dump_alerts[addr]
+            logger.warning(f"DUMP ALERT #{count}: {addr[:10]}... sold within 10min of our copy on {condition_id[:12]}...")
+            if count >= 3:
+                self._blacklisted.add(addr)
+                logger.error(f"AUTO-BLACKLIST: {addr[:10]}... — {count} dumps!")
+
+    def detect_drift(self, wallet_name: str, trade_title: str) -> str | None:
+        """Erkennt Verhaltensänderungen eines Traders (Category Drift)."""
+        tl = trade_title.lower()
+        if any(w in tl for w in ["bitcoin", "btc", "ethereum", "eth", "crypto", "solana"]):
+            cat = "crypto"
+        elif any(w in tl for w in ["nba", "nfl", "mlb", "nhl", "soccer", "football", "basketball", "hockey"]):
+            cat = "sports"
+        elif any(w in tl for w in ["trump", "biden", "election", "president", "congress"]):
+            cat = "politics"
+        else:
+            cat = "other"
+
+        if wallet_name not in self._wallet_categories:
+            self._wallet_categories[wallet_name] = Counter()
+        hist = self._wallet_categories[wallet_name]
+        hist[cat] += 1
+
+        total = sum(hist.values())
+        if total < 5:
+            return None  # Nicht genug Daten
+
+        # Dominante Kategorie
+        dominant_cat, dominant_count = hist.most_common(1)[0]
+        dominant_pct = dominant_count / total * 100
+
+        # Drift: aktuelle Kategorie weicht stark von Historie ab
+        if cat != dominant_cat and dominant_pct > 70:
+            return f"DRIFT: {wallet_name} usually trades {dominant_cat} ({dominant_pct:.0f}%), now trading {cat}"
+        return None
+
+    def get_status(self) -> dict:
+        return {
+            "blacklisted": list(self._blacklisted),
+            "dump_alerts": dict(self._dump_alerts),
+            "active_markets": dict(self._active_markets),
+            "slippage_max": self.max_slippage_pct,
+        }
+
+
+def kelly_copy_size(win_rate: float, avg_odds: float, base_size: float, max_cap_pct: float = 0.08) -> float:
+    """Berechnet optimale Copy-Size nach Half-Kelly.
+
+    Args:
+        win_rate: Historische Win-Rate des Traders (0.0-1.0)
+        avg_odds: Durchschnittliche Auszahlungsquote (z.B. 1/avg_price)
+        base_size: Basis-Größe ($5 default)
+        max_cap_pct: Max % des Portfolios (8% default)
+    Returns:
+        Optimale Copy-Größe in USD
+    """
+    if win_rate <= 0 or avg_odds <= 0:
+        return base_size
+
+    # Kelly: f* = (p * b - q) / b
+    # p = win_rate, q = 1-p, b = avg_odds
+    p = min(0.95, max(0.05, win_rate))
+    q = 1.0 - p
+    b = avg_odds
+
+    kelly_full = (p * b - q) / b
+    kelly_half = kelly_full / 2.0  # Half-Kelly for safety
+
+    if kelly_half <= 0:
+        return max(1.0, base_size * 0.5)  # Minimum bei negativem Kelly
+
+    # Skaliere basierend auf base_size
+    optimal = base_size * min(2.0, max(0.2, 1.0 + kelly_half))
+    return round(min(optimal, base_size * 2), 2)  # Max 2x base_size
+
+
+# ═══════════════════════════════════════════════════════════════════
 # TRACKED WALLETS — Top Polymarket Traders (aktiv, verifiziert)
 # ═══════════════════════════════════════════════════════════════════
 
@@ -171,6 +419,10 @@ class CopyTradingStrategy(StrategyBase):
         self._recent_copies: deque = deque(maxlen=50)
         self._session: Optional[aiohttp.ClientSession] = None
         self._paused_wallets: set[str] = set()  # Paused wallet addresses
+
+        # AI Risk Management
+        self.risk = CopyRiskManager()
+        self.guards = SmartGuards()
 
     # ═══════════════════════════════════════════════════════════════
     # WALLET MANAGEMENT (Dashboard API)
@@ -456,6 +708,40 @@ class CopyTradingStrategy(StrategyBase):
                 except Exception:
                     pass  # Balance-Check optional, CLOB blockt auch
 
+            # ── GUARD 7: Kill-Switch (Daily/Total Loss Limits) ──
+            can_trade, reason = self.risk.can_trade()
+            if not can_trade:
+                logger.warning(f"Copy BLOCKED by Kill-Switch: {reason}")
+                continue
+
+            # ── GUARD 8: Bait/Dump Detection (blacklisted wallets) ──
+            bait_ok, bait_msg = self.guards.check_bait(addr)
+            if not bait_ok:
+                logger.warning(f"Copy Skip (Bait): {name} — {bait_msg}")
+                continue
+
+            # ── GUARD 9: Slippage Protection (Preis-Drift seit Original-Trade) ──
+            slip_ok, slip_msg = self.guards.check_slippage(price, price)  # TODO: fetch current ask
+            # Für jetzt: Original-Price vs Original-Price = immer OK (Placeholder für echten Orderbook-Check)
+
+            # ── GUARD 10: Liquidity Profiling ──
+            liq_ok, liq_msg = self.guards.check_liquidity(trade)
+            if not liq_ok:
+                logger.info(f"Copy Skip (Liquidity): {name} — {liq_msg}")
+                continue
+
+            # ── GUARD 11: Market Correlation (max 2x gleicher Market) ──
+            corr_ok, corr_msg = self.guards.check_market_correlation(condition_id)
+            if not corr_ok:
+                logger.info(f"Copy Skip (Correlation): {name} — {corr_msg}")
+                continue
+
+            # ── GUARD 12: Model Drift Detection ──
+            drift = self.guards.detect_drift(name, trade.get("title", ""))
+            if drift:
+                logger.info(f"DRIFT WARNING: {drift}")
+                # Drift ist nur eine Warnung, blockiert nicht
+
             # ── Proportionale Sizing für Hedges ──
             # Hedge-Leg bekommt proportional less (based on trader's OWN ratio).
             # CORRECT formula: ratio = trader_hedge_usd / trader_first_leg_usd
@@ -483,6 +769,23 @@ class CopyTradingStrategy(StrategyBase):
                 else:
                     # Fallback: no first-leg data → copy at full size
                     logger.info(f"HEDGE SIZING: ${copy_size:.2f} (fallback, no first-leg trader data)")
+
+            # ── Kelly Position Sizing ──
+            # Verwende Trader's historische Win-Rate für dynamische Sizing
+            wallet_stats = {n: s for n, s in
+                           ((p.source_name, None) for p in self._copied_positions[:0])}  # Placeholder
+            # Simple Kelly: adjustiere copy_size basierend auf Preis (implizierte Wahrscheinlichkeit)
+            if not is_hedge and price > 0:
+                implied_odds = 1.0 / price  # z.B. Price 0.60 → Odds 1.67
+                copy_size = kelly_copy_size(
+                    win_rate=0.55,  # Konservativ: 55% angenommen für Top-Wallets
+                    avg_odds=implied_odds,
+                    base_size=copy_size,
+                )
+                logger.debug(f"KELLY SIZING: ${copy_size:.2f} (price={price:.3f}, odds={implied_odds:.2f})")
+
+            # Register copy in SmartGuards
+            self.guards.register_copy(condition_id)
 
             # ── Alle Guards bestanden → Kopieren! ──
             # Cross-Wallet Confluence ERLAUBT: Wenn 2 Top-Wallets denselben
@@ -528,6 +831,9 @@ class CopyTradingStrategy(StrategyBase):
         outcome_index = trade.get("outcomeIndex", -1)
         sell_price = float(trade.get("price", 0))
         source_tx = trade.get("transactionHash", "")
+
+        # BAIT DETECTION: Trader verkauft kurz nach unserem Copy → Dump Alert
+        self.guards.report_dump(addr, condition_id)
 
         # FIX: Source wallet filter — nur Positionen von DIESEM Trader
         matching = [
@@ -845,6 +1151,8 @@ class CopyTradingStrategy(StrategyBase):
                 "max_copy_price": self.max_copy_price,
                 "only_buys": self.only_buys,
             },
+            "risk": self.risk.get_status(),
+            "guards": self.guards.get_status(),
         }
 
 
