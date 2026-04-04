@@ -203,6 +203,17 @@
       <tr><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Now @</th><th class="r">Size</th><th class="r">Value</th><th class="r">PnL</th><th>Status</th></tr>
     </table>
     <table id="pos-body"><tr><td colspan="8" class="empty">Loading positions...</td></tr></table>
+    <div id="redeem-panel" style="margin-top:8px;padding:8px 10px;background:var(--bg-card2);border:1px solid var(--border);border-radius:6px;display:none">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <div>
+          <span style="font-size:10px;color:var(--green);font-weight:600">REDEEMABLE</span>
+          <span id="redeem-count" class="d" style="font-size:10px;margin-left:6px">0</span>
+          <span id="redeem-value" class="g b" style="font-size:13px;margin-left:10px">$0.00</span>
+        </div>
+        <button onclick="manualRedeem()" style="background:var(--green);color:#000;border:none;padding:5px 14px;border-radius:4px;font-family:var(--font);font-size:10px;font-weight:600;cursor:pointer">REDEEM NOW</button>
+      </div>
+      <div id="redeem-list" style="margin-top:4px;font-size:9px;color:var(--text-dim)"></div>
+    </div>
     <div style="margin-top:10px">
       <div style="font-size:10px;color:var(--text-mid);margin-bottom:6px;font-weight:600">LIVE CHARTS — Offene Positionen</div>
       <div id="position-embeds" style="display:flex;gap:10px;overflow-x:auto;padding-bottom:4px;min-height:40px;align-items:center">
@@ -713,6 +724,40 @@ function switchTab(btn, tab) {
   // Fetch live data every 30 seconds
   fetchLiveData();
   setInterval(fetchLiveData, 30000);
+
+  // Redeemable Check
+  async function checkRedeemable() {
+    try {
+      const r = await fetch('/api/redeemable');
+      const d = await r.json();
+      const panel = id('redeem-panel');
+      if (d.count > 0) {
+        panel.style.display = 'block';
+        id('redeem-count').textContent = d.count + ' Position' + (d.count > 1 ? 'en' : '');
+        id('redeem-value').textContent = '$' + d.total_usd.toFixed(2);
+        id('redeem-list').innerHTML = d.redeemable.map(p =>
+          p.title + ' (' + p.outcome + ') — $' + p.value.toFixed(2)
+        ).join(' · ');
+      } else {
+        panel.style.display = 'none';
+      }
+    } catch(e) {}
+  }
+  async function manualRedeem() {
+    if (!confirm('Alle redeembaren Positionen jetzt einlösen?')) return;
+    try {
+      const r = await fetch('/api/redeem', {method:'POST'});
+      const d = await r.json();
+      if (d.status === 'ok') {
+        alert('Redeemed: ' + d.redeemed + ' Positionen ($' + (d.value_usd||0).toFixed(2) + ')');
+      } else {
+        alert('Fehler: ' + (d.error || 'unbekannt'));
+      }
+      checkRedeemable();
+    } catch(e) { alert('Redeem Fehler: ' + e); }
+  }
+  checkRedeemable();
+  setInterval(checkRedeemable, 60000);
 
   // Order Type Toggle
   async function toggleOrderType() {

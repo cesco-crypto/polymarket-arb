@@ -565,6 +565,60 @@ async def disable_strategy(body: dict) -> dict:
     return {"status": "disabled", "strategy": name, "active": list(active_strategies.keys())}
 
 
+@app.get("/api/redeemable")
+async def api_redeemable() -> dict:
+    """Zeigt alle redeembaren Positionen + Gesamtwert."""
+    import json as _json
+    from urllib.request import urlopen, Request
+
+    wallet = settings.polymarket_funder
+    if not wallet:
+        return {"redeemable": [], "total": 0}
+
+    try:
+        url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=100"
+        req = Request(url, headers={"User-Agent": "polymarket-arb/2.0"})
+        with urlopen(req, timeout=10) as resp:
+            positions = _json.loads(resp.read())
+
+        redeemable = [p for p in positions if p.get("redeemable")]
+        total = sum(p.get("currentValue", 0) for p in redeemable)
+
+        return {
+            "redeemable": [{
+                "title": (p.get("title", "") or "")[:50],
+                "outcome": p.get("outcome", ""),
+                "value": round(p.get("currentValue", 0), 2),
+                "size": round(p.get("size", 0), 2),
+            } for p in redeemable],
+            "count": len(redeemable),
+            "total_usd": round(total, 2),
+        }
+    except Exception as e:
+        return {"redeemable": [], "total": 0, "error": str(e)}
+
+
+@app.post("/api/redeem")
+async def api_redeem() -> dict:
+    """Manueller Redeem — löst alle redeembaren Positionen ein."""
+    # Finde die aktive Strategie mit Redeemer
+    for strat in active_strategies.values():
+        if hasattr(strat, 'redeemer'):
+            try:
+                import asyncio
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(None, strat.redeemer.redeem_all)
+                return {
+                    "status": "ok",
+                    "redeemed": result.get("redeemed", 0),
+                    "value_usd": result.get("value_usd", 0),
+                }
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+
+    return {"status": "error", "error": "Kein Redeemer verfügbar (keine Strategie mit Redeemer aktiv)"}
+
+
 @app.get("/api/hmsf/config")
 async def get_hmsf_config() -> dict:
     """HMSF Module-Toggles und Konfiguration."""

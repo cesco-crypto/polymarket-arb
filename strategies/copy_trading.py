@@ -15,6 +15,7 @@ import json
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -156,7 +157,8 @@ class CopyTradingStrategy(StrategyBase):
         # State
         self._running = False
         self._last_seen: dict[str, int] = {}  # wallet → last seen timestamp
-        self._seen_trade_keys: set = set()     # unique Trade-Keys → verhindert Duplikate per Wallet
+        self._seen_trade_keys: set = set()     # unique Trade-Keys → verhindert Duplikate
+        self._seen_file = Path("data/copy_seen_trades.json")  # Persistent auf Disk
         self._copied_positions: list[CopiedPosition] = []
         self._copy_count = 0
         self._recent_copies: deque = deque(maxlen=50)
@@ -212,34 +214,67 @@ class CopyTradingStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     async def _initialize_last_seen(self) -> None:
-        """Lade die letzten 20 Trades jeder Wallet um Restart-Duplikate zu verhindern.
+        """Lade gesehene Trades von Disk + API um Restart-Duplikate zu verhindern.
 
-        KRITISCHER FIX: Bei limit=1 wurden nach Restarts alle kürzlichen Trades
-        nochmal als "neu" erkannt und kopiert. Jetzt laden wir 20 Trades und
-        markieren ALLE als "gesehen" im _seen_trade_keys Set.
+        PERSISTENTER DEDUP: _seen_trade_keys wird auf Disk gespeichert und beim
+        Restart wiedergeladen. Kein Re-Copy mehr nach Deploys/Crashes.
         """
+        # 1. Lade persistenten State von Disk
+        self._seen_file.parent.mkdir(parents=True, exist_ok=True)
+        if self._seen_file.exists():
+            try:
+                with open(self._seen_file) as f:
+                    saved = json.load(f)
+                self._seen_trade_keys = set(saved.get("seen_keys", []))
+                self._last_seen = saved.get("last_seen", {})
+                self._copy_count = saved.get("copy_count", 0)
+                logger.info(f"Copy Trading: {len(self._seen_trade_keys)} gesehene Trades von Disk geladen")
+            except Exception as e:
+                logger.warning(f"Copy Seen Load Error: {e}")
+
+        # 2. Zusätzlich: aktuelle API-Daten laden und markieren
         total_marked = 0
         for wallet in self.tracked_wallets:
             addr = wallet["address"]
             try:
                 trades = await self._fetch_activity(addr, limit=20)
                 if trades:
-                    # Alle 20 Trades als "gesehen" markieren
                     for t in trades:
                         ts = t.get("timestamp", 0)
                         cid = t.get("conditionId", "")
-                        trade_key = f"{addr}_{ts}_{cid}"
-                        self._seen_trade_keys.add(trade_key)
+                        # Alle 3 Key-Typen markieren
+                        self._seen_trade_keys.add(f"{addr}_{ts}_{cid}")
+                        self._seen_trade_keys.add(f"{addr}_{cid}")  # Market-Key
                         total_marked += 1
-                    # Letzten Timestamp als Baseline
-                    self._last_seen[addr] = trades[0].get("timestamp", 0)
+                    self._last_seen[addr] = max(
+                        self._last_seen.get(addr, 0),
+                        trades[0].get("timestamp", 0)
+                    )
                 else:
-                    self._last_seen[addr] = int(time.time())
+                    if addr not in self._last_seen:
+                        self._last_seen[addr] = int(time.time())
             except Exception as e:
                 logger.error(f"Copy Init Error for {wallet['name']}: {e}")
-                self._last_seen[addr] = int(time.time())
+                if addr not in self._last_seen:
+                    self._last_seen[addr] = int(time.time())
 
-        logger.info(f"Copy Trading initialisiert: {len(self._last_seen)} Wallets, {total_marked} Trades als gesehen markiert")
+        # 3. State sofort sichern
+        self._save_seen_state()
+        logger.info(f"Copy Trading initialisiert: {len(self._last_seen)} Wallets, {len(self._seen_trade_keys)} Keys persistent")
+
+    def _save_seen_state(self) -> None:
+        """Speichert _seen_trade_keys persistent auf Disk."""
+        try:
+            self._seen_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._seen_file, "w") as f:
+                json.dump({
+                    "seen_keys": list(self._seen_trade_keys),
+                    "last_seen": self._last_seen,
+                    "copy_count": self._copy_count,
+                    "saved_at": time.time(),
+                }, f)
+        except Exception as e:
+            logger.error(f"Copy Seen Save Error: {e}")
 
     # ═══════════════════════════════════════════════════════════════
     # POLL LOOP
@@ -353,6 +388,7 @@ class CopyTradingStrategy(StrategyBase):
             )
 
             await self._copy_trade(tracked)
+            self._save_seen_state()  # Persist nach jedem Copy
 
     # ═══════════════════════════════════════════════════════════════
     # COPY EXECUTION
