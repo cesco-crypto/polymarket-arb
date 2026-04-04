@@ -81,12 +81,15 @@ class PolymarketExecutor:
             self._creds = self._client.create_or_derive_api_creds()
             self._client.set_api_creds(self._creds)
 
-            # USDC.e Allowance setzen (nötig für CLOB Trading)
+            # USDC.e Allowance aktualisieren (nötig für CLOB Trading)
             try:
-                self._client.set_allowances()
-                logger.info("Executor: USDC.e Allowance gesetzt für CLOB")
+                from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+                self._client.update_balance_allowance(
+                    BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+                )
+                logger.info("Executor: USDC.e Allowance aktualisiert für CLOB")
             except Exception as ae:
-                logger.warning(f"Executor: Allowance setzen fehlgeschlagen (evtl. schon OK): {ae}")
+                logger.warning(f"Executor: Allowance-Update fehlgeschlagen (evtl. schon OK): {ae}")
 
             self._ready = True
             logger.info("Executor: LIVE MODE AKTIV — echte Orders werden platziert!")
