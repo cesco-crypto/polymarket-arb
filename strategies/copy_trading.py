@@ -144,11 +144,11 @@ class CopyTradingStrategy(StrategyBase):
         # Config
         self.poll_interval_s = 5.0         # Poll alle 5 Sekunden
         self.max_copy_size_usd = 5.0       # Fix $5 pro Copy-Trade
-        self.max_concurrent = 10           # Max 10 gleichzeitige Positionen
+        self.max_concurrent = 5            # Max 5 gleichzeitig (25% von $94 = vertretbar)
         self.min_seconds_to_copy = 5       # Trade muss < 5 Min alt sein
-        self.only_buys = True              # Nur BUY-Trades kopieren (nicht SELL)
-        self.min_copy_price = 0.15         # Nicht unter 15¢ (>85% Verlustchance)
-        self.max_copy_price = 0.90         # Nicht über 90¢ (schlechtes Risk/Reward)
+        self.only_buys = False             # BUY + SELL kopieren (SELL = Exit-Signal)
+        self.min_copy_price = 0.25         # Nicht unter 25¢ (>75% Verlustchance)
+        self.max_copy_price = 0.85         # Nicht über 85¢ (schlechtes Risk/Reward)
 
         # Tracked Wallets
         self.tracked_wallets = list(DEFAULT_TRACKED_WALLETS)
@@ -156,8 +156,7 @@ class CopyTradingStrategy(StrategyBase):
         # State
         self._running = False
         self._last_seen: dict[str, int] = {}  # wallet → last seen timestamp
-        self._copied_markets: set = set()      # condition_id Set → verhindert Doppel-Trades
-        self._seen_trade_keys: set = set()     # unique Trade-Keys → verhindert Duplikate
+        self._seen_trade_keys: set = set()     # unique Trade-Keys → verhindert Duplikate per Wallet
         self._copied_positions: list[CopiedPosition] = []
         self._copy_count = 0
         self._recent_copies: deque = deque(maxlen=50)
@@ -266,40 +265,48 @@ class CopyTradingStrategy(StrategyBase):
             self._last_seen[addr] = max(self._last_seen.get(addr, 0), ts)
 
             side = trade.get("side", "")
-            if self.only_buys and side != "BUY":
-                continue  # Nur BUY kopieren
 
-            # ── GUARD 1: Unique Trade Key (verhindert Duplikate) ──
+            # ── GUARD 1: Unique Trade Key (verhindert Duplikate per Wallet) ──
             trade_key = f"{addr}_{ts}_{trade.get('conditionId','')}"
             if trade_key in self._seen_trade_keys:
                 continue
             self._seen_trade_keys.add(trade_key)
 
-            # ── GUARD 2: Market-Deduplizierung (kein doppelter Trade pro Markt) ──
-            condition_id = trade.get("conditionId", "")
-            if condition_id and condition_id in self._copied_markets:
-                logger.info(f"Copy Skip (Markt bereits kopiert): {name} {trade.get('title','')[:40]}")
-                continue
+            # ── SELL-Trades: Alert senden (Smart Wallet Exit = wichtiges Signal) ──
+            if side == "SELL":
+                logger.info(f"COPY EXIT SIGNAL: {name} SELL {trade.get('outcome','')} @ {trade.get('price',0)} | {trade.get('title','')[:40]}")
+                asyncio.create_task(telegram.send_alert(
+                    f"🔔 <b>EXIT SIGNAL</b>\n"
+                    f"{'─'*26}\n"
+                    f"👤 <b>{name}</b> hat VERKAUFT!\n"
+                    f"📊 SELL {trade.get('outcome','')} @ {float(trade.get('price',0)):.3f}\n"
+                    f"📍 {trade.get('title','')[:50]}\n"
+                    f"⚠️ Prüfe ob du diese Position auch schliessen willst"
+                ))
+                continue  # SELL-Trades nicht kopieren (nur alertieren)
 
-            # ── GUARD 3: Price Filter (keine Lotterietickets) ──
+            # ── GUARD 2: Price Filter (keine Lotterietickets, kein schlechtes R/R) ──
             price = float(trade.get("price", 0))
             if price < self.min_copy_price or price > self.max_copy_price:
                 logger.info(f"Copy Skip (Preis {price:.3f} ausserhalb {self.min_copy_price}-{self.max_copy_price}): {name} {trade.get('title','')[:40]}")
                 continue
 
-            # ── GUARD 4: Trade zu alt? ──
+            # ── GUARD 3: Trade zu alt? ──
             age = time.time() - ts
             if age > self.min_seconds_to_copy * 60:  # 5 Minuten
                 logger.debug(f"Copy Skip (zu alt: {age:.0f}s): {name}")
                 continue
 
-            # ── GUARD 5: Max concurrent? ──
+            # ── GUARD 4: Max concurrent? ──
             active = sum(1 for p in self._copied_positions if not p.resolved)
             if active >= self.max_concurrent:
                 logger.warning(f"Copy Skip (max {self.max_concurrent} erreicht): {name}")
                 continue
 
             # ── Alle Guards bestanden → Kopieren! ──
+            # Cross-Wallet Confluence ERLAUBT: Wenn 2 Top-Wallets denselben
+            # Markt kaufen ist das ein STÄRKERES Signal, nicht ein schwächeres.
+            condition_id = trade.get("conditionId", "")
             tracked = TrackedTrade(
                 wallet_name=name,
                 wallet_address=addr,
@@ -313,10 +320,6 @@ class CopyTradingStrategy(StrategyBase):
                 timestamp=ts,
                 asset_id=trade.get("asset", ""),
             )
-
-            # Market als kopiert markieren
-            if condition_id:
-                self._copied_markets.add(condition_id)
 
             await self._copy_trade(tracked)
 
