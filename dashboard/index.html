@@ -580,12 +580,14 @@ function switchTab(btn, tab) {
 
   async function fetchLiveData() {
     try {
-      const [posRes, histRes] = await Promise.all([
+      const [posRes, histRes, journalRes] = await Promise.all([
         fetch('/api/positions'),
         fetch('/api/live-trades'),
+        fetch('/api/journal/stats'),
       ]);
       const posData = await posRes.json();
       const histData = await histRes.json();
+      const journalData = await journalRes.json();
 
       _livePositions = posData.positions || [];
       _resolvedPositions = posData.resolved || [];
@@ -593,11 +595,18 @@ function switchTab(btn, tab) {
 
       id('pos-ct').textContent = _livePositions.length;
       id('hist-ct').textContent = _liveHistory.length + _resolvedPositions.length;
-      const lv = histData.live || {};
-      const lvPnl = (lv.total_pnl || 0);
-      id('live-source').textContent = lv.count
-        ? `(LIVE: ${lv.count} trades | ${lv.wins}W/${lv.losses}L | WR: ${lv.win_rate}% | PnL: $${lvPnl>=0?'+':''}${lvPnl.toFixed(2)} | Paper: ${histData.count} total)`
-        : `(${histData.source || 'api'} | ${histData.count || 0} trades | no live data yet)`;
+
+      // JOURNAL-BASIERTE Stats (Single Source of Truth)
+      const jl = journalData.live || {};
+      const jPnl = jl.total_pnl || 0;
+      const bs = journalData.by_strategy || {};
+      const ct = bs.copy_trade || {};
+      const oda = bs.oda || {};
+      const mom = bs.momentum_live || {};
+
+      id('live-source').textContent = jl.count
+        ? `(JOURNAL: ${jl.count} trades | ${jl.wins}W/${jl.losses}L | WR: ${jl.win_rate}% | PnL: $${jPnl>=0?'+':''}${jPnl.toFixed(2)} | CT:${ct.wins||0}W/${ct.losses||0}L ODA:${oda.wins||0}W/${oda.losses||0}L MOM:${mom.wins||0}W/${mom.losses||0}L)`
+        : '(Journal: loading...)';
 
       renderLivePositions();
       renderResolvedPositions();

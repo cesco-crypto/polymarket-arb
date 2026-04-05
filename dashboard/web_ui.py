@@ -463,6 +463,162 @@ async def api_journal() -> dict:
     return {"records": records, "stats": stats, "count": len(records), "source": "local"}
 
 
+# ═══════════════════════════════════════════════════════════════════
+# JOURNAL READER — Single Source of Truth für Dashboard Stats
+# ═══════════════════════════════════════════════════════════════════
+
+_journal_stats_cache: dict = {"data": {}, "ts": 0}
+JOURNAL_PATH = Path("data/trade_journal.jsonl")
+
+
+def _read_journal_stats() -> dict:
+    """Liest trade_journal.jsonl und berechnet Stats pro Strategie.
+
+    Cached für 30 Sekunden. Gibt aggregierte Daten zurück die
+    das Dashboard als Single Source of Truth nutzt.
+    """
+    now = time.time()
+    if now - _journal_stats_cache["ts"] < 30 and _journal_stats_cache["data"]:
+        return _journal_stats_cache["data"]
+
+    entries = []
+    if JOURNAL_PATH.exists():
+        try:
+            with open(JOURNAL_PATH) as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+        except Exception:
+            pass
+
+    # Gruppiere nach trade_id
+    from collections import defaultdict
+    by_trade = defaultdict(list)
+    for e in entries:
+        tid = e.get("trade_id", "")
+        if tid:
+            by_trade[tid].append(e)
+
+    # Strategie-Zuordnung via Prefix + order_type
+    def get_strategy(tid: str, order_type: str) -> str:
+        if tid.startswith("CT-"):
+            return "copy_trade"
+        if tid.startswith("ODA"):
+            return "oda"
+        if tid.startswith("LT-"):
+            return "momentum_live"
+        if tid.startswith("PT-"):
+            return "momentum_paper"
+        if order_type in ("copy_trade", "copy_hedge", "copy_sell"):
+            return "copy_trade"
+        if order_type == "oracle_delay_arb":
+            return "oda"
+        return "other"
+
+    # Stats pro Strategie
+    strat_stats = defaultdict(lambda: {
+        "opens": 0, "wins": 0, "losses": 0, "pending": 0,
+        "total_pnl": 0.0, "total_invested": 0.0, "total_payout": 0.0,
+    })
+    resolved_cids = set()  # condition_ids die resolved sind
+    all_trades_list = []   # Für Trade History
+
+    for tid, events in by_trade.items():
+        open_ev = next((e for e in events if e.get("event") == "open"), None)
+        close_ev = next((e for e in events if e.get("event") in ("redeemed", "resolved_loss", "close")), None)
+
+        if not open_ev:
+            continue
+
+        order_type = open_ev.get("order_type", "")
+        strat = get_strategy(tid, order_type)
+        strat_stats[strat]["opens"] += 1
+        strat_stats[strat]["total_invested"] += open_ev.get("size_usd", 0)
+
+        trade_record = {
+            "trade_id": tid,
+            "strategy": strat,
+            "order_type": order_type,
+            "market_question": open_ev.get("market_question", ""),
+            "direction": open_ev.get("direction", ""),
+            "executed_price": open_ev.get("executed_price", 0),
+            "size_usd": open_ev.get("size_usd", 0),
+            "entry_ts": open_ev.get("entry_ts", 0),
+            "source_wallet_name": open_ev.get("source_wallet_name", ""),
+            "condition_id": open_ev.get("condition_id", ""),
+            "live_order_success": open_ev.get("live_order_success", False),
+        }
+
+        if close_ev:
+            event_type = close_ev.get("event", "")
+            pnl = close_ev.get("pnl_usd", 0)
+            payout = close_ev.get("payout_usd", 0)
+            cid = close_ev.get("condition_id", "") or open_ev.get("condition_id", "")
+
+            if event_type == "redeemed":
+                strat_stats[strat]["wins"] += 1
+                strat_stats[strat]["total_pnl"] += pnl
+                strat_stats[strat]["total_payout"] += payout
+                trade_record["status"] = "redeemed"
+                trade_record["pnl_usd"] = pnl
+                trade_record["payout_usd"] = payout
+                trade_record["outcome_correct"] = True
+            elif event_type == "resolved_loss":
+                strat_stats[strat]["losses"] += 1
+                strat_stats[strat]["total_pnl"] += pnl
+                trade_record["status"] = "lost"
+                trade_record["pnl_usd"] = pnl
+                trade_record["outcome_correct"] = False
+            elif event_type == "close":
+                if close_ev.get("outcome_correct"):
+                    strat_stats[strat]["wins"] += 1
+                else:
+                    strat_stats[strat]["losses"] += 1
+                pnl = close_ev.get("pnl_usd", 0)
+                strat_stats[strat]["total_pnl"] += pnl
+                trade_record["status"] = "won" if close_ev.get("outcome_correct") else "lost"
+                trade_record["pnl_usd"] = pnl
+                trade_record["outcome_correct"] = close_ev.get("outcome_correct", False)
+
+            if cid:
+                resolved_cids.add(cid)
+            trade_record["exit_ts"] = close_ev.get("exit_ts", 0)
+        else:
+            strat_stats[strat]["pending"] += 1
+            trade_record["status"] = "open"
+            trade_record["pnl_usd"] = 0
+            trade_record["outcome_correct"] = None
+
+        all_trades_list.append(trade_record)
+
+    # Aggregiere Live-Stats (alles ausser Paper)
+    live_stats = {"count": 0, "wins": 0, "losses": 0, "total_pnl": 0.0}
+    for strat_name in ("copy_trade", "oda", "momentum_live"):
+        s = strat_stats.get(strat_name, {})
+        live_stats["count"] += s.get("opens", 0)
+        live_stats["wins"] += s.get("wins", 0)
+        live_stats["losses"] += s.get("losses", 0)
+        live_stats["total_pnl"] += s.get("total_pnl", 0)
+    resolved_count = live_stats["wins"] + live_stats["losses"]
+    live_stats["win_rate"] = round(live_stats["wins"] / max(1, resolved_count) * 100, 1)
+
+    result = {
+        "live": live_stats,
+        "paper": dict(strat_stats.get("momentum_paper", {})),
+        "by_strategy": dict(strat_stats),
+        "resolved_condition_ids": resolved_cids,
+        "trades": sorted(all_trades_list, key=lambda x: x.get("entry_ts", 0), reverse=True),
+        "total_entries": len(entries),
+    }
+
+    _journal_stats_cache["data"] = result
+    _journal_stats_cache["ts"] = now
+    return result
+
+
 @app.get("/api/live-trades")
 async def api_live_trades() -> dict:
     """Echte Live Trades — aus Supabase (primär) oder JSONL (fallback).
@@ -710,10 +866,22 @@ async def api_positions() -> dict:
         for p in positions:
             _enrich_position(p, activity, copy_sources)
 
-        # Filter: Nur Positionen mit echtem Wert (>$0.01) anzeigen
-        # LOST Positionen ($0 Value) werden ausgeblendet — auch redeemable mit $0
-        active = [p for p in positions if p.get("currentValue", 0) > 0.01]
-        resolved = [p for p in positions if p.get("currentValue", 0) <= 0.01]
+        # Ghost-Position Filter: Journal als Source of Truth
+        # Positionen die im Journal als redeemed/resolved_loss stehen
+        # werden NICHT mehr als "aktiv" oder "redeemable" gezeigt
+        journal = _read_journal_stats()
+        resolved_cids = journal.get("resolved_condition_ids", set())
+
+        active = [
+            p for p in positions
+            if p.get("currentValue", 0) > 0.01
+            and p.get("conditionId", "") not in resolved_cids
+        ]
+        resolved = [
+            p for p in positions
+            if p.get("currentValue", 0) <= 0.01
+            or p.get("conditionId", "") in resolved_cids
+        ]
 
         total_value = sum(p.get("currentValue", 0) for p in active)
         redeemable = sum(p.get("currentValue", 0) for p in active if p.get("redeemable") and p.get("currentValue", 0) > 0)
@@ -1042,10 +1210,31 @@ async def copytrading_page() -> HTMLResponse:
 
 @app.get("/api/copy/status")
 async def api_copy_status() -> dict:
-    """Status der Copy Trading Strategie — Wallets, Performance, Config."""
+    """Status der Copy Trading Strategie — Wallets, Performance, Config.
+
+    Merge: RAM-Daten (aktuelle Session) + Journal (historisch persistent).
+    """
     strat = active_strategies.get("copy_trading")
     if strat and hasattr(strat, "get_status"):
-        return strat.get_status()
+        result = strat.get_status()
+        # Journal-basierte KPIs einmischen (persistent über Restarts)
+        journal = _read_journal_stats()
+        copy_journal = journal.get("by_strategy", {}).get("copy_trade", {})
+        if copy_journal:
+            result["journal_stats"] = {
+                "total_opens": copy_journal.get("opens", 0),
+                "wins": copy_journal.get("wins", 0),
+                "losses": copy_journal.get("losses", 0),
+                "pending": copy_journal.get("pending", 0),
+                "total_pnl": round(copy_journal.get("total_pnl", 0), 2),
+                "total_invested": round(copy_journal.get("total_invested", 0), 2),
+                "total_payout": round(copy_journal.get("total_payout", 0), 2),
+                "win_rate": round(
+                    copy_journal.get("wins", 0) /
+                    max(1, copy_journal.get("wins", 0) + copy_journal.get("losses", 0)) * 100, 1
+                ),
+            }
+        return result
     # Fallback: static defaults
     try:
         from strategies.copy_trading import DEFAULT_TRACKED_WALLETS
@@ -1310,6 +1499,20 @@ async def api_collect_status() -> dict:
                 pass
             break
 
+    return result
+
+
+@app.get("/api/journal/stats")
+async def api_journal_stats() -> dict:
+    """Journal-basierte Stats — Single Source of Truth für das Dashboard.
+
+    Liest trade_journal.jsonl und gibt aggregierte Stats pro Strategie zurück.
+    Ersetzt die fehlerhafte API/RAM-basierte PnL-Berechnung.
+    """
+    stats = _read_journal_stats()
+    # resolved_condition_ids ist ein set — nicht JSON-serialisierbar
+    result = {k: v for k, v in stats.items() if k != "resolved_condition_ids"}
+    result["resolved_count"] = len(stats.get("resolved_condition_ids", set()))
     return result
 
 
