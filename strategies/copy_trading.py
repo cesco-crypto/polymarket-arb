@@ -655,8 +655,12 @@ class CopyTradingStrategy(StrategyBase):
             rebuilt += 1
 
         logger.info(
-            f"REBUILD: {rebuilt} offene Copy-Positionen wiederhergestellt "
-            f"(von {len(open_trades)} im Journal, {len(closed_ids)} geschlossen)"
+            f"REBUILD SUCCESS | "
+            f"restored={rebuilt} positions | "
+            f"journal_opens={len(open_trades)} | "
+            f"closed={len(closed_ids)} | "
+            f"copy_count={self._copy_count} | "
+            f"live_trading={self.settings.live_trading}"
         )
 
         # Copy-Count auf letzten Stand setzen

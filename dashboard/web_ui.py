@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import secrets
 import time
@@ -40,7 +41,6 @@ STRATEGY_STATE_FILE = Path(__file__).parent.parent / "data" / "strategy_state.js
 
 def _save_strategy_state() -> None:
     """Speichert aktive Strategien + Live-Mode persistent (atomic write)."""
-    import json as _json
     try:
         STRATEGY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         state = {
@@ -50,25 +50,26 @@ def _save_strategy_state() -> None:
         }
         tmp = STRATEGY_STATE_FILE.with_suffix(".tmp")
         with open(tmp, "w") as f:
-            _json.dump(state, f)
-        import os as _os
-        _os.replace(str(tmp), str(STRATEGY_STATE_FILE))
+            json.dump(state, f)
+        os.replace(str(tmp), str(STRATEGY_STATE_FILE))
+        logger.debug(f"Strategy state saved: {len(state['active'])} active, live={state['live_trading']}")
     except Exception as e:
-        logger.error(f"Strategy state save error: {e}")
+        logger.error(f"Strategy state save FAILED: {e}")
 
 
 def _load_strategy_state() -> dict | None:
     """Lädt gespeicherten Strategie-State. Returns None bei Fehler."""
-    import json as _json
     try:
-        if STRATEGY_STATE_FILE.exists():
-            with open(STRATEGY_STATE_FILE) as f:
-                state = _json.load(f)
-            if isinstance(state, dict) and "active" in state:
-                return state
+        if not STRATEGY_STATE_FILE.exists():
+            return None
+        with open(STRATEGY_STATE_FILE) as f:
+            state = json.load(f)
+        if isinstance(state, dict) and "active" in state:
+            return state
+        return None
     except Exception as e:
-        logger.warning(f"Strategy state load error: {e}")
-    return None
+        logger.warning(f"Strategy state load error (using fallback): {e}")
+        return None
 
 # ═══════════════════════════════════════════════════════════════════
 # SHARED ASYNC HTTP CLIENT (replaces blocking urlopen)
@@ -218,14 +219,19 @@ async def startup() -> None:
     available = list_strategies()
 
     if saved:
-        # Restore: Live-Mode + alle gespeicherten Strategien
         settings.live_trading = saved.get("live_trading", settings.live_trading)
         names_to_start = saved.get("active", [settings.strategy_name])
-        logger.info(f"Strategy State geladen: {names_to_start} | live={settings.live_trading}")
+        saved_ts = saved.get("saved_at", 0)
+        logger.info(
+            f"STRATEGY STATE LOADED | "
+            f"active={len(names_to_start)} | "
+            f"strategies={names_to_start} | "
+            f"live_trading={settings.live_trading} | "
+            f"saved_at={datetime.fromtimestamp(saved_ts).strftime('%H:%M:%S') if saved_ts else '?'}"
+        )
     else:
-        # Fallback: Default aus config.py
         names_to_start = [settings.strategy_name]
-        logger.info(f"Kein Strategy State — Default: {names_to_start}")
+        logger.warning("NO STRATEGY STATE FILE — falling back to config.py default")
 
     for name in names_to_start:
         if name not in available:
