@@ -143,13 +143,16 @@ def main():
     print()
 
     # 2. Positions API laden
+    # WICHTIG: Mehrere Positionen können dieselbe conditionId haben
+    # (z.B. UP und DOWN Outcome). Key = (conditionId, outcomeIndex)
     positions = fetch_positions()
-    pos_by_cid = {}
+    pos_by_cid_oi = {}  # (conditionId, outcomeIndex) → position
     for p in positions:
         cid = p.get("conditionId", "")
+        oi = p.get("outcomeIndex", 0)
         if cid:
-            pos_by_cid[cid] = p
-    print(f"Positions API: {len(positions)} Positionen geladen")
+            pos_by_cid_oi[(cid, oi)] = p
+    print(f"Positions API: {len(positions)} Positionen geladen ({len(pos_by_cid_oi)} unique cid+outcome)")
     print()
 
     # ══════════════════════════════════════════════════════════
@@ -206,12 +209,19 @@ def main():
         print(f"  ✓ MATCH: {trade_id} ({order_type}) — inv ${invested:.2f} → ${payout:.2f} = ${pnl:+.2f} | {title_match[:30]}")
 
     # ══════════════════════════════════════════════════════════
-    # TEIL B: Positions API Abgleich (condition_id Match)
+    # TEIL B: Positions API Abgleich (condition_id + outcome Match)
+    # De-Duplizierung: Jede trade_id wird nur EINMAL verarbeitet.
     # ══════════════════════════════════════════════════════════
     print()
     print("-" * 60)
-    print("TEIL B: Positions API Abgleich via condition_id")
+    print("TEIL B: Positions API Abgleich via condition_id + outcome")
     print("-" * 60)
+
+    # State-Tracking: Verhindert doppelte Verarbeitung
+    processed_trade_ids = set()
+    # Auch die aus TEIL A bereits verarbeiteten IDs sperren
+    for ev in new_events:
+        processed_trade_ids.add(ev.get("trade_id", ""))
 
     for e in opens:
         cid = e.get("condition_id", "")
@@ -220,12 +230,41 @@ def main():
         if not cid or not trade_id:
             continue
 
-        # Bereits redeemed?
-        if already_redeemed(entries + new_events, trade_id):
+        # DE-DUPLIZIERUNG: Jede trade_id nur einmal
+        if trade_id in processed_trade_ids:
             continue
 
-        # Position in API finden
-        pos = pos_by_cid.get(cid)
+        # Bereits im Journal als redeemed/closed?
+        if already_redeemed(entries, trade_id):
+            processed_trade_ids.add(trade_id)
+            continue
+
+        # Position in API finden — COMPOSITE KEY (cid + direction)
+        # Bestimme outcomeIndex aus der Direction im Journal
+        direction = e.get("direction", "").lower()
+        # Heuristik: "up"/"yes"/"over" → outcomeIndex 0, "down"/"no"/"under" → 1
+        # Aber da wir nicht sicher sind, versuchen wir beide und nehmen den Match
+        pos = None
+        for oi in [0, 1]:
+            candidate = pos_by_cid_oi.get((cid, oi))
+            if candidate:
+                # Match: Outcome des Journals mit Outcome der Position vergleichen
+                pos_outcome = candidate.get("outcome", "").lower()
+                if direction and pos_outcome and (
+                    direction in pos_outcome or pos_outcome in direction
+                    or direction[:3] == pos_outcome[:3]
+                ):
+                    pos = candidate
+                    break
+
+        # Fallback: Wenn kein Direction-Match, nimm irgendeine Position mit dieser CID
+        if not pos:
+            for oi in [0, 1]:
+                candidate = pos_by_cid_oi.get((cid, oi))
+                if candidate:
+                    pos = candidate
+                    break
+
         if not pos:
             continue
 
@@ -257,10 +296,12 @@ def main():
                 "repair_source": "positions_api_match",
             }
             new_events.append(close_event)
+            processed_trade_ids.add(trade_id)
             print(f"  ✗ LOSS: {trade_id} — ${e.get('size_usd', 0):.2f} lost | {e.get('market_question', '')[:35]}")
 
         elif cur_price >= 0.95 and current_value > 0.01:
             # Gewonnen, noch nicht redeemed (pending)
+            processed_trade_ids.add(trade_id)  # Nicht doppelt loggen
             print(f"  ⏳ PENDING: {trade_id} — ${current_value:.2f} val, redeem={redeemable} | {e.get('market_question', '')[:35]}")
 
     # ══════════════════════════════════════════════════════════
