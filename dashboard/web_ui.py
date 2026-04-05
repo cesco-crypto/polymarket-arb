@@ -477,6 +477,9 @@ def _read_journal_stats() -> dict:
     Cached für 30 Sekunden. Gibt aggregierte Daten zurück die
     das Dashboard als Single Source of Truth nutzt.
     """
+    import json
+    from collections import defaultdict
+
     now = time.time()
     if now - _journal_stats_cache["ts"] < 30 and _journal_stats_cache["data"]:
         return _journal_stats_cache["data"]
@@ -507,7 +510,6 @@ def _read_journal_stats() -> dict:
             logger.error(f"Journal read error ({journal_file}): {e}")
 
     # Gruppiere nach trade_id
-    from collections import defaultdict
     by_trade = defaultdict(list)
     for e in entries:
         tid = e.get("trade_id", "")
