@@ -204,9 +204,9 @@
 
   <!-- Sort Buttons -->
   <div class="sort-bar">
-    <button class="sort-btn on" data-sort="pnl" onclick="setSort(this,'pnl')">PnL</button>
+    <button class="sort-btn" data-sort="pnl" onclick="setSort(this,'pnl')">PnL</button>
     <button class="sort-btn" data-sort="volume" onclick="setSort(this,'volume')">Volume</button>
-    <button class="sort-btn" data-sort="ai_score" onclick="setSort(this,'ai_score')">AI Score</button>
+    <button class="sort-btn on" data-sort="ai_score" onclick="setSort(this,'ai_score')">AI Score</button>
     <button class="sort-btn" data-sort="rank" onclick="setSort(this,'rank')">Rank</button>
   </div>
 
@@ -249,7 +249,7 @@
 // ═══════════════════════════════════════════
 let _status = null;
 let _leaderboard = [];
-let _currentSort = 'pnl';
+let _currentSort = 'ai_score';
 let _analyzeAddr = '';
 
 function id(s) { return document.getElementById(s); }
@@ -305,13 +305,26 @@ function renderWallets(d) {
     return;
   }
 
+  // Leaderboard-PnL Lookup (wenn geladen)
+  const lbLookup = {};
+  if (_leaderboard.length) {
+    _leaderboard.forEach(t => { lbLookup[t.address.toLowerCase()] = t; });
+  }
+
   id('wallet-grid').innerHTML = wallets.map(w => {
     const st = stats[w.name] || {};
     const isPaused = w.status === 'paused';
-    return `<div class="wcard ${isPaused ? 'paused' : 'active'}">
-      <div class="wcard-name">${esc(w.name)}</div>
+    // Aktuellen PnL aus Leaderboard holen (statt hardcoded)
+    const lb = lbLookup[w.address.toLowerCase()];
+    const displayPnl = lb ? lb.pnl : w.pnl;
+    const pnlColor = displayPnl >= 0 ? 'g' : 'rd';
+    // Inaktivitäts-Check: kch123 etc. haben copies=0
+    const isInactive = (st.copies || 0) === 0 && !isPaused;
+    const inactiveTag = isInactive ? '<span style="font-size:8px;color:var(--red);margin-left:4px">INACTIVE</span>' : '';
+    return `<div class="wcard ${isPaused ? 'paused' : 'active'}" style="${isInactive ? 'opacity:0.6' : ''}">
+      <div class="wcard-name">${esc(w.name)}${inactiveTag}</div>
       <div class="wcard-addr">${shortAddr(w.address)}</div>
-      <div class="wcard-pnl g">${fmt(w.pnl)}</div>
+      <div class="wcard-pnl ${pnlColor}">${fmt(displayPnl)}${lb ? '' : ' <span style="font-size:8px;color:var(--dim)">(cached)</span>'}</div>
       <div class="wcard-meta">
         ${catBadge(w.category)}
         <span class="badge ${isPaused?'badge-paused':'badge-active'}">${w.status}</span>
@@ -347,7 +360,30 @@ function renderPerformance(d) {
   id('kpi-pnl').textContent = '$' + (jPnl >= 0 ? '+' : '') + jPnl.toFixed(2);
   id('kpi-pnl').className = 'kpi-val ' + (jPnl >= 0 ? 'g' : 'rd');
 
-  const copies = d.recent_copies || [];
+  // Recent Copies: Journal-Trades als Fallback wenn RAM leer (nach Restart)
+  let copies = d.recent_copies || [];
+  if (!copies.length && js.total_opens > 0) {
+    // RAM leer (Restart) — hole aus Journal Stats
+    try {
+      fetch('/api/journal/stats').then(r=>r.json()).then(jd => {
+        const jTrades = (jd.trades || []).filter(t => t.strategy === 'copy_trade').slice(0, 15);
+        if (jTrades.length) {
+          const fmtTs = ts => { if (!ts) return '—'; const d=new Date(ts*1000); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); };
+          id('recent-body').innerHTML = jTrades.map(t => `<tr>
+            <td class="d">${fmtTs(t.entry_ts)}</td>
+            <td>${t.trade_id || '—'}</td>
+            <td style="color:var(--yellow)">${t.source_wallet_name || '—'}</td>
+            <td>BUY</td>
+            <td>${(t.direction||'?').substring(0,10)}</td>
+            <td class="r">${(t.executed_price||0).toFixed(3)}</td>
+            <td class="d" style="font-size:10px">${(t.market_question||'').substring(0,30)}</td>
+          </tr>`).join('');
+        }
+      }).catch(()=>{});
+    } catch(e) {}
+    id('recent-body').innerHTML = '<tr><td colspan="7" class="empty">Loading from journal...</td></tr>';
+    return;
+  }
   if (!copies.length) {
     id('recent-body').innerHTML = '<tr><td colspan="7" class="empty">No copies yet</td></tr>';
     return;
