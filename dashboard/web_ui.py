@@ -40,6 +40,7 @@ STRATEGY_STATE_FILE = Path(__file__).parent.parent / "data" / "strategy_state.js
 
 def _save_strategy_state() -> None:
     """Speichert aktive Strategien + Live-Mode persistent (atomic write)."""
+    import json as _json
     try:
         STRATEGY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         state = {
@@ -49,7 +50,7 @@ def _save_strategy_state() -> None:
         }
         tmp = STRATEGY_STATE_FILE.with_suffix(".tmp")
         with open(tmp, "w") as f:
-            json.dump(state, f)
+            _json.dump(state, f)
         import os as _os
         _os.replace(str(tmp), str(STRATEGY_STATE_FILE))
     except Exception as e:
@@ -58,10 +59,11 @@ def _save_strategy_state() -> None:
 
 def _load_strategy_state() -> dict | None:
     """Lädt gespeicherten Strategie-State. Returns None bei Fehler."""
+    import json as _json
     try:
         if STRATEGY_STATE_FILE.exists():
             with open(STRATEGY_STATE_FILE) as f:
-                state = json.load(f)
+                state = _json.load(f)
             if isinstance(state, dict) and "active" in state:
                 return state
     except Exception as e:
