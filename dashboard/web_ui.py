@@ -256,6 +256,13 @@ async def startup() -> None:
     # Auto-Collect: Redeem + Merge alle 60 Sekunden
     asyncio.create_task(_auto_collect_loop())
 
+    # Config Tracker: Snapshot & Diff bei jedem Start
+    try:
+        from core.config_tracker import track_config_changes
+        track_config_changes(settings, active_strategies)
+    except Exception as e:
+        logger.error(f"Config tracker error: {e}")
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
@@ -1608,6 +1615,17 @@ async def api_journal_stats() -> dict:
     result = {k: v for k, v in stats.items() if k != "resolved_condition_ids"}
     result["resolved_count"] = len(stats.get("resolved_condition_ids", set()))
     return result
+
+
+@app.get("/api/config/changes")
+async def api_config_changes() -> dict:
+    """Config Change History — alle Trading-Parameter-Änderungen."""
+    try:
+        from core.config_tracker import get_change_history
+        history = get_change_history()
+        return {"changes": history, "count": len(history)}
+    except Exception as e:
+        return {"changes": [], "error": str(e)}
 
 
 @app.get("/api/journal/chart-data")
