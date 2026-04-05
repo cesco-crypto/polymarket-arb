@@ -630,6 +630,8 @@ def _read_journal_stats() -> dict:
             "source_wallet_name": open_ev.get("source_wallet_name", ""),
             "condition_id": open_ev.get("condition_id", ""),
             "live_order_success": open_ev.get("live_order_success", False),
+            "source_tx_hash": open_ev.get("source_tx_hash", ""),
+            "live_order_id": open_ev.get("live_order_id", ""),
         }
 
         if close_ev:
@@ -646,6 +648,7 @@ def _read_journal_stats() -> dict:
                 trade_record["pnl_usd"] = pnl
                 trade_record["payout_usd"] = payout
                 trade_record["outcome_correct"] = True
+                trade_record["redeem_tx_hash"] = close_ev.get("redeem_tx_hash", "")
             elif event_type == "resolved_loss":
                 strat_stats[strat]["losses"] += 1
                 strat_stats[strat]["total_pnl"] += pnl

@@ -271,9 +271,9 @@
     </div>
     <!-- Unified Trade Table (Journal = Source of Truth) -->
     <table>
-      <tr><th>Time</th><th>Strat</th><th>Market</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th>Source</th><th>Status</th></tr>
+      <tr><th>Time</th><th>Strat</th><th>Market</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th>Source</th><th style="font-size:8px">TX/Ref</th><th>Status</th></tr>
     </table>
-    <table id="hist-body"><tr><td colspan="9" class="empty">Loading from Journal...</td></tr></table>
+    <table id="hist-body"><tr><td colspan="10" class="empty">Loading from Journal...</td></tr></table>
   </div>
 </div>
 
@@ -867,7 +867,7 @@ function switchTab(btn, tab) {
     id('hist-last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 
     if (!trades.length) {
-      hb.innerHTML = '<tr><td colspan="9" class="empty">No trades for this filter</td></tr>';
+      hb.innerHTML = '<tr><td colspan="10" class="empty">No trades for this filter</td></tr>';
       return;
     }
 
@@ -913,14 +913,26 @@ function switchTab(btn, tab) {
       }
 
       const ts = t.entry_ts || t.exit_ts;
-      const timeStr = relTime(ts);
-      const timeTitle = fmtTs(ts);
+      const timeExact = fmtTs(ts);
+      const timeRel = relTime(ts);
+      // TX/Ref: source_tx_hash (Copy) or live_order_id (Momentum/ODA)
+      const txHash = t.source_tx_hash || t.redeem_tx_hash || '';
+      const orderId = t.live_order_id || '';
+      let txCell;
+      if (txHash) {
+        const short = txHash.substring(0, 10);
+        txCell = `<a href="https://polygonscan.com/tx/${txHash}" target="_blank" style="color:var(--accent);font-size:8px;font-family:var(--font);text-decoration:none" title="${txHash}">${short}…</a>`;
+      } else if (orderId) {
+        txCell = `<span class="d" style="font-size:8px;font-family:var(--font)" title="${orderId}">${orderId.substring(0,10)}…</span>`;
+      } else {
+        txCell = '<span class="d" style="font-size:8px">—</span>';
+      }
       // Fade older entries
-      const isRecent = ts && (Date.now()/1000 - ts) < 7200; // Last 2h
+      const isRecent = ts && (Date.now()/1000 - ts) < 7200;
       const rowOpacity = isRecent ? '' : 'opacity:0.7';
 
       return `<tr style="${rowOpacity}">
-        <td class="d" style="font-size:9px;white-space:nowrap" title="${timeTitle}">${timeStr}</td>
+        <td class="d" style="font-size:9px;white-space:nowrap" title="${timeRel}">${timeExact}</td>
         <td>${badge}</td>
         <td style="font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${fullMarket}">${market}</td>
         <td style="font-size:10px">${dir.substring(0,8)}</td>
@@ -928,6 +940,7 @@ function switchTab(btn, tab) {
         <td class="r" style="font-size:10px">$${(t.size_usd||0).toFixed(2)}</td>
         <td class="r ${pnlC} b" style="font-size:11px;white-space:nowrap">${pnl!==0 ? (pnl>=0?'+':'')+'$'+pnl.toFixed(2) : '—'}</td>
         <td>${srcTag}</td>
+        <td style="white-space:nowrap">${txCell}</td>
         <td>${statusTag}</td>
       </tr>`;
     }).join('');
