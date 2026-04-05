@@ -1530,6 +1530,102 @@ async def api_journal_stats() -> dict:
     return result
 
 
+@app.get("/api/journal/chart-data")
+async def api_journal_chart_data() -> dict:
+    """Chronologische P&L-Daten für den Performance-Chart.
+
+    Gibt jeden resolved Trade als Datenpunkt zurück mit kumuliertem PnL.
+    Frontend gruppiert nach Timeframe (1M, 1W, 1D, 1H, 1m).
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    journal_file = None
+    for p in [
+        _Path(__file__).parent.parent / "data" / "trade_journal.jsonl",
+        _Path("data/trade_journal.jsonl"),
+        _Path("/home/ubuntu/polymarket-arb/data/trade_journal.jsonl"),
+    ]:
+        if p.exists():
+            journal_file = p
+            break
+
+    if not journal_file:
+        return {"points": [], "error": "journal not found"}
+
+    # Sammle alle resolved Events chronologisch
+    resolved_events = []
+    try:
+        with open(journal_file) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    e = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+
+                event = e.get("event", "")
+                if event not in ("redeemed", "resolved_loss", "close"):
+                    continue
+
+                ts = e.get("exit_ts", 0) or e.get("entry_ts", 0)
+                pnl = e.get("pnl_usd", 0)
+                tid = e.get("trade_id", "")
+                ot = e.get("order_type", "")
+
+                # Strategie bestimmen
+                if tid.startswith("CT-"):
+                    strat = "Copy"
+                elif tid.startswith("ODA"):
+                    strat = "ODA"
+                elif tid.startswith("LT-"):
+                    strat = "Momentum"
+                elif tid.startswith("PT-"):
+                    strat = "Paper"
+                else:
+                    strat = ot or "Other"
+
+                # Paper-Trades nicht im echten PnL-Chart
+                if strat == "Paper":
+                    continue
+
+                resolved_events.append({
+                    "ts": ts,
+                    "pnl": round(pnl, 4),
+                    "trade_id": tid,
+                    "strategy": strat,
+                    "market": (e.get("market_question", "") or "")[:40],
+                    "event": event,
+                })
+    except Exception:
+        return {"points": [], "error": "read error"}
+
+    # Sortiere chronologisch
+    resolved_events.sort(key=lambda x: x["ts"])
+
+    # Berechne kumulierten PnL
+    cumulative = 0
+    points = []
+    for ev in resolved_events:
+        cumulative += ev["pnl"]
+        points.append({
+            "time": int(ev["ts"]),
+            "value": round(cumulative, 2),
+            "pnl": ev["pnl"],
+            "trade_id": ev["trade_id"],
+            "strategy": ev["strategy"],
+            "market": ev["market"],
+            "event": ev["event"],
+        })
+
+    return {
+        "points": points,
+        "total_pnl": round(cumulative, 2),
+        "count": len(points),
+    }
+
+
 @app.post("/api/collect/now")
 async def api_collect_now() -> dict:
     """Manueller Trigger: Sofort Redeem + Merge ausführen."""

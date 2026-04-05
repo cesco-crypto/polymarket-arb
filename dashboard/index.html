@@ -73,6 +73,29 @@
   </div>
 </div>
 
+<!-- P&L Performance Chart -->
+<div style="padding:8px 16px;background:var(--bg-card);border-bottom:1px solid var(--border)">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim)">Performance</span>
+      <span id="chart-pnl" style="font-size:14px;font-weight:700;color:var(--green)">$0.00</span>
+      <span id="chart-trades" style="font-size:9px;color:var(--text-dim)">0 trades</span>
+    </div>
+    <div style="display:flex;gap:4px" id="chart-tf-bar">
+      <button class="tf-btn" data-tf="all" onclick="setChartTF('all',this)">ALL</button>
+      <button class="tf-btn on" data-tf="1d" onclick="setChartTF('1d',this)">1D</button>
+      <button class="tf-btn" data-tf="1h" onclick="setChartTF('1h',this)">1H</button>
+      <button class="tf-btn" data-tf="1m" onclick="setChartTF('1m',this)">1m</button>
+    </div>
+  </div>
+  <div id="pnl-chart" style="height:180px;width:100%"></div>
+</div>
+<style>
+  .tf-btn{padding:3px 10px;border-radius:3px;font-size:9px;font-weight:600;cursor:pointer;border:1px solid var(--border);color:var(--text-dim);background:transparent;font-family:var(--font)}
+  .tf-btn:hover{border-color:var(--accent)} .tf-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+</style>
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
+
 <div class="grid">
 
 <!-- P1: Oracle Latency -->
@@ -1032,6 +1055,128 @@ function switchTab(btn, tab) {
   setInterval(() => { id('clock').textContent = new Date().toLocaleTimeString(); }, 1000);
   // Re-render countdowns every 500ms for smooth animation
   setInterval(() => { if (lastData) { renderMarkets(lastData.discovery||{}); renderLiveEmbeds(lastData.discovery||{}, (lastData.paper_trading||{}).open_positions||[]); } }, 500);
+
+  // ═══════════════════════════════════════════
+  // P&L PERFORMANCE CHART (Lightweight Charts)
+  // ═══════════════════════════════════════════
+  let _chart = null;
+  let _areaSeries = null;
+  let _chartData = [];
+  let _chartTF = '1d';
+  const stratColors = {Copy:'#eab308',ODA:'#a855f7',Momentum:'#3b82f6',Other:'#6b7080'};
+
+  function initChart() {
+    if (typeof LightweightCharts === 'undefined') { setTimeout(initChart, 500); return; }
+    const el = document.getElementById('pnl-chart');
+    if (!el || _chart) return;
+    _chart = LightweightCharts.createChart(el, {
+      width: el.clientWidth, height: 180,
+      layout: { background: { color: '#0a0c10' }, textColor: '#6b7080', fontSize: 10 },
+      grid: { vertLines: { color: '#1e2230' }, horzLines: { color: '#1e2230' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      rightPriceScale: { borderColor: '#1e2230' },
+      timeScale: { borderColor: '#1e2230', timeVisible: true, secondsVisible: false },
+    });
+    _areaSeries = _chart.addAreaSeries({
+      topColor: 'rgba(34,197,94,0.3)', bottomColor: 'rgba(34,197,94,0.02)',
+      lineColor: '#22c55e', lineWidth: 2,
+    });
+    new ResizeObserver(()=>{if(_chart)_chart.applyOptions({width:el.clientWidth})}).observe(el);
+  }
+
+  async function loadChartData() {
+    try {
+      const r = await fetch('/api/journal/chart-data');
+      const d = await r.json();
+      _chartData = d.points || [];
+      const pnl = d.total_pnl || 0;
+      const pnlEl = document.getElementById('chart-pnl');
+      if (pnlEl) {
+        pnlEl.textContent = '$' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
+        pnlEl.style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+      }
+      const ctEl = document.getElementById('chart-trades');
+      if (ctEl) ctEl.textContent = (d.count || 0) + ' resolved trades';
+      renderChart();
+    } catch(e) { console.error('Chart data error:', e); }
+  }
+
+  function renderChart() {
+    if (!_areaSeries || !_chartData.length) return;
+
+    let data = _chartData;
+    const now = Date.now() / 1000;
+
+    // Timeframe filter
+    const tfSeconds = {all: 0, '1d': 86400, '1h': 3600, '1m': 60};
+    const cutoff = tfSeconds[_chartTF];
+    if (cutoff > 0) {
+      data = data.filter(p => p.time > now - cutoff);
+    }
+
+    if (!data.length) {
+      _areaSeries.setData([]);
+      return;
+    }
+
+    // For 1m/1h: show every trade as a point
+    // For 1d/all: group by hour
+    let chartPoints;
+    if (_chartTF === '1m' || _chartTF === '1h') {
+      // Every trade as individual point
+      chartPoints = data.map(p => ({ time: p.time, value: p.value }));
+    } else {
+      // Group by hour (for 1d) or by day (for all)
+      const bucket = _chartTF === 'all' ? 86400 : 3600;
+      const grouped = {};
+      for (const p of data) {
+        const key = Math.floor(p.time / bucket) * bucket;
+        grouped[key] = p.value; // Last value in bucket
+      }
+      chartPoints = Object.entries(grouped)
+        .map(([t, v]) => ({ time: parseInt(t), value: v }))
+        .sort((a, b) => a.time - b.time);
+    }
+
+    // Deduplicate timestamps (Lightweight Charts requires unique timestamps)
+    const seen = new Set();
+    const unique = [];
+    for (const p of chartPoints) {
+      if (!seen.has(p.time)) {
+        seen.add(p.time);
+        unique.push(p);
+      } else {
+        // Increment by 1 second to make unique
+        let t = p.time + 1;
+        while (seen.has(t)) t++;
+        seen.add(t);
+        unique.push({ time: t, value: p.value });
+      }
+    }
+
+    // Update colors based on final PnL
+    const lastVal = unique.length ? unique[unique.length - 1].value : 0;
+    const isPositive = lastVal >= 0;
+    _areaSeries.applyOptions({
+      topColor: isPositive ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)',
+      bottomColor: isPositive ? 'rgba(34,197,94,0.02)' : 'rgba(239,68,68,0.02)',
+      lineColor: isPositive ? '#22c55e' : '#ef4444',
+    });
+
+    _areaSeries.setData(unique);
+    _chart.timeScale().fitContent();
+  }
+
+  window.setChartTF = function(tf, btn) {
+    _chartTF = tf;
+    document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('on'));
+    if (btn) btn.classList.add('on');
+    renderChart();
+  };
+
+  initChart();
+  loadChartData();
+  setInterval(loadChartData, 60000); // Refresh every 60s
 
   connect();
 })();
