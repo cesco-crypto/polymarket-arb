@@ -711,12 +711,22 @@ class CopyTradingStrategy(StrategyBase):
             # ── GUARD 2: Outcome-aware Dedup (Hedge = anderes Outcome ERLAUBT) ──
             # SAFETY: outcomeIndex muss 0 oder 1 sein, sonst Fallback auf Market-Key
             is_hedge = False
+            is_scaling = False
             if outcome_index in (0, 1):
                 outcome_key = f"{addr}_{condition_id}_{outcome_index}"
                 if outcome_key in self._seen_trade_keys:
-                    logger.debug(f"Copy Skip (Tranche, gleicher Outcome): {name} {trade.get('title','')[:30]}")
-                    continue
-                self._seen_trade_keys.add(outcome_key)
+                    # SCALING CHECK: Ist das ein NEUER Trade (andere tx_hash)?
+                    tx_hash = trade.get("transactionHash", "")
+                    tx_key = f"tx_{tx_hash}"
+                    if tx_key in self._seen_trade_keys or not tx_hash:
+                        logger.debug(f"Copy Skip (Tranche, gleicher Outcome): {name} {trade.get('title','')[:30]}")
+                        continue
+                    # Neue TX auf gleichem Outcome = NACHKAUF (Scaling!)
+                    self._seen_trade_keys.add(tx_key)
+                    is_scaling = True
+                    logger.info(f"SCALING DETECTED: {name} kauft NACH auf {trade.get('title','')[:35]}")
+                else:
+                    self._seen_trade_keys.add(outcome_key)
 
                 # Prüfe ob dies ein Hedge ist (anderes Outcome auf gleichem Market)
                 other_key = f"{addr}_{condition_id}_{1 - outcome_index}"
@@ -853,6 +863,47 @@ class CopyTradingStrategy(StrategyBase):
                     # Fallback: no first-leg data → copy at full size
                     logger.info(f"HEDGE SIZING: ${copy_size:.2f} (fallback, no first-leg trader data)")
 
+            # ── Proportionale Sizing für Scaling (Nachkäufe) ──
+            if is_scaling:
+                first_trade = next(
+                    (p for p in self._copied_positions
+                     if p.condition_id == condition_id
+                     and p.outcome_index == outcome_index
+                     and p.source_wallet == addr
+                     and not p.resolved),
+                    None,
+                )
+                trader_scale_usd = float(trade.get("usdcSize", 0))
+                if first_trade and first_trade.source_orig_usd > 0 and trader_scale_usd > 0:
+                    ratio = min(1.0, trader_scale_usd / first_trade.source_orig_usd)
+                    copy_size = max(1.0, round(self.max_copy_size_usd * ratio, 2))
+                    logger.info(
+                        f"SCALING SIZING: ${copy_size:.2f} (trader scales ${trader_scale_usd:,.0f} "
+                        f"/ first ${first_trade.source_orig_usd:,.0f} = {ratio:.1%})"
+                    )
+                else:
+                    copy_size = self.max_copy_size_usd
+
+            # ── GUARD 13: Market-Level Risiko-Cap (8% des Wallets) ──
+            MAX_MARKET_PCT = 0.08
+            if self.executor.is_live and (is_scaling or is_hedge):
+                try:
+                    balance = await self.executor.get_balance()
+                    max_per_market = balance * MAX_MARKET_PCT
+                    market_exposure = sum(
+                        p.size_usd for p in self._copied_positions
+                        if p.condition_id == condition_id and not p.resolved
+                    )
+                    if market_exposure + copy_size > max_per_market:
+                        capped = max(0, max_per_market - market_exposure)
+                        if capped < 1.0:
+                            logger.warning(f"RISK CAP: ${market_exposure:.2f} + ${copy_size:.2f} > 8% (${max_per_market:.2f}) — SKIP")
+                            continue
+                        copy_size = round(capped, 2)
+                        logger.info(f"RISK CAP: copy reduced to ${copy_size:.2f} (8% = ${max_per_market:.2f})")
+                except Exception:
+                    pass
+
             # ── Kelly Position Sizing ──
             # Verwende Trader's historische Win-Rate für dynamische Sizing
             wallet_stats = {n: s for n, s in
@@ -956,15 +1007,33 @@ class CopyTradingStrategy(StrategyBase):
         # (nicht bei unmatched sells oder hedge-management)
         self.guards.report_dump(addr, condition_id)
 
+        # Proportionaler Teilverkauf: Wie viel % hat der Tracker verkauft?
+        sell_usdc = float(trade.get("usdcSize", 0))
+        tracker_pos = await self._fetch_tracker_position(addr, condition_id, outcome_index)
+        if tracker_pos and sell_usdc > 0:
+            tracker_remaining = tracker_pos.get("initialValue", 0)
+            tracker_total_before = tracker_remaining + sell_usdc
+            sell_ratio = min(1.0, sell_usdc / max(1, tracker_total_before))
+        else:
+            sell_ratio = 1.0  # Fallback: alles verkaufen
+
         for pos in matching:
-            # FIX: Simplified — bei $5 Positionen immer komplett verkaufen
-            # Partial sells auf $5 Positionen erzeugen Dust + extra Fees
-            our_sell_size = pos.size_usd
+            # Proportionaler Teilverkauf
+            our_sell_size = max(1.0, round(pos.size_usd * sell_ratio, 2))
+            if our_sell_size >= pos.size_usd * 0.9:
+                our_sell_size = pos.size_usd  # Fast alles → lieber ganz (kein Dust)
 
             logger.info(
-                f"SELL-COPY: {name} verkauft {outcome} → wir auch! "
-                f"${our_sell_size:.2f} | {pos.trade_id}"
+                f"SELL-COPY: {name} verkauft {sell_ratio:.0%} → wir ${our_sell_size:.2f} von ${pos.size_usd:.2f} | {pos.trade_id}"
             )
+
+            # Aggressives Pricing: Best Bid vom CLOB (nicht stale Tracker-Preis)
+            actual_sell_price = sell_price
+            if pos.token_id:
+                current_bid = await self._fetch_current_bid(pos.token_id)
+                if current_bid > 0:
+                    actual_sell_price = current_bid
+                    logger.debug(f"SELL using current bid {current_bid:.3f} (tracker sold at {sell_price:.3f})")
 
             # LIVE SELL Order
             sell_success = False
@@ -974,7 +1043,7 @@ class CopyTradingStrategy(StrategyBase):
                     res = await self.executor.place_order(
                         token_id=pos.token_id,
                         side="SELL",
-                        price=sell_price,
+                        price=actual_sell_price,
                         size_usd=our_sell_size,
                         asset=name,
                         direction=f"SELL_{outcome}",
@@ -982,8 +1051,34 @@ class CopyTradingStrategy(StrategyBase):
                     if res.success:
                         sell_success = True
                         sell_order_id = res.order_id
-                        self._resolve_position(pos, -pos.size_usd * 0.1)  # Estimated loss on exit
-                        logger.info(f"SELL-COPY LIVE OK: {pos.trade_id} — {res.order_id}")
+
+                        # Fill-Check (wie ODA)
+                        await asyncio.sleep(2)
+                        try:
+                            import asyncio as _aio
+                            loop = _aio.get_event_loop()
+                            order = await loop.run_in_executor(None, self.executor._client.get_order, res.order_id)
+                            if order and float(order.get("size_matched", 0)) < 0.01:
+                                logger.warning(f"SELL-COPY NOT FILLED → cancelling {pos.trade_id}")
+                                await loop.run_in_executor(None, self.executor._client.cancel, res.order_id)
+                                sell_success = False
+                        except Exception:
+                            pass
+
+                        if sell_success:
+                            # Echtes PnL: (Shares × Verkaufspreis) - Kaufkosten
+                            shares_sold = our_sell_size / pos.entry_price if pos.entry_price > 0 else 0
+                            sell_proceeds = shares_sold * actual_sell_price
+                            real_pnl = sell_proceeds - our_sell_size
+                            # Partial Sell: Position nur teilweise resolven
+                            if our_sell_size >= pos.size_usd * 0.9:
+                                self._resolve_position(pos, real_pnl)
+                            else:
+                                pos.size_usd -= our_sell_size  # Restposition weiter tracken
+                                pos.pnl_usd += real_pnl
+                                self.risk.record_trade(real_pnl)
+                                logger.info(f"PARTIAL SELL: {pos.trade_id} — sold ${our_sell_size:.2f}, remaining ${pos.size_usd:.2f}, PnL ${real_pnl:+.2f}")
+                            logger.info(f"SELL-COPY LIVE OK: {pos.trade_id} — {res.order_id} PnL ${real_pnl:+.2f}")
                     else:
                         logger.error(f"SELL-COPY LIVE FAILED: {pos.trade_id} — {res.error}")
                 except Exception as e:
@@ -1018,8 +1113,12 @@ class CopyTradingStrategy(StrategyBase):
                                 direction=f"SELL_{hedge.outcome}",
                             )
                             if hr.success:
-                                self._resolve_position(hedge, -hedge.size_usd * 0.1)
-                                logger.info(f"HEDGE UNWIND OK: {hedge.trade_id} — {hr.order_id}")
+                                # Echtes PnL für Hedge Unwind
+                                h_shares = hedge.size_usd / hedge.entry_price if hedge.entry_price > 0 else 0
+                                h_sell_price = max(0.01, 1.0 - actual_sell_price)
+                                h_pnl = (h_shares * h_sell_price) - hedge.size_usd
+                                self._resolve_position(hedge, h_pnl)
+                                logger.info(f"HEDGE UNWIND OK: {hedge.trade_id} — {hr.order_id} PnL ${h_pnl:+.2f}")
                         except Exception as e:
                             logger.error(f"HEDGE UNWIND FAILED: {hedge.trade_id} — {e}")
 
@@ -1206,6 +1305,38 @@ class CopyTradingStrategy(StrategyBase):
                 return 0.0
         except Exception:
             return 0.0
+
+    async def _fetch_current_bid(self, token_id: str) -> float:
+        """Holt den aktuellen Best-Bid-Preis vom CLOB Orderbook (für SELL)."""
+        if not self._session or self._session.closed or not token_id:
+            return 0.0
+        try:
+            url = f"https://clob.polymarket.com/book?token_id={token_id}"
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    book = await resp.json()
+                    bids = book.get("bids", [])
+                    if bids:
+                        return float(bids[0].get("price", 0))
+                return 0.0
+        except Exception:
+            return 0.0
+
+    async def _fetch_tracker_position(self, wallet: str, condition_id: str, outcome_index: int) -> dict | None:
+        """Holt die aktuelle Position eines Trackers auf einem bestimmten Market."""
+        if not self._session or self._session.closed:
+            return None
+        try:
+            url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    positions = await resp.json()
+                    for p in positions:
+                        if p.get("conditionId") == condition_id and p.get("outcomeIndex") == outcome_index:
+                            return p
+                return None
+        except Exception:
+            return None
 
     def _compute_wallet_win_rate(self, wallet_name: str) -> float:
         """Berechnet echte Win-Rate mit Bayesian Prior.
