@@ -332,14 +332,20 @@ function renderWallets(d) {
 }
 
 function renderPerformance(d) {
-  id('kpi-total').textContent = d.copies_total || 0;
+  // Journal-Stats als Source of Truth (persistent über Restarts)
+  const js = d.journal_stats || {};
+  const jWins = js.wins || 0;
+  const jLosses = js.losses || 0;
+  const jPnl = js.total_pnl || 0;
+  const jWR = js.win_rate || 0;
+  const jTotal = js.total_opens || d.copies_total || 0;
+
+  id('kpi-total').textContent = jTotal;
   id('kpi-active').textContent = d.copies_active || 0;
-  const total = d.copies_total || 0;
-  const stats = d.per_wallet_stats || {};
-  let wins=0, losses=0, pnl=0;
-  for (const [k,v] of Object.entries(stats)) { pnl += v.pnl || 0; }
-  id('kpi-pnl').textContent = '$' + (pnl >= 0 ? '+' : '') + pnl.toFixed(2);
-  id('kpi-pnl').className = 'kpi-val ' + (pnl >= 0 ? 'g' : 'rd');
+  id('kpi-wr').textContent = (jWins + jLosses) > 0 ? jWR + '%' : '—';
+  id('kpi-wr').className = 'kpi-val ' + (jWR >= 50 ? 'g' : jWR > 0 ? 'rd' : 'd');
+  id('kpi-pnl').textContent = '$' + (jPnl >= 0 ? '+' : '') + jPnl.toFixed(2);
+  id('kpi-pnl').className = 'kpi-val ' + (jPnl >= 0 ? 'g' : 'rd');
 
   const copies = d.recent_copies || [];
   if (!copies.length) {
