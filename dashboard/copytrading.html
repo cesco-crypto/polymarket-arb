@@ -411,11 +411,16 @@ function renderWallets(d) {
     const lb = lbLookup[w.address.toLowerCase()];
     const displayPnl = lb ? lb.pnl : w.pnl;
     const pnlColor = displayPnl >= 0 ? 'g' : 'rd';
-    // Inaktivitäts-Check: kch123 etc. haben copies=0
-    const isInactive = (st.copies || 0) === 0 && !isPaused;
-    const inactiveTag = isInactive ? '<span style="font-size:8px;color:var(--red);margin-left:4px">INACTIVE</span>' : '';
-    return `<div class="wcard ${isPaused ? 'paused' : 'active'}" style="${isInactive ? 'opacity:0.6' : ''}">
-      <div class="wcard-name">${esc(w.name)}${inactiveTag}</div>
+    // Status: "NEW" wenn gerade erst hinzugefügt (0 copies), "TRACKING" wenn aktiv kopiert wird
+    const copies = st.copies || 0;
+    const isNew = copies === 0 && !isPaused;
+    const statusTag = isNew
+      ? '<span style="font-size:8px;color:var(--accent);margin-left:4px">NEW</span>'
+      : copies > 0
+      ? '<span style="font-size:8px;color:var(--green);margin-left:4px">TRACKING</span>'
+      : '';
+    return `<div class="wcard ${isPaused ? 'paused' : 'active'}">
+      <div class="wcard-name">${esc(w.name)}${statusTag}</div>
       <div class="wcard-addr">${shortAddr(w.address)}</div>
       <div class="wcard-pnl ${pnlColor}">${fmt(displayPnl)}${lb ? '' : ' <span style="font-size:8px;color:var(--dim)">(cached)</span>'}</div>
       <div class="wcard-meta">
