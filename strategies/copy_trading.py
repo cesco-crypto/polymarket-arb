@@ -1171,13 +1171,7 @@ class CopyTradingStrategy(StrategyBase):
         matching = [p for p in matching if p.token_id]
 
         if not matching:
-            logger.info(f"SELL SIGNAL (no match): {name} SELL {outcome} @ {sell_price:.3f} | {trade.get('title','')[:40]}")
-            asyncio.create_task(telegram.send_alert(
-                f"🔔 <b>EXIT SIGNAL (unmatched)</b>\n"
-                f"👤 <b>{name}</b> SELL {outcome} @ {sell_price:.3f}\n"
-                f"📍 {trade.get('title','')[:50]}\n"
-                f"ℹ️ Wir haben keine Position auf diesem Outcome von {name}"
-            ))
+            logger.debug(f"SELL SIGNAL (no match): {name} SELL {outcome} @ {sell_price:.3f} | {trade.get('title','')[:40]}")
             return
 
         # BAIT DETECTION: Nur feuern wenn wir wirklich eine Position von DIESEM Wallet haben
