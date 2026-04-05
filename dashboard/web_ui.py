@@ -609,9 +609,17 @@ def _read_journal_stats() -> dict:
     for tid, events in by_trade.items():
         open_ev = next((e for e in events if e.get("event") == "open"), None)
         close_ev = next((e for e in events if e.get("event") in ("redeemed", "resolved_loss", "close")), None)
+        live_upd = next((e for e in events if e.get("event") == "live_update"), None)
 
         if not open_ev:
             continue
+
+        # Merge live_update → open_ev (überschreibt die initialen false-Werte)
+        if live_upd and open_ev:
+            if live_upd.get("live_order_success"):
+                open_ev["live_order_success"] = True
+            if live_upd.get("live_order_id"):
+                open_ev["live_order_id"] = live_upd["live_order_id"]
 
         order_type = open_ev.get("order_type", "")
         strat = get_strategy(tid, order_type)

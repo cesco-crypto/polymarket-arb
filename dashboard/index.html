@@ -948,7 +948,7 @@ function switchTab(btn, tab) {
         <td class="r ${pnlC} b" style="font-size:11px;white-space:nowrap">${pnl!==0 ? (pnl>=0?'+':'')+'$'+pnl.toFixed(2) : '—'}</td>
         <td>${srcTag}</td>
         <td style="white-space:nowrap">${txCell}</td>
-        <td>${statusTag}</td>
+        <td style="white-space:nowrap">${statusTag}${t.live_order_success ? ' <span style="font-size:7px;color:var(--green)">LIVE</span>' : ''}</td>
       </tr>`;
     }).join('');
   }
