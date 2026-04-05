@@ -468,7 +468,7 @@ async def api_journal() -> dict:
 # ═══════════════════════════════════════════════════════════════════
 
 _journal_stats_cache: dict = {"data": {}, "ts": 0}
-JOURNAL_PATH = Path("data/trade_journal.jsonl")
+JOURNAL_PATH = Path(__file__).parent.parent / "data" / "trade_journal.jsonl"
 
 
 def _read_journal_stats() -> dict:
