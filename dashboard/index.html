@@ -145,7 +145,7 @@
         <span class="d" style="font-size:9px;cursor:pointer;padding:1px 5px;border-radius:3px" onclick="setPnlRange('ALL')" id="pnl-all">ALL</span>
       </div>
     </div>
-    <canvas id="pnl-chart" width="240" height="48" style="width:100%;height:48px;margin-top:4px"></canvas>
+    <canvas id="pnl-mini-chart" width="240" height="48" style="width:100%;height:48px;margin-top:4px"></canvas>
   </div>
   <div class="stat">
     <div style="display:flex;justify-content:space-between;align-items:baseline">
@@ -536,7 +536,18 @@ function switchTab(btn, tab) {
   setInterval(fetchWallet, 30000);
   fetchWallet();
 
-  // --- P4: Risk ---
+  // --- P4: Risk (Journal-basiert) ---
+  let _journalStats = null;
+
+  async function fetchJournalForRisk() {
+    try {
+      const r = await fetch('/api/journal/stats');
+      _journalStats = await r.json();
+    } catch(e) {}
+  }
+  fetchJournalForRisk();
+  setInterval(fetchJournalForRisk, 30000);
+
   function renderRisk(t, cfg) {
     const isLive = _wallet.live;
     const cap = isLive ? _wallet.balance : t.capital_usd;
@@ -546,7 +557,9 @@ function switchTab(btn, tab) {
     id('capital').textContent = '$' + (cap || 0).toLocaleString('en',{minimumFractionDigits:2});
     id('capital-lbl').textContent = lbl;
 
-    const pnl = t.daily_pnl_usd || 0;
+    // P&L: Aus Journal (Single Source of Truth) statt RAM
+    const jl = _journalStats ? _journalStats.live : null;
+    const pnl = jl ? jl.total_pnl : (t.daily_pnl_usd || 0);
     id('pnl').className = 'stat-val ' + (pnl >= 0 ? 'g' : 'rd');
     id('pnl').textContent = (pnl>=0?'+':'') + '$' + pnl.toFixed(2);
     recordPnl(pnl);
@@ -570,12 +583,18 @@ function switchTab(btn, tab) {
       id('kelly-val').textContent = '—';
     }
 
-    const wr = t.win_rate_pct || 0;
+    // Win Rate, Wins, Losses: Aus Journal
+    const wins = jl ? jl.wins : (t.wins || 0);
+    const losses = jl ? jl.losses : (t.losses || 0);
+    const wr = jl ? jl.win_rate : (t.win_rate_pct || 0);
+    const totalResolved = wins + losses;
+    const avgPnl = totalResolved > 0 ? pnl / totalResolved : 0;
+
     id('wr-val').className = wr >= 70 ? 'g b' : wr >= 55 ? 'y' : wr > 0 ? 'rd' : 'd';
-    id('wr-val').textContent = t.trades_closed > 0 ? wr.toFixed(1) + '%' : '—';
-    id('wins').textContent = t.wins || 0;
-    id('losses').textContent = t.losses || 0;
-    id('avg-pnl').textContent = t.avg_pnl_usd !== undefined ? '$' + t.avg_pnl_usd.toFixed(4) : '—';
+    id('wr-val').textContent = totalResolved > 0 ? wr.toFixed(1) + '%' : '—';
+    id('wins').textContent = wins;
+    id('losses').textContent = losses;
+    id('avg-pnl').textContent = totalResolved > 0 ? '$' + avgPnl.toFixed(2) : '—';
 
     const ks = t.kill_switch_active;
     // Mode + Donation (from wallet fetch, not WS payload)
@@ -967,7 +986,7 @@ function switchTab(btn, tab) {
   }
 
   function drawPnlChart() {
-    const canvas = document.getElementById('pnl-chart');
+    const canvas = document.getElementById('pnl-mini-chart');
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     const w = canvas.width, h = canvas.height;
