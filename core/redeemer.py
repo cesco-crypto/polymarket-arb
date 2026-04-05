@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from urllib.request import urlopen, Request
 
 from loguru import logger
@@ -164,7 +165,18 @@ class AutoRedeemer:
                 if receipt.status == 1:
                     redeemed += 1
                     total_value += value
+                    tx_hash_hex = tx_hash.hex() if hasattr(tx_hash, 'hex') else str(tx_hash)
                     logger.info(f"AutoRedeemer: ✅ Redeemed ${value:.2f} from {title}")
+
+                    # JOURNAL CLOSE: Verknüpfe Redemption mit Original-Trade
+                    self._log_redemption_to_journal(
+                        condition_id=cid_hex,
+                        title=pos.get("title", "")[:60],
+                        outcome=pos.get("outcome", ""),
+                        payout_usd=value,
+                        initial_value=pos.get("initialValue", 0),
+                        tx_hash_hex=tx_hash_hex,
+                    )
                 else:
                     failed += 1
                     logger.warning(f"AutoRedeemer: ❌ Reverted for {title}")
@@ -189,6 +201,130 @@ class AutoRedeemer:
             "total_lifetime_redeemed": self._total_redeemed,
             "total_lifetime_usd": round(self._total_redeemed_usd, 2),
         }
+
+    def _log_redemption_to_journal(
+        self, condition_id: str, title: str, outcome: str,
+        payout_usd: float, initial_value: float, tx_hash_hex: str,
+    ) -> None:
+        """Schreibt einen 'redeemed' Close-Event ins Trade Journal.
+
+        Passiv: Verknüpft den Redeem mit dem Original-Trade über condition_id.
+        Wenn kein matching trade_id gefunden wird, wird der Event trotzdem
+        geloggt mit trade_id='REDEEM-UNKNOWN'.
+        """
+        JOURNAL_PATH = Path("data/trade_journal.jsonl")
+
+        # 1. Finde den Original-Trade im Journal via condition_id
+        matched_trade_id = "REDEEM-UNKNOWN"
+        matched_order_type = "unknown"
+        matched_source = ""
+        matched_entry_price = 0.0
+
+        try:
+            if JOURNAL_PATH.exists():
+                with open(JOURNAL_PATH) as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        entry = json.loads(line)
+                        if entry.get("event") != "open":
+                            continue
+                        if entry.get("condition_id") == condition_id:
+                            matched_trade_id = entry.get("trade_id", "REDEEM-UNKNOWN")
+                            matched_order_type = entry.get("order_type", "unknown")
+                            matched_source = entry.get("source_wallet_name", "")
+                            matched_entry_price = entry.get("executed_price", 0.0)
+                            break
+        except Exception as e:
+            logger.debug(f"Journal match error: {e}")
+
+        # 2. Wenn kein CID-Match, versuche Fuzzy-Match über Titel
+        if matched_trade_id == "REDEEM-UNKNOWN" and title:
+            try:
+                if JOURNAL_PATH.exists():
+                    with open(JOURNAL_PATH) as f:
+                        for line in f:
+                            if not line.strip():
+                                continue
+                            entry = json.loads(line)
+                            if entry.get("event") != "open":
+                                continue
+                            q = entry.get("market_question", "")
+                            if title[:20].lower() in q.lower() and q:
+                                matched_trade_id = entry.get("trade_id", "REDEEM-UNKNOWN")
+                                matched_order_type = entry.get("order_type", "unknown")
+                                matched_source = entry.get("source_wallet_name", "")
+                                matched_entry_price = entry.get("executed_price", 0.0)
+                                break
+            except Exception:
+                pass
+
+        # 3. Berechne PnL
+        pnl_usd = payout_usd - initial_value if initial_value > 0 else payout_usd
+
+        # 4. Schreibe Close-Event ins JSONL
+        close_event = {
+            "trade_id": matched_trade_id,
+            "event": "redeemed",
+            "exit_ts": time.time(),
+            "condition_id": condition_id,
+            "market_question": title,
+            "direction": outcome,
+            "order_type": matched_order_type,
+            "source_wallet_name": matched_source,
+            "executed_price": matched_entry_price,
+            "size_usd": initial_value,
+            "pnl_usd": round(pnl_usd, 4),
+            "pnl_pct": round(pnl_usd / max(0.01, initial_value) * 100, 2),
+            "outcome_correct": True,  # Redeemed = gewonnen
+            "payout_usd": round(payout_usd, 4),
+            "redeem_tx_hash": tx_hash_hex,
+        }
+
+        try:
+            JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(JOURNAL_PATH, "a") as f:
+                f.write(json.dumps(close_event) + "\n")
+            logger.info(
+                f"JOURNAL REDEEMED: {matched_trade_id} | "
+                f"${payout_usd:.2f} payout, ${pnl_usd:+.2f} PnL | "
+                f"{matched_order_type} | {title[:30]}"
+            )
+        except Exception as e:
+            logger.error(f"Journal redeem write error: {e}")
+
+        # 5. Validiere JSONL-Integrität nach Schreibvorgang
+        self._validate_journal(JOURNAL_PATH)
+
+    def _validate_journal(self, path: Path) -> bool:
+        """Prüft ob die JSONL-Datei strukturell valide ist nach einem Schreibvorgang."""
+        try:
+            valid = 0
+            invalid = 0
+            with open(path) as f:
+                for i, line in enumerate(f, 1):
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if not isinstance(entry, dict):
+                            invalid += 1
+                            logger.error(f"Journal validation: Line {i} is not a dict")
+                        elif "trade_id" not in entry or "event" not in entry:
+                            invalid += 1
+                            logger.error(f"Journal validation: Line {i} missing trade_id or event")
+                        else:
+                            valid += 1
+                    except json.JSONDecodeError:
+                        invalid += 1
+                        logger.error(f"Journal validation: Line {i} invalid JSON")
+            if invalid > 0:
+                logger.error(f"JOURNAL VALIDATION FAILED: {invalid} invalid lines (of {valid + invalid})")
+                return False
+            return True
+        except Exception as e:
+            logger.error(f"Journal validation error: {e}")
+            return False
 
     def get_all_positions(self) -> list[dict]:
         """Holt ALLE Positionen (nicht nur redeemable)."""
