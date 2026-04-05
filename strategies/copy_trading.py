@@ -537,6 +537,140 @@ class CopyTradingStrategy(StrategyBase):
         return False
 
     # ═══════════════════════════════════════════════════════════════
+    # MEMORY REBUILD — Offene Positionen nach Restart wiederherstellen
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _rebuild_copied_positions(self) -> None:
+        """Stellt _copied_positions aus Journal + Wallet-Positionen wieder her.
+
+        Nach jedem Restart ist _copied_positions leer. Ohne Rebuild:
+        - SELL-Copy kann nicht feuern (findet keine matching Position)
+        - Hedge-Unwind funktioniert nicht
+        - Market-Exposure-Cap zählt falsch (0 statt real)
+
+        Rebuild-Logik:
+        1. Lese alle CT- Opens aus dem Journal
+        2. Prüfe welche KEIN close/redeemed/resolved_loss Event haben
+        3. Cross-check mit Polymarket Wallet-Positionen (Sanity)
+        4. Baue CopiedPosition Objekte für alle noch offenen Trades
+        """
+        journal_path = Path("data/trade_journal.jsonl")
+        # Try multiple paths
+        for p in [
+            journal_path,
+            Path(__file__).parent.parent / "data" / "trade_journal.jsonl",
+            Path("/home/ubuntu/polymarket-arb/data/trade_journal.jsonl"),
+        ]:
+            if p.exists():
+                journal_path = p
+                break
+
+        if not journal_path.exists():
+            logger.warning("REBUILD: Journal nicht gefunden — keine Positionen wiederhergestellt")
+            return
+
+        # 1. Journal lesen — alle CT- Events
+        opens: dict[str, dict] = {}  # trade_id → open event
+        closed_ids: set[str] = set()  # trade_ids die geschlossen sind
+
+        try:
+            with open(journal_path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        e = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    tid = e.get("trade_id", "")
+                    if not tid.startswith("CT-"):
+                        continue
+
+                    event = e.get("event", "")
+                    if event == "open":
+                        opens[tid] = e
+                    elif event in ("redeemed", "resolved_loss", "close", "copy_sell"):
+                        closed_ids.add(tid)
+                        # Auch den _SELL Suffix checken
+                        base_tid = tid.replace("_SELL", "")
+                        closed_ids.add(base_tid)
+        except Exception as e:
+            logger.error(f"REBUILD: Journal read error: {e}")
+            return
+
+        # 2. Offene Trades = Opens OHNE Close
+        open_trades = {tid: data for tid, data in opens.items() if tid not in closed_ids}
+
+        if not open_trades:
+            logger.info("REBUILD: Keine offenen Copy-Trades im Journal gefunden")
+            return
+
+        # 3. Wallet-Positionen als Sanity-Check
+        wallet_cids: set[str] = set()
+        if self._session and not self._session.closed:
+            try:
+                wallet = self.settings.polymarket_funder
+                url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=200"
+                async with self._session.get(url) as resp:
+                    if resp.status == 200:
+                        positions = await resp.json()
+                        for p in positions:
+                            if p.get("currentValue", 0) > 0.01:
+                                wallet_cids.add(p.get("conditionId", ""))
+            except Exception:
+                pass  # Sanity-Check optional
+
+        # 4. Rebuild CopiedPosition Objekte
+        rebuilt = 0
+        for tid, data in open_trades.items():
+            cid = data.get("condition_id", "")
+
+            # Sanity: Wenn wir Wallet-Daten haben, prüfe ob Position noch existiert
+            if wallet_cids and cid and cid not in wallet_cids:
+                logger.debug(f"REBUILD SKIP: {tid} — nicht mehr in Wallet (redeemed/resolved)")
+                continue
+
+            pos = CopiedPosition(
+                trade_id=tid,
+                source_wallet=data.get("source_wallet", ""),
+                source_name=data.get("source_wallet_name", "") or data.get("asset", ""),
+                market_title=data.get("market_question", ""),
+                market_slug=data.get("window_slug", ""),
+                condition_id=cid,
+                side="BUY",
+                outcome=data.get("direction", ""),
+                entry_price=data.get("executed_price", 0),
+                size_usd=data.get("size_usd", 0),
+                copied_at=data.get("entry_ts", 0),
+                token_id="",  # Nicht im Journal — wird bei nächstem SELL via API geholt
+                outcome_index=-1,  # Nicht im Journal — wird bei Match via API bestimmt
+                is_hedge=data.get("order_type", "") == "copy_hedge",
+                source_tx_hash=data.get("source_tx_hash", ""),
+                source_orig_usd=data.get("size_usd", 0),
+                live_order_id=data.get("live_order_id", ""),
+                live_success=data.get("live_order_success", False),
+            )
+            self._copied_positions.append(pos)
+            rebuilt += 1
+
+        logger.info(
+            f"REBUILD: {rebuilt} offene Copy-Positionen wiederhergestellt "
+            f"(von {len(open_trades)} im Journal, {len(closed_ids)} geschlossen)"
+        )
+
+        # Copy-Count auf letzten Stand setzen
+        if open_trades:
+            max_num = max(
+                int(tid.replace("CT-", "").replace("_SELL", ""))
+                for tid in opens.keys()
+                if tid.startswith("CT-") and tid.replace("CT-", "").replace("_SELL", "").isdigit()
+            )
+            if max_num > self._copy_count:
+                self._copy_count = max_num
+                logger.info(f"REBUILD: Copy-Count auf {self._copy_count} gesetzt")
+
+    # ═══════════════════════════════════════════════════════════════
     # LIFECYCLE
     # ═══════════════════════════════════════════════════════════════
 
@@ -563,6 +697,9 @@ class CopyTradingStrategy(StrategyBase):
 
         # Initial: Letzte Trades jeder Wallet laden (um keine alten Trades zu kopieren)
         await self._initialize_last_seen()
+
+        # MEMORY REBUILD: Offene Positionen aus Journal + Wallet wiederherstellen
+        await self._rebuild_copied_positions()
 
         try:
             await asyncio.gather(

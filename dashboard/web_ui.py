@@ -32,6 +32,43 @@ from utils.logger import setup_logger
 app = FastAPI(title="Polymarket Latency Arb")
 
 # ═══════════════════════════════════════════════════════════════════
+# STRATEGY STATE PERSISTENCE — Überlebt Server-Restarts
+# ═══════════════════════════════════════════════════════════════════
+
+STRATEGY_STATE_FILE = Path(__file__).parent.parent / "data" / "strategy_state.json"
+
+
+def _save_strategy_state() -> None:
+    """Speichert aktive Strategien + Live-Mode persistent (atomic write)."""
+    try:
+        STRATEGY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "active": list(active_strategies.keys()),
+            "live_trading": settings.live_trading,
+            "saved_at": time.time(),
+        }
+        tmp = STRATEGY_STATE_FILE.with_suffix(".tmp")
+        with open(tmp, "w") as f:
+            json.dump(state, f)
+        import os as _os
+        _os.replace(str(tmp), str(STRATEGY_STATE_FILE))
+    except Exception as e:
+        logger.error(f"Strategy state save error: {e}")
+
+
+def _load_strategy_state() -> dict | None:
+    """Lädt gespeicherten Strategie-State. Returns None bei Fehler."""
+    try:
+        if STRATEGY_STATE_FILE.exists():
+            with open(STRATEGY_STATE_FILE) as f:
+                state = json.load(f)
+            if isinstance(state, dict) and "active" in state:
+                return state
+    except Exception as e:
+        logger.warning(f"Strategy state load error: {e}")
+    return None
+
+# ═══════════════════════════════════════════════════════════════════
 # SHARED ASYNC HTTP CLIENT (replaces blocking urlopen)
 # ═══════════════════════════════════════════════════════════════════
 _http_session: aiohttp.ClientSession | None = None
@@ -174,12 +211,33 @@ async def startup() -> None:
 
     start_time = time.time()
 
-    # Primäre Strategie starten (aus Config)
-    strat = create_strategy(settings.strategy_name, settings)
-    strategy = strat  # Primär für Dashboard-Broadcast
-    active_strategies[strat.name] = strat
-    _strategy_tasks[strat.name] = asyncio.create_task(strat.run())
-    logger.info(f"Strategie geladen: {strat.name} — {strat.description}")
+    # Strategie-State laden (persistent über Restarts)
+    saved = _load_strategy_state()
+    available = list_strategies()
+
+    if saved:
+        # Restore: Live-Mode + alle gespeicherten Strategien
+        settings.live_trading = saved.get("live_trading", settings.live_trading)
+        names_to_start = saved.get("active", [settings.strategy_name])
+        logger.info(f"Strategy State geladen: {names_to_start} | live={settings.live_trading}")
+    else:
+        # Fallback: Default aus config.py
+        names_to_start = [settings.strategy_name]
+        logger.info(f"Kein Strategy State — Default: {names_to_start}")
+
+    for name in names_to_start:
+        if name not in available:
+            logger.warning(f"Strategie '{name}' nicht in Registry — skip")
+            continue
+        try:
+            strat = create_strategy(name, settings)
+            active_strategies[name] = strat
+            _strategy_tasks[name] = asyncio.create_task(strat.run())
+            if strategy is None or name in {"momentum_latency_v2", "hmsf_decision_engine"}:
+                strategy = strat  # Momentum bevorzugt als Primär
+            logger.info(f"Strategie geladen: {name} — {strat.description}")
+        except Exception as e:
+            logger.error(f"Strategie '{name}' Start FAILED: {e}")
 
     # Dashboard broadcastet Strategy-Status an WebSocket-Clients (1Hz)
     _broadcast_task = asyncio.create_task(_broadcast_loop())
@@ -999,6 +1057,7 @@ async def set_trading_mode(body: dict) -> dict:
 
     strategy = next(iter(active_strategies.values()), None)
 
+    _save_strategy_state()  # Persistent speichern
     return {
         "live_trading": settings.live_trading,
         "mode": mode_str,
@@ -1078,6 +1137,7 @@ async def enable_strategy(body: dict) -> dict:
     # Wenn Copy Trading aktiviert wird und eine Momentum bereits läuft → primär bleibt Momentum
 
     logger.info(f"Strategie AKTIVIERT: {name} | Primär für Dashboard: {strategy.name if strategy else '?'}")
+    _save_strategy_state()  # Persistent speichern
     return {"status": "enabled", "strategy": name, "active": list(active_strategies.keys())}
 
 
@@ -1112,6 +1172,7 @@ async def disable_strategy(body: dict) -> dict:
         strategy = next(iter(active_strategies.values()), None)
 
     logger.info(f"Strategie DEAKTIVIERT: {name} ({len(active_strategies)} aktiv)")
+    _save_strategy_state()  # Persistent speichern
     return {"status": "disabled", "strategy": name, "active": list(active_strategies.keys())}
 
 
