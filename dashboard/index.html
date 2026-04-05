@@ -168,7 +168,7 @@
     <div class="stat-row"><span class="d">Kill Switch</span><span id="kill-switch"><span class="dot dot-g" style="display:inline-block;width:6px;height:6px;vertical-align:middle;margin-right:4px"></span>OFF</span></div>
   </div>
   <div class="stat">
-    <div class="stat-row"><span class="d">Mode</span><span id="mode-badge" class="b">PAPER</span></div>
+    <div class="stat-row"><span class="d">Mode</span><span id="mode-badge" class="b d">...</span></div>
     <div class="stat-row">
       <span class="d">Order Type</span>
       <span id="order-type-btn" style="cursor:pointer;padding:2px 8px;border-radius:3px;font-size:10px;font-weight:700;border:1px solid var(--border)" onclick="toggleOrderType()">TAKER</span>
@@ -545,12 +545,15 @@ function switchTab(btn, tab) {
   setInterval(fetchJournalForRisk, 30000);
 
   function renderRisk(t, cfg) {
-    const isLive = _wallet.live;
-    const cap = isLive ? _wallet.balance : t.capital_usd;
-    const lbl = isLive ? 'LIVE CAPITAL (USDC.e)' : 'PAPER CAPITAL';
-    const capC = isLive ? (cap >= 70 ? 'g' : cap >= 50 ? 'y' : 'rd') : '';
+    // Warte auf Wallet-Daten bevor wir Capital anzeigen
+    // (verhindert Flash von "$1,000 PAPER" bevor echte Balance geladen)
+    const walletLoaded = _wallet && _wallet.balance !== undefined;
+    const isLive = walletLoaded ? _wallet.live : true; // Default: LIVE (nicht Paper)
+    const cap = walletLoaded ? _wallet.balance : null;
+    const lbl = walletLoaded ? (isLive ? 'LIVE CAPITAL (USDC.e)' : 'PAPER CAPITAL') : 'Loading...';
+    const capC = cap !== null ? (cap >= 70 ? 'g' : cap >= 50 ? 'y' : 'rd') : 'd';
     id('capital').className = 'stat-val ' + capC;
-    id('capital').textContent = '$' + (cap || 0).toLocaleString('en',{minimumFractionDigits:2});
+    id('capital').textContent = cap !== null ? '$' + cap.toLocaleString('en',{minimumFractionDigits:2}) : '...';
     id('capital-lbl').textContent = lbl;
 
     // P&L: Aus Journal (Single Source of Truth) statt RAM
@@ -594,8 +597,10 @@ function switchTab(btn, tab) {
 
     const ks = t.kill_switch_active;
     // Mode + Donation (from wallet fetch, not WS payload)
-    id('mode-badge').textContent = _wallet.live ? 'LIVE' : 'PAPER';
-    id('mode-badge').className = _wallet.live ? 'b rd' : 'b y';
+    if (walletLoaded) {
+      id('mode-badge').textContent = _wallet.live ? 'LIVE' : 'PAPER';
+      id('mode-badge').className = _wallet.live ? 'b g' : 'b y';
+    }
     id('donation').textContent = '$' + (d.donation_usd || 0).toFixed(2);
 
     // Order Type Toggle
