@@ -31,7 +31,7 @@
   .pt{font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:var(--text-dim);margin-bottom:8px;display:flex;align-items:center;gap:8px}
   .pt .ct{font-size:9px;color:var(--text-mid);font-weight:400;letter-spacing:0}
   table{width:100%;border-collapse:collapse;font-size:11px} th{text-align:left;padding:4px 6px;font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-dim);border-bottom:1px solid var(--border);font-weight:600}
-  td{padding:4px 6px;border-bottom:1px solid var(--border)} tr:hover{background:var(--bg-card2)}
+  td{padding:6px 8px;border-bottom:1px solid var(--border)} tr:hover{background:var(--bg-card2)}
   .r{text-align:right} .g{color:var(--green)} .rd{color:var(--red)} .y{color:var(--yellow)} .o{color:var(--orange)} .d{color:var(--text-dim)} .b{font-weight:700}
   .tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600}
   .tag-up{background:#22c55e18;color:var(--green)} .tag-dn{background:#ef444418;color:var(--red)}
@@ -91,8 +91,8 @@
   <div id="pnl-chart" style="height:180px;width:100%"></div>
 </div>
 <style>
-  .tf-btn{padding:3px 10px;border-radius:3px;font-size:9px;font-weight:600;cursor:pointer;border:1px solid var(--border);color:var(--text-dim);background:transparent;font-family:var(--font)}
-  .tf-btn:hover{border-color:var(--accent)} .tf-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .tf-btn{padding:4px 12px;border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border);color:var(--text-dim);background:transparent;font-family:var(--font);transition:all .15s}
+  .tf-btn:hover{border-color:var(--accent);color:var(--text)} .tf-btn.on{background:var(--accent);color:#fff;border-color:var(--accent)}
 </style>
 <script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
 
@@ -828,18 +828,32 @@ function switchTab(btn, tab) {
         {name: 'ODA', key: 'oda', color: 'var(--purple)'},
         {name: 'Momentum', key: 'momentum_live', color: 'var(--accent)'},
       ];
-      kpiEl.innerHTML = kpis.map(k => {
+      // Total PnL card first
+      const totalPnl = kpis.reduce((s, k) => s + ((bs[k.key] || {}).total_pnl || 0), 0);
+      const totalW = kpis.reduce((s, k) => s + ((bs[k.key] || {}).wins || 0), 0);
+      const totalL = kpis.reduce((s, k) => s + ((bs[k.key] || {}).losses || 0), 0);
+      const totalWR = (totalW + totalL) > 0 ? (totalW / (totalW + totalL) * 100).toFixed(1) : '—';
+
+      let kpiHtml = `<div style="flex:1;min-width:140px;padding:8px 12px;background:var(--bg-card2);border:1px solid var(--border-hi);border-radius:6px;border-left:3px solid ${totalPnl>=0?'var(--green)':'var(--red)'}">
+        <div style="font-size:9px;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.5px">Total Live PnL</div>
+        <div style="font-size:20px;font-weight:700;color:${totalPnl>=0?'var(--green)':'var(--red)'};margin-top:2px">${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}</div>
+        <div style="font-size:10px;color:var(--text-mid);margin-top:2px">${totalW}W / ${totalL}L | WR: ${totalWR}%</div>
+      </div>`;
+
+      kpiHtml += kpis.map(k => {
         const s = bs[k.key] || {};
         const pnl = s.total_pnl || 0;
         const w = s.wins || 0;
         const l = s.losses || 0;
-        const wr = (w + l) > 0 ? (w / (w + l) * 100).toFixed(0) : '—';
-        return `<div style="flex:1;min-width:120px;padding:6px 10px;background:var(--bg-card2);border:1px solid ${k.color}33;border-radius:4px;border-left:3px solid ${k.color}">
-          <div style="font-size:9px;color:${k.color};font-weight:600;text-transform:uppercase">${k.name}</div>
-          <div style="font-size:14px;font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
-          <div style="font-size:9px;color:var(--text-dim)">${w}W/${l}L ${wr !== '—' ? '| WR:'+wr+'%' : ''}</div>
+        const wr = (w + l) > 0 ? (w / (w + l) * 100).toFixed(0) + '%' : '—';
+        return `<div style="flex:1;min-width:120px;padding:8px 12px;background:var(--bg-card2);border:1px solid ${k.color}33;border-radius:6px;border-left:3px solid ${k.color}">
+          <div style="font-size:9px;color:${k.color};font-weight:600;text-transform:uppercase;letter-spacing:.5px">${k.name}</div>
+          <div style="font-size:16px;font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'};margin-top:2px">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
+          <div style="font-size:10px;color:var(--text-mid);margin-top:2px">${w}W/${l}L | WR: ${wr}</div>
         </div>`;
       }).join('');
+
+      kpiEl.innerHTML = kpiHtml;
     }
 
     // Filter trades
@@ -857,20 +871,37 @@ function switchTab(btn, tab) {
       return;
     }
 
+    // Relative time: "5m ago", "2h ago", "1d ago"
+    const relTime = (ts) => {
+      if (!ts) return '—';
+      const s = Math.floor(Date.now()/1000 - ts);
+      if (s < 60) return s + 's ago';
+      if (s < 3600) return Math.floor(s/60) + 'm ago';
+      if (s < 86400) return Math.floor(s/3600) + 'h ago';
+      return Math.floor(s/86400) + 'd ago';
+    };
     const fmtTs = (ts) => {
       if (!ts) return '—';
       const d = new Date(ts * 1000);
       return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ' ' + String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0');
     };
 
-    hb.innerHTML = trades.slice(0, 60).map(t => {
+    hb.innerHTML = trades.slice(0, 80).map(t => {
       const badge = _stratBadges[t.strategy] || _stratBadges.other;
       const pnl = t.pnl_usd || 0;
       const pnlC = pnl >= 0 ? 'g' : 'rd';
-      const market = (t.market_question || '').substring(0, 30);
+      const market = (t.market_question || '').substring(0, 28);
+      const fullMarket = t.market_question || '';
       const dir = t.direction || '?';
       const src = t.source_wallet_name || '';
-      const srcTag = src ? `<span style="font-size:8px;color:var(--yellow)">${src}</span>` : '<span class="d" style="font-size:8px">—</span>';
+      // Smart source label
+      const srcTag = src
+        ? `<span style="font-size:8px;color:var(--yellow)" title="Copied from ${src}">${src}</span>`
+        : t.strategy === 'oda'
+        ? '<span class="d" style="font-size:8px">Oracle</span>'
+        : t.strategy === 'momentum_live'
+        ? '<span class="d" style="font-size:8px">Signal</span>'
+        : '<span class="d" style="font-size:8px">—</span>';
 
       let statusTag;
       if (t.status === 'redeemed' || (t.outcome_correct === true)) {
@@ -881,14 +912,21 @@ function switchTab(btn, tab) {
         statusTag = '<span class="y" style="font-size:9px">OPEN</span>';
       }
 
-      return `<tr>
-        <td class="d" style="font-size:9px;white-space:nowrap">${fmtTs(t.entry_ts || t.exit_ts)}</td>
+      const ts = t.entry_ts || t.exit_ts;
+      const timeStr = relTime(ts);
+      const timeTitle = fmtTs(ts);
+      // Fade older entries
+      const isRecent = ts && (Date.now()/1000 - ts) < 7200; // Last 2h
+      const rowOpacity = isRecent ? '' : 'opacity:0.7';
+
+      return `<tr style="${rowOpacity}">
+        <td class="d" style="font-size:9px;white-space:nowrap" title="${timeTitle}">${timeStr}</td>
         <td>${badge}</td>
-        <td style="font-size:10px">${market}</td>
+        <td style="font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${fullMarket}">${market}</td>
         <td style="font-size:10px">${dir.substring(0,8)}</td>
-        <td class="r">${(t.executed_price||0).toFixed(3)}</td>
-        <td class="r">$${(t.size_usd||0).toFixed(2)}</td>
-        <td class="r ${pnlC} b">${pnl!==0 ? (pnl>=0?'+':'')+'$'+pnl.toFixed(2) : '—'}</td>
+        <td class="r" style="font-size:10px">${(t.executed_price||0).toFixed(3)}</td>
+        <td class="r" style="font-size:10px">$${(t.size_usd||0).toFixed(2)}</td>
+        <td class="r ${pnlC} b" style="font-size:11px;white-space:nowrap">${pnl!==0 ? (pnl>=0?'+':'')+'$'+pnl.toFixed(2) : '—'}</td>
         <td>${srcTag}</td>
         <td>${statusTag}</td>
       </tr>`;
