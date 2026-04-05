@@ -148,6 +148,99 @@
   </div>
 </div>
 
+<!-- Section 1b: Scout New Trader -->
+<div class="section" style="border:1px solid var(--accent)33">
+  <div class="section-hdr">
+    <span class="section-title" style="color:var(--accent)">Scout New Trader</span>
+  </div>
+  <div style="display:flex;gap:8px;align-items:flex-end">
+    <div style="flex:1">
+      <div style="font-size:9px;color:var(--dim);margin-bottom:4px">Enter a Polymarket wallet address to analyze</div>
+      <input id="scout-input" type="text" placeholder="0x..." style="width:100%;padding:8px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:var(--font);font-size:12px">
+    </div>
+    <button class="btn btn-accent" onclick="scoutTrader()" id="scout-btn" style="white-space:nowrap;padding:8px 16px">ANALYZE</button>
+  </div>
+  <!-- Scout Results (hidden until search) -->
+  <div id="scout-results" style="display:none;margin-top:12px">
+    <div id="scout-loading" style="display:none;text-align:center;padding:20px">
+      <span class="d">Analyzing wallet...</span>
+    </div>
+    <div id="scout-data" style="display:none">
+      <!-- Header -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div>
+          <span id="scout-name" style="font-size:14px;font-weight:700"></span>
+          <span id="scout-addr" class="d" style="font-size:9px;margin-left:8px;font-family:var(--font)"></span>
+          <a id="scout-pma-link" href="#" target="_blank" style="color:var(--accent);font-size:9px;margin-left:6px;text-decoration:none">Analytics ↗</a>
+        </div>
+        <button class="btn btn-green" onclick="followScoutedTrader()" id="scout-follow-btn">FOLLOW THIS TRADER</button>
+      </div>
+      <!-- KPI Row -->
+      <div style="display:flex;gap:10px;margin:10px 0;flex-wrap:wrap">
+        <div style="flex:1;min-width:100px;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid var(--green)">
+          <div style="font-size:9px;color:var(--dim)">Portfolio Value</div>
+          <div id="scout-portfolio" style="font-size:16px;font-weight:700;color:var(--green)">—</div>
+        </div>
+        <div style="flex:1;min-width:100px;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid var(--accent)">
+          <div style="font-size:9px;color:var(--dim)">Active Positions</div>
+          <div id="scout-positions" style="font-size:16px;font-weight:700">—</div>
+        </div>
+        <div style="flex:1;min-width:100px;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid var(--yellow)">
+          <div style="font-size:9px;color:var(--dim)">Last Active</div>
+          <div id="scout-active" style="font-size:16px;font-weight:700">—</div>
+        </div>
+        <div style="flex:1;min-width:100px;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid var(--purple)">
+          <div style="font-size:9px;color:var(--dim)">Avg Trade Size</div>
+          <div id="scout-avg" style="font-size:16px;font-weight:700">—</div>
+        </div>
+        <div style="flex:1;min-width:100px;padding:6px 10px;background:var(--bg);border-radius:4px;border-left:3px solid var(--orange)">
+          <div style="font-size:9px;color:var(--dim)">Categories</div>
+          <div id="scout-cats" style="font-size:11px;font-weight:600">—</div>
+        </div>
+      </div>
+      <!-- PnL Summary -->
+      <div style="display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+        <div style="flex:1;min-width:120px;padding:6px 10px;background:var(--bg);border-radius:4px">
+          <div style="font-size:9px;color:var(--dim)">Portfolio PnL</div>
+          <div id="scout-pnl" style="font-size:18px;font-weight:700">—</div>
+        </div>
+        <div style="flex:1;min-width:120px;padding:6px 10px;background:var(--bg);border-radius:4px">
+          <div style="font-size:9px;color:var(--dim)">Total Invested</div>
+          <div id="scout-invested" style="font-size:14px;font-weight:700">—</div>
+        </div>
+        <div style="flex:1;min-width:120px;padding:6px 10px;background:var(--bg);border-radius:4px">
+          <div style="font-size:9px;color:var(--dim)">Buys / Sells</div>
+          <div id="scout-buysells" style="font-size:14px;font-weight:700">—</div>
+        </div>
+      </div>
+      <!-- Recent Trades -->
+      <div style="font-size:10px;color:var(--dim);font-weight:600;margin-bottom:4px">RECENT TRADES (last 10)</div>
+      <table>
+        <tr><th>When</th><th>Side</th><th>Outcome</th><th class="r">Price</th><th class="r">Size</th><th>Market</th></tr>
+      </table>
+      <table id="scout-trades"><tr><td colspan="6" class="empty">—</td></tr></table>
+      <!-- Active Positions -->
+      <div style="font-size:10px;color:var(--dim);font-weight:600;margin:8px 0 4px">TOP POSITIONS</div>
+      <table>
+        <tr><th>Market</th><th>Outcome</th><th class="r">Value</th><th class="r">PnL</th></tr>
+      </table>
+      <table id="scout-pos"><tr><td colspan="4" class="empty">—</td></tr></table>
+      <!-- Category Selector for Follow -->
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+        <span style="font-size:10px;color:var(--dim)">Category:</span>
+        <select id="scout-category" style="padding:4px 8px;background:var(--bg);border:1px solid var(--border);border-radius:3px;color:var(--text);font-family:var(--font);font-size:11px">
+          <option value="mixed">Mixed</option><option value="sports">Sports</option>
+          <option value="crypto">Crypto</option><option value="politics">Politics</option>
+        </select>
+        <a id="scout-pm-link" href="#" target="_blank" class="btn btn-sm">Polymarket Profile ↗</a>
+        <a id="scout-pma-link2" href="#" target="_blank" class="btn btn-sm" style="border-color:var(--purple);color:var(--purple)">Analytics Deep-Dive ↗</a>
+      </div>
+    </div>
+    <!-- Error -->
+    <div id="scout-error" style="display:none;padding:12px;color:var(--red);text-align:center;font-size:11px"></div>
+  </div>
+</div>
+
 <!-- Section 2: Copy Performance -->
 <div class="section">
   <div class="section-hdr">
@@ -446,6 +539,168 @@ async function saveConfig() {
   const d = await r.json();
   toast(d.status === 'updated' ? 'Config saved!' : d.error, d.status === 'updated');
 }
+
+// ═══════════════════════════════════════════
+// SCOUT NEW TRADER
+// ═══════════════════════════════════════════
+let _scoutData = null;
+
+async function scoutTrader() {
+  const addr = id('scout-input').value.trim();
+  if (!addr || !addr.startsWith('0x') || addr.length < 10) {
+    toast('Enter a valid wallet address (0x...)', false);
+    return;
+  }
+
+  // Show loading
+  id('scout-results').style.display = 'block';
+  id('scout-loading').style.display = 'block';
+  id('scout-data').style.display = 'none';
+  id('scout-error').style.display = 'none';
+  id('scout-btn').textContent = 'ANALYZING...';
+  id('scout-btn').disabled = true;
+
+  try {
+    const r = await fetch('/api/copy/analyze?wallet=' + addr);
+    const d = await r.json();
+    _scoutData = d;
+    _scoutData._input_address = addr;
+
+    if (d.error) {
+      id('scout-loading').style.display = 'none';
+      id('scout-error').style.display = 'block';
+      id('scout-error').textContent = 'Error: ' + d.error;
+      return;
+    }
+
+    renderScoutResults(d, addr);
+  } catch(e) {
+    id('scout-loading').style.display = 'none';
+    id('scout-error').style.display = 'block';
+    id('scout-error').textContent = 'Analysis failed: ' + e.message;
+  } finally {
+    id('scout-btn').textContent = 'ANALYZE';
+    id('scout-btn').disabled = false;
+  }
+}
+
+function renderScoutResults(d, addr) {
+  id('scout-loading').style.display = 'none';
+  id('scout-data').style.display = 'block';
+
+  const s = d.summary || {};
+  const trades = d.recent_trades || [];
+  const positions = d.positions || [];
+
+  // Header
+  id('scout-name').textContent = addr.substring(0, 10) + '...';
+  id('scout-addr').textContent = addr;
+  id('scout-pma-link').href = 'https://polymarketanalytics.com/traders/' + addr;
+  id('scout-pm-link').href = 'https://polymarket.com/profile/' + addr;
+  id('scout-pma-link2').href = 'https://polymarketanalytics.com/traders/' + addr;
+
+  // KPIs
+  const pv = s.portfolio_value || 0;
+  id('scout-portfolio').textContent = fmt(pv);
+  id('scout-portfolio').style.color = pv > 0 ? 'var(--green)' : 'var(--dim)';
+  id('scout-positions').textContent = s.active_positions || 0;
+  id('scout-active').textContent = s.last_active || '—';
+  id('scout-avg').textContent = fmt(s.avg_trade_size_usd || 0);
+
+  // Categories
+  const cats = s.categories || {};
+  id('scout-cats').innerHTML = Object.entries(cats)
+    .sort((a,b) => b[1] - a[1])
+    .map(([k,v]) => `<span class="badge badge-${k}" style="margin-right:3px">${k}: ${v}</span>`)
+    .join('') || '—';
+
+  // PnL
+  const pnl = s.portfolio_pnl || 0;
+  id('scout-pnl').textContent = (pnl >= 0 ? '+' : '') + fmt(pnl);
+  id('scout-pnl').style.color = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  id('scout-invested').textContent = fmt(s.portfolio_invested || 0);
+  id('scout-buysells').textContent = (s.buys || 0) + ' / ' + (s.sells || 0);
+
+  // Recent Trades
+  if (trades.length) {
+    const relTime = ts => {
+      if (!ts) return '—';
+      const sec = Math.floor(Date.now()/1000 - ts);
+      if (sec < 60) return sec + 's';
+      if (sec < 3600) return Math.floor(sec/60) + 'm';
+      if (sec < 86400) return Math.floor(sec/3600) + 'h';
+      return Math.floor(sec/86400) + 'd';
+    };
+    id('scout-trades').innerHTML = trades.slice(0, 10).map(t => {
+      const sideC = t.side === 'BUY' ? 'g' : 'rd';
+      return `<tr>
+        <td class="d" style="font-size:9px">${relTime(t.timestamp)} ago</td>
+        <td class="${sideC}" style="font-weight:600">${t.side}</td>
+        <td style="font-size:10px">${esc((t.outcome||'?').substring(0,12))}</td>
+        <td class="r">${(t.price||0).toFixed(3)}</td>
+        <td class="r">${fmt(t.size_usd||0)}</td>
+        <td class="d" style="font-size:10px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(t.title||'')}">${esc((t.title||'').substring(0,25))}</td>
+      </tr>`;
+    }).join('');
+  } else {
+    id('scout-trades').innerHTML = '<tr><td colspan="6" class="empty">No recent trades</td></tr>';
+  }
+
+  // Positions
+  if (positions.length) {
+    id('scout-pos').innerHTML = positions.slice(0, 8).map(p => {
+      const pnlC = (p.pnl||0) >= 0 ? 'g' : 'rd';
+      return `<tr>
+        <td style="font-size:10px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(p.title||'')}">${esc((p.title||'').substring(0,30))}</td>
+        <td style="font-size:10px">${esc((p.outcome||'?').substring(0,12))}</td>
+        <td class="r">${fmt(p.current_value||0)}</td>
+        <td class="r ${pnlC} b">${(p.pnl||0)>=0?'+':''}${fmt(p.pnl||0)}</td>
+      </tr>`;
+    }).join('');
+  } else {
+    id('scout-pos').innerHTML = '<tr><td colspan="4" class="empty">No active positions</td></tr>';
+  }
+
+  // Auto-detect category
+  if (cats.sports > (cats.crypto||0) && cats.sports > (cats.politics||0)) {
+    id('scout-category').value = 'sports';
+  } else if ((cats.crypto||0) > (cats.sports||0)) {
+    id('scout-category').value = 'crypto';
+  } else if ((cats.politics||0) > (cats.sports||0)) {
+    id('scout-category').value = 'politics';
+  }
+}
+
+async function followScoutedTrader() {
+  if (!_scoutData) return;
+  const addr = _scoutData._input_address || _scoutData.address || '';
+  if (!addr) { toast('No wallet to follow', false); return; }
+
+  const cat = id('scout-category').value;
+  const name = prompt('Name for this trader (short):', addr.substring(0, 10));
+  if (!name) return;
+
+  const r = await fetch('/api/copy/add-wallet', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({address: addr, name: name, category: cat, pnl: 0}),
+  });
+  const d = await r.json();
+  if (d.status === 'added') {
+    toast('Now following ' + name + '!', true);
+    loadStatus();
+    id('scout-input').value = '';
+    id('scout-results').style.display = 'none';
+  } else {
+    toast(d.error || 'Failed to follow', false);
+  }
+}
+
+// Enter key support for scout input
+document.addEventListener('DOMContentLoaded', () => {
+  const inp = document.getElementById('scout-input');
+  if (inp) inp.addEventListener('keypress', e => { if (e.key === 'Enter') scoutTrader(); });
+});
 
 // ═══════════════════════════════════════════
 // SECTION 3: LEADERBOARD
