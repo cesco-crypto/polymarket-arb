@@ -482,17 +482,29 @@ def _read_journal_stats() -> dict:
         return _journal_stats_cache["data"]
 
     entries = []
-    if JOURNAL_PATH.exists():
+    # Try multiple paths (CWD may differ from __file__ location)
+    paths_to_try = [
+        JOURNAL_PATH,
+        Path("data/trade_journal.jsonl"),
+        Path("/home/ubuntu/polymarket-arb/data/trade_journal.jsonl"),
+    ]
+    journal_file = None
+    for p in paths_to_try:
+        if p.exists():
+            journal_file = p
+            break
+
+    if journal_file:
         try:
-            with open(JOURNAL_PATH) as f:
+            with open(journal_file) as f:
                 for line in f:
                     if line.strip():
                         try:
                             entries.append(json.loads(line))
                         except json.JSONDecodeError:
                             continue
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Journal read error ({journal_file}): {e}")
 
     # Gruppiere nach trade_id
     from collections import defaultdict
