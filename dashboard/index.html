@@ -224,7 +224,7 @@
   </div>
   <div id="tab-positions" class="tab-panel on">
     <table>
-      <tr><th style="font-size:8px">TX</th><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Now @</th><th class="r">Size</th><th class="r">Value</th><th class="r">PnL</th><th>Expires</th><th>Status</th></tr>
+      <tr><th style="font-size:8px">Strat</th><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Now @</th><th class="r">Size</th><th class="r">Value</th><th class="r">PnL</th><th>Expires</th><th>Status</th></tr>
     </table>
     <table id="pos-body"><tr><td colspan="10" class="empty">Loading positions...</td></tr></table>
     <div id="redeem-panel" style="margin-top:8px;padding:8px 10px;background:var(--bg-card2);border:1px solid var(--border);border-radius:6px;display:none">
@@ -258,26 +258,22 @@
     </div>
   </div>
   <div id="tab-history" class="tab-panel">
-    <div id="hist-summary" style="margin-bottom:6px">
-      <div class="d" style="font-size:10px">Loading trade history...</div>
+    <!-- KPI Cards per Strategy -->
+    <div id="hist-kpis" style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap"></div>
+    <!-- Filter Chips -->
+    <div style="display:flex;gap:4px;margin-bottom:8px;flex-wrap:wrap">
+      <button class="tf-btn on" onclick="setHistFilter('all',this)">All</button>
+      <button class="tf-btn" style="border-color:var(--yellow);color:var(--yellow)" onclick="setHistFilter('copy_trade',this)">Copy Trading</button>
+      <button class="tf-btn" style="border-color:var(--purple);color:var(--purple)" onclick="setHistFilter('oda',this)">Oracle Delay</button>
+      <button class="tf-btn" style="border-color:var(--accent);color:var(--accent)" onclick="setHistFilter('momentum_live',this)">Momentum</button>
+      <button class="tf-btn" style="border-color:var(--text-dim);color:var(--text-dim)" onclick="setHistFilter('momentum_paper',this)">Paper</button>
+      <span id="hist-last-update" class="d" style="margin-left:auto;font-size:9px"></span>
     </div>
-    <!-- Resolved (LOST) Positions -->
-    <div id="resolved-section" style="display:none;margin-bottom:10px">
-      <div style="font-size:10px;color:var(--red);font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:6px">
-        RESOLVED POSITIONS <span id="resolved-ct" class="d" style="font-size:9px;font-weight:400"></span>
-        <span id="resolved-pnl" class="rd b" style="font-size:11px"></span>
-      </div>
-      <table>
-        <tr><th style="font-size:8px">TX</th><th>Market</th><th>Outcome</th><th class="r">Bought @</th><th class="r">Result</th><th class="r">Size</th><th class="r">PnL</th><th>Ended</th><th>Status</th></tr>
-      </table>
-      <table id="resolved-body"></table>
-      <div style="height:1px;background:var(--border);margin:8px 0"></div>
-    </div>
-    <!-- Signal-based Trades (JSONL) -->
+    <!-- Unified Trade Table (Journal = Source of Truth) -->
     <table>
-      <tr><th>ID</th><th>Mode</th><th>TF</th><th>Asset</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th class="r">Fee</th><th>Result</th><th class="r" style="font-size:9px">T+5s</th><th style="font-size:9px">Opened</th><th style="font-size:9px">Closed</th></tr>
+      <tr><th>Time</th><th>Strat</th><th>Market</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th>Source</th><th>Status</th></tr>
     </table>
-    <table id="hist-body"><tr><td colspan="13" class="empty">Loading...</td></tr></table>
+    <table id="hist-body"><tr><td colspan="9" class="empty">Loading from Journal...</td></tr></table>
   </div>
 </div>
 
@@ -717,6 +713,23 @@ function switchTab(btn, tab) {
       return;
     }
 
+    // Strategy Badge Helper
+    function stratBadge(p) {
+      const src = p.copySource || '';
+      if (src) return '<span class="tag" style="background:#eab30818;color:var(--yellow);font-size:8px">CT</span>';
+      const title = (p.title || '').toLowerCase();
+      if (title.includes('up or down')) return '<span class="tag" style="background:#3b82f618;color:var(--accent);font-size:8px">MOM</span>';
+      return '<span class="tag" style="background:#22222;color:var(--text-dim);font-size:8px">—</span>';
+    }
+    // Smart Outcome Tag: Crypto = Up/Down colors, Sport = neutral
+    function outcomeTag(p) {
+      const title = (p.title || '').toLowerCase();
+      const o = p.outcome || '?';
+      const isCrypto = title.includes('up or down') || title.includes('above') || title.includes('dip');
+      if (isCrypto) return `<span class="tag ${o==='Up'||o==='Yes'?'tag-up':'tag-dn'}">${o}</span>`;
+      return `<span class="tag" style="background:var(--bg);border:1px solid var(--border);font-size:9px">${o.substring(0,12)}</span>`;
+    }
+
     // Tabelle
     pb.innerHTML = _livePositions.map(p => {
       const won = p.curPrice === 1;
@@ -725,12 +738,13 @@ function switchTab(btn, tab) {
       const status = p.redeemable ? (won ? '<span class="g b">REDEEMABLE</span>' : '<span class="rd">LOST</span>') : '<span class="y">OPEN</span>';
       const title = (p.title || '').substring(0, 35);
       const slug = p.eventSlug || p.slug || '';
+      const marketLink = slug ? `<a href="https://polymarket.com/event/${slug}" target="_blank" style="color:var(--text);text-decoration:none;font-size:10px" title="${p.title||''}">${title}</a>` : `<span style="font-size:10px">${title}</span>`;
       const exp = parseExpiry(p);
       const expCls = exp.expired ? 'rd' : exp.isCrypto ? 'y' : 'd';
       return `<tr>
-        <td style="white-space:nowrap">${txLink(p)}</td>
-        <td style="font-size:10px">${title}</td>
-        <td><span class="tag ${p.outcome==='Up'?'tag-up':'tag-dn'}">${p.outcome}</span></td>
+        <td style="white-space:nowrap">${stratBadge(p)}</td>
+        <td>${marketLink}</td>
+        <td>${outcomeTag(p)}</td>
         <td class="r">${(p.avgPrice||0).toFixed(3)}</td>
         <td class="r">${(p.curPrice||0).toFixed(2)}</td>
         <td class="r">$${(p.initialValue||0).toFixed(2)}</td>
@@ -778,116 +792,111 @@ function switchTab(btn, tab) {
     }).filter(Boolean).join('');
   }
 
-  function renderResolvedPositions() {
-    const section = id('resolved-section');
-    const rb = id('resolved-body');
-    if (!_resolvedPositions.length) {
-      section.style.display = 'none';
-      return;
-    }
-    section.style.display = 'block';
-    const totalLoss = _resolvedPositions.reduce((s, p) => s + (p.cashPnl || 0), 0);
-    id('resolved-ct').textContent = _resolvedPositions.length + ' positions';
-    id('resolved-pnl').textContent = '$' + (totalLoss >= 0 ? '+' : '') + totalLoss.toFixed(2);
-    rb.innerHTML = _resolvedPositions.map(p => {
-      const won = p.curPrice === 1;
-      const pnlC = (p.cashPnl || 0) >= 0 ? 'g' : 'rd';
-      const status = won ? '<span class="g b">WON</span>' : '<span class="rd">LOST</span>';
-      const title = (p.title || '').substring(0, 40);
-      const slug = p.eventSlug || '';
-      const exp = parseExpiry(p);
-      return `<tr>
-        <td style="white-space:nowrap">${txLink(p)}</td>
-        <td style="font-size:10px">${title}</td>
-        <td><span class="tag ${p.outcome==='Up'?'tag-up':'tag-dn'}">${p.outcome}</span></td>
-        <td class="r">${(p.avgPrice||0).toFixed(3)}</td>
-        <td class="r">${(p.curPrice||0).toFixed(2)}</td>
-        <td class="r">$${(p.initialValue||0).toFixed(2)}</td>
-        <td class="r ${pnlC} b">$${(p.cashPnl||0)>=0?'+':''}${(p.cashPnl||0).toFixed(2)}</td>
-        <td class="d" style="font-size:10px;white-space:nowrap">${exp.text}</td>
-        <td>${status} ${slug ? '<a href="https://polymarket.com/event/'+slug+'" target="_blank" style="color:var(--accent);font-size:8px;text-decoration:none">↗</a>' : ''}</td>
-      </tr>`;
-    }).join('');
-  }
+  // Resolved Positions: nicht mehr separat rendern (Journal ist Source of Truth)
+  function renderResolvedPositions() { /* deprecated — Journal-based history below */ }
 
-  function renderLiveHistory(data) {
+  // ═══════════════════════════════════════════
+  // TRADE HISTORY — Journal-basiert (Source of Truth)
+  // ═══════════════════════════════════════════
+  let _histFilter = 'all';
+  const _stratBadges = {
+    copy_trade: '<span class="tag" style="background:#eab30818;color:var(--yellow);font-size:8px">CT</span>',
+    oda: '<span class="tag" style="background:#a855f718;color:var(--purple);font-size:8px">ODA</span>',
+    momentum_live: '<span class="tag" style="background:#3b82f618;color:var(--accent);font-size:8px">MOM</span>',
+    momentum_paper: '<span class="tag" style="background:#33333;color:var(--text-dim);font-size:8px">PT</span>',
+    other: '<span class="tag" style="background:#22222;color:var(--text-dim);font-size:8px">?</span>',
+  };
+
+  window.setHistFilter = function(filter, btn) {
+    _histFilter = filter;
+    document.querySelectorAll('#tab-history .tf-btn').forEach(b => b.classList.remove('on'));
+    if (btn) btn.classList.add('on');
+    renderJournalHistory();
+  };
+
+  function renderJournalHistory() {
+    if (!_journalStats) return;
     const hb = id('hist-body');
-    const trades = data.trades || [];
+    const bs = _journalStats.by_strategy || {};
+    const allTrades = _journalStats.trades || [];
+
+    // KPI Cards per Strategy
+    const kpiEl = id('hist-kpis');
+    if (kpiEl) {
+      const kpis = [
+        {name: 'Copy', key: 'copy_trade', color: 'var(--yellow)'},
+        {name: 'ODA', key: 'oda', color: 'var(--purple)'},
+        {name: 'Momentum', key: 'momentum_live', color: 'var(--accent)'},
+      ];
+      kpiEl.innerHTML = kpis.map(k => {
+        const s = bs[k.key] || {};
+        const pnl = s.total_pnl || 0;
+        const w = s.wins || 0;
+        const l = s.losses || 0;
+        const wr = (w + l) > 0 ? (w / (w + l) * 100).toFixed(0) : '—';
+        return `<div style="flex:1;min-width:120px;padding:6px 10px;background:var(--bg-card2);border:1px solid ${k.color}33;border-radius:4px;border-left:3px solid ${k.color}">
+          <div style="font-size:9px;color:${k.color};font-weight:600;text-transform:uppercase">${k.name}</div>
+          <div style="font-size:14px;font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
+          <div style="font-size:9px;color:var(--text-dim)">${w}W/${l}L ${wr !== '—' ? '| WR:'+wr+'%' : ''}</div>
+        </div>`;
+      }).join('');
+    }
+
+    // Filter trades
+    let trades = allTrades;
+    if (_histFilter !== 'all') {
+      trades = trades.filter(t => t.strategy === _histFilter);
+    }
+
+    // Update count
+    id('hist-ct').textContent = trades.length;
+    id('hist-last-update').textContent = 'Updated: ' + new Date().toLocaleTimeString();
 
     if (!trades.length) {
-      hb.innerHTML = '<tr><td colspan="13" class="empty">No trade history yet</td></tr>';
+      hb.innerHTML = '<tr><td colspan="9" class="empty">No trades for this filter</td></tr>';
       return;
     }
 
-    // Summary: Two rows — Live Only (real money) and All (paper simulation)
-    const summary = id('hist-summary');
-    const live = data.live || {};
-    const hasLive = (live.count || 0) > 0;
-    summary.innerHTML = `
-      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:${hasLive?'4':'0'}px">
-        <span class="g b" style="font-size:11px;padding:2px 6px;border:1px solid var(--green);border-radius:3px">LIVE</span>
-        <span class="b">${live.count || 0} Trades</span>
-        <span class="g b">${live.wins || 0} W</span>
-        <span class="rd b">${live.losses || 0} L</span>
-        <span class="${(live.win_rate||0)>=60?'g':'rd'} b">WR: ${live.win_rate || 0}%</span>
-        <span class="${(live.total_pnl||0)>=0?'g':'rd'} b">PnL: $${(live.total_pnl||0)>=0?'+':''}${(live.total_pnl||0).toFixed(2)}</span>
-      </div>
-      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;opacity:0.6;font-size:11px">
-        <span class="d" style="font-size:10px;padding:2px 6px;border:1px solid var(--border);border-radius:3px">ALL (Paper)</span>
-        <span>${data.count || 0} Trades</span>
-        <span>${data.wins || 0} W / ${data.losses || 0} L</span>
-        <span>WR: ${data.win_rate || 0}%</span>
-        <span>PnL: $${(data.total_pnl||0)>=0?'+':''}${(data.total_pnl||0).toFixed(2)}</span>
-        <span class="d">Source: ${data.source || '?'}</span>
-      </div>`;
+    const fmtTs = (ts) => {
+      if (!ts) return '—';
+      const d = new Date(ts * 1000);
+      return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ' ' + String(d.getDate()).padStart(2,'0') + '.' + String(d.getMonth()+1).padStart(2,'0');
+    };
 
-    hb.innerHTML = trades.slice(0, 50).map(t => {
-      const won = t.outcome_correct;
-      const icon = won ? '<span class="g">W</span>' : '<span class="rd">L</span>';
-      const pnlC = (t.pnl_usd||0) >= 0 ? 'g' : 'rd';
+    hb.innerHTML = trades.slice(0, 60).map(t => {
+      const badge = _stratBadges[t.strategy] || _stratBadges.other;
+      const pnl = t.pnl_usd || 0;
+      const pnlC = pnl >= 0 ? 'g' : 'rd';
+      const market = (t.market_question || '').substring(0, 30);
       const dir = t.direction || '?';
-      const dirTag = dir === 'UP' ? 'tag-up' : 'tag-dn';
-      const asset = t.asset || '?';
-      const mo5 = t.markout_5s ? ((t.markout_5s>=0?'+':'') + t.markout_5s.toFixed(3) + '%') : '—';
-      const mo5c = (t.markout_5s||0) > 0 ? 'g' : (t.markout_5s||0) < 0 ? 'rd' : 'd';
-      const tf = t.timeframe || '—';
-      const tfTag = tf === '5m' ? 'tag-up' : tf === '15m' ? 'tag-btc' : '';
-      // Timestamps: entry_ts und exit_ts (Unix → HH:MM:SS DD.MM)
-      const fmtTs = (ts) => {
-        if (!ts) return '—';
-        const d = new Date(ts * 1000);
-        const hh = String(d.getHours()).padStart(2,'0');
-        const mm = String(d.getMinutes()).padStart(2,'0');
-        const ss = String(d.getSeconds()).padStart(2,'0');
-        const dd = String(d.getDate()).padStart(2,'0');
-        const mo = String(d.getMonth()+1).padStart(2,'0');
-        return `${hh}:${mm}:${ss} ${dd}.${mo}`;
-      };
-      const opened = fmtTs(t.entry_ts || t.signal_ts);
-      const closed = fmtTs(t.exit_ts);
-      const liveStatus = t.live_status || 'unknown';
-      const modeTag = liveStatus === 'live'
-                    ? '<span class="tag tag-up" style="font-size:8px">LIVE</span>'
-                    : liveStatus === 'failed'
-                    ? '<span class="tag" style="font-size:8px;background:#a33">FAILED</span>'
-                    : '<span class="tag" style="font-size:8px;background:#555;opacity:0.7">LEGACY</span>';
+      const src = t.source_wallet_name || '';
+      const srcTag = src ? `<span style="font-size:8px;color:var(--yellow)">${src}</span>` : '<span class="d" style="font-size:8px">—</span>';
+
+      let statusTag;
+      if (t.status === 'redeemed' || (t.outcome_correct === true)) {
+        statusTag = '<span class="g b" style="font-size:9px">WON</span>';
+      } else if (t.status === 'lost' || (t.outcome_correct === false)) {
+        statusTag = '<span class="rd" style="font-size:9px">LOST</span>';
+      } else {
+        statusTag = '<span class="y" style="font-size:9px">OPEN</span>';
+      }
+
       return `<tr>
-        <td class="d">${t.trade_id || '?'}</td>
-        <td>${modeTag}</td>
-        <td><span class="tag ${tfTag}" style="font-size:9px">${tf}</span></td>
-        <td><span class="tag ${asset==='BTC'?'tag-btc':'tag-eth'}">${asset}</span></td>
-        <td><span class="tag ${dirTag}">${dir}</span></td>
-        <td class="r">${(t.executed_price || t.polymarket_ask || 0).toFixed(3)}</td>
+        <td class="d" style="font-size:9px;white-space:nowrap">${fmtTs(t.entry_ts || t.exit_ts)}</td>
+        <td>${badge}</td>
+        <td style="font-size:10px">${market}</td>
+        <td style="font-size:10px">${dir.substring(0,8)}</td>
+        <td class="r">${(t.executed_price||0).toFixed(3)}</td>
         <td class="r">$${(t.size_usd||0).toFixed(2)}</td>
-        <td class="r ${pnlC} b">$${(t.pnl_usd||0)>=0?'+':''}${(t.pnl_usd||0).toFixed(2)}</td>
-        <td class="r d">$${(t.fee_usd||0).toFixed(3)}</td>
-        <td>${icon}</td>
-        <td class="r ${mo5c}" style="font-size:10px">${mo5}</td>
-        <td class="d" style="font-size:9px;white-space:nowrap">${opened}</td>
-        <td class="d" style="font-size:9px;white-space:nowrap">${closed}</td>
+        <td class="r ${pnlC} b">${pnl!==0 ? (pnl>=0?'+':'')+'$'+pnl.toFixed(2) : '—'}</td>
+        <td>${srcTag}</td>
+        <td>${statusTag}</td>
       </tr>`;
     }).join('');
   }
+
+  // Legacy compatibility
+  function renderLiveHistory(data) { renderJournalHistory(); }
 
   // Fetch live data every 30 seconds
   fetchLiveData();
