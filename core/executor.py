@@ -240,7 +240,10 @@ class PolymarketExecutor:
                     side=order_side,
                 )
                 signed_order = self._client.create_order(order_args)
-                order = self._client.post_order(signed_order)
+                # IOC (FAK): Sofort füllen was verfügbar ist, Rest canceln
+                # Verhindert Ghost-Orders im Buch (Adverse Selection)
+                from py_clob_client.clob_types import OrderType
+                order = self._client.post_order(signed_order, orderType=OrderType.FAK)
 
             latency_ms = (time.perf_counter() - t0) * 1000
             self._last_exec_latency_ms = latency_ms

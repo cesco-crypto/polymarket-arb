@@ -455,7 +455,7 @@ class CopyTradingStrategy(StrategyBase):
         self.journal = TradeJournal()
 
         # Config
-        self.poll_interval_s = 5.0         # Poll alle 5 Sekunden
+        self.poll_interval_s = 3.0         # Poll alle 3 Sekunden (schneller = weniger Slippage)
         self.max_copy_size_usd = 5.0       # Fix $5 pro Copy-Trade
         self.max_concurrent = 10           # Max 10 Markets (bei $5/Trade = $50-$100 max exposure)
         self.min_seconds_to_copy = 5       # Trade muss < 5 Min alt sein
