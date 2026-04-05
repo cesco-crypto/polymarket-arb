@@ -487,10 +487,50 @@ class CopyTradingStrategy(StrategyBase):
 
     MAX_TRACKED_WALLETS = 20  # Hard cap — prevents poll loop DoS
 
-    PAPER_COPY_HOURS = 24  # Neue Wallets: 24h beobachten, dann erst Live-Copy
+
+    TRACKED_WALLETS_FILE = Path("data/tracked_wallets.json")
+
+    def _save_tracked_wallets(self) -> None:
+        """Persists tracked wallets + paused state to disk (atomic write)."""
+        try:
+            self.TRACKED_WALLETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "wallets": self.tracked_wallets,
+                "paused": list(self._paused_wallets),
+                "_saved_at": time.time(),
+            }
+            tmp = self.TRACKED_WALLETS_FILE.with_suffix(".tmp")
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            import os
+            os.replace(str(tmp), str(self.TRACKED_WALLETS_FILE))
+            logger.debug(f"WALLETS SAVED: {len(self.tracked_wallets)} wallets to disk")
+        except Exception as e:
+            logger.error(f"Wallet save error: {e}")
+
+    def _load_tracked_wallets(self) -> None:
+        """Loads persisted wallets from disk. Falls back to DEFAULT_TRACKED_WALLETS."""
+        try:
+            if self.TRACKED_WALLETS_FILE.exists():
+                with open(self.TRACKED_WALLETS_FILE) as f:
+                    data = json.load(f)
+                wallets = data.get("wallets", [])
+                paused = set(data.get("paused", []))
+                if wallets:
+                    self.tracked_wallets = wallets
+                    self._paused_wallets = paused
+                    logger.info(
+                        f"WALLETS LOADED: {len(wallets)} from disk "
+                        f"({len(paused)} paused)"
+                    )
+                    return
+        except Exception as e:
+            logger.warning(f"Wallet load error (using defaults): {e}")
+        # Fallback: defaults already set in __init__
+        logger.info(f"WALLETS: Using {len(self.tracked_wallets)} defaults (no saved state)")
 
     def add_wallet(self, wallet: dict) -> bool:
-        """Fügt eine Wallet zur Tracking-Liste hinzu (Runtime-only, nicht persistent)."""
+        """Fügt eine Wallet zur Tracking-Liste hinzu (persistent auf Disk)."""
         addr = wallet.get("address", "").lower()
         if not addr or len(addr) != 42 or not addr.startswith("0x"):
             return False
@@ -500,10 +540,11 @@ class CopyTradingStrategy(StrategyBase):
         # Duplikat-Check
         if any(w["address"].lower() == addr for w in self.tracked_wallets):
             return False
-        wallet["added_ts"] = time.time()  # Für Paper-Copy Periode
+        wallet["added_ts"] = time.time()
         self.tracked_wallets.append(wallet)
         self._last_seen[addr] = int(time.time())  # Keine alten Trades kopieren
-        logger.info(f"WALLET ADDED: {wallet.get('name', addr[:10])} ({addr[:10]}...) — Paper-Copy {self.PAPER_COPY_HOURS}h")
+        self._save_tracked_wallets()
+        logger.info(f"WALLET ADDED: {wallet.get('name', addr[:10])} ({addr[:10]}...) — LIVE copy active")
         return True
 
     def remove_wallet(self, address: str) -> bool:
@@ -515,6 +556,7 @@ class CopyTradingStrategy(StrategyBase):
         self._paused_wallets.discard(addr)
         removed = len(self.tracked_wallets) < before
         if removed:
+            self._save_tracked_wallets()
             logger.info(f"WALLET REMOVED: {addr[:10]}...")
         return removed
 
@@ -523,6 +565,7 @@ class CopyTradingStrategy(StrategyBase):
         addr = address.lower()
         if any(w["address"].lower() == addr for w in self.tracked_wallets):
             self._paused_wallets.add(addr)
+            self._save_tracked_wallets()
             logger.info(f"WALLET PAUSED: {addr[:10]}...")
             return True
         return False
@@ -532,6 +575,7 @@ class CopyTradingStrategy(StrategyBase):
         addr = address.lower()
         if addr in self._paused_wallets:
             self._paused_wallets.discard(addr)
+            self._save_tracked_wallets()
             logger.info(f"WALLET RESUMED: {addr[:10]}...")
             return True
         return False
@@ -681,6 +725,10 @@ class CopyTradingStrategy(StrategyBase):
     async def run(self) -> None:
         self._running = True
         telegram.configure(self.settings)
+
+        # Load persisted wallets (overrides defaults if file exists)
+        self._load_tracked_wallets()
+
         logger.info(f"Copy Trading Strategy startet — {len(self.tracked_wallets)} Wallets tracked")
 
         # Executor initialisieren (für LIVE Trading)
@@ -923,18 +971,6 @@ class CopyTradingStrategy(StrategyBase):
                         continue
                 except Exception:
                     pass  # Balance-Check optional, CLOB blockt auch
-
-            # ── GUARD 6b: Paper-Copy Period (neue Wallets 24h beobachten) ──
-            added_ts = wallet.get("added_ts", 0)
-            if added_ts > 0:
-                hours_since = (time.time() - added_ts) / 3600
-                if hours_since < self.PAPER_COPY_HOURS:
-                    logger.info(
-                        f"PAPER-COPY: {name} neu hinzugefügt ({hours_since:.1f}h/{self.PAPER_COPY_HOURS}h) "
-                        f"— beobachte: {trade.get('title','')[:35]} {trade.get('outcome','')} @ {price:.3f}"
-                    )
-                    # Registriere im Journal als Paper-Copy (nicht live ausführen)
-                    continue
 
             # ── GUARD 7: Kill-Switch (Daily/Total Loss Limits) ──
             can_trade, reason = self.risk.can_trade()
@@ -1537,6 +1573,7 @@ class CopyTradingStrategy(StrategyBase):
                     "pnl": w.get("pnl", 0),
                     "category": w.get("category", "mixed"),
                     "notes": w.get("notes", ""),
+                    "added_ts": w.get("added_ts", 0),
                     "status": "paused" if w["address"].lower() in self._paused_wallets else "active",
                 }
                 for w in self.tracked_wallets

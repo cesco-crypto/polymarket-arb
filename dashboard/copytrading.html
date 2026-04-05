@@ -411,14 +411,14 @@ function renderWallets(d) {
     const lb = lbLookup[w.address.toLowerCase()];
     const displayPnl = lb ? lb.pnl : w.pnl;
     const pnlColor = displayPnl >= 0 ? 'g' : 'rd';
-    // Status: "NEW" wenn gerade erst hinzugefügt (0 copies), "TRACKING" wenn aktiv kopiert wird
-    const copies = st.copies || 0;
-    const isNew = copies === 0 && !isPaused;
-    const statusTag = isNew
+    // Status: "NEW" nur wenn via Dashboard hinzugefügt und < 24h alt, sonst "TRACKING"
+    const addedTs = w.added_ts || 0;
+    const hoursAgo = addedTs > 0 ? (Date.now() / 1000 - addedTs) / 3600 : 999;
+    const isNew = hoursAgo < 24 && !isPaused;
+    const statusTag = isPaused ? ''
+      : isNew
       ? '<span style="font-size:8px;color:var(--accent);margin-left:4px">NEW</span>'
-      : copies > 0
-      ? '<span style="font-size:8px;color:var(--green);margin-left:4px">TRACKING</span>'
-      : '';
+      : '<span style="font-size:8px;color:var(--green);margin-left:4px">TRACKING</span>';
     return `<div class="wcard ${isPaused ? 'paused' : 'active'}">
       <div class="wcard-name">${esc(w.name)}${statusTag}</div>
       <div class="wcard-addr">${shortAddr(w.address)}</div>
@@ -608,7 +608,9 @@ function renderScoutResults(d, addr) {
   const pv = s.portfolio_value || 0;
   id('scout-portfolio').textContent = fmt(pv);
   id('scout-portfolio').style.color = pv > 0 ? 'var(--green)' : 'var(--dim)';
-  id('scout-positions').textContent = s.active_positions || 0;
+  const totalPos = s.total_positions || s.active_positions || 0;
+  const activePos = s.active_positions || 0;
+  id('scout-positions').textContent = totalPos > activePos ? `${activePos} (${totalPos} total)` : activePos;
   id('scout-active').textContent = s.last_active || '—';
   id('scout-avg').textContent = fmt(s.avg_trade_size_usd || 0);
 
@@ -685,10 +687,11 @@ async function followScoutedTrader() {
   const name = prompt('Name for this trader (short):', addr.substring(0, 10));
   if (!name) return;
 
+  const scoutPnl = (_scoutData.summary || {}).portfolio_pnl || 0;
   const r = await fetch('/api/copy/add-wallet', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({address: addr, name: name, category: cat, pnl: 0}),
+    body: JSON.stringify({address: addr, name: name, category: cat, pnl: scoutPnl}),
   });
   const d = await r.json();
   if (d.status === 'added') {
@@ -880,10 +883,13 @@ function closeAnalyze() {
 
 async function startCopying(addr, name) {
   const cat = id('az-category') ? id('az-category').value : 'mixed';
+  // Try to get PnL from analyze cache or leaderboard
+  const lbEntry = _leaderboard.find(t => t.address.toLowerCase() === addr.toLowerCase());
+  const analyzePnl = lbEntry ? lbEntry.pnl : 0;
   const r = await fetch('/api/copy/add-wallet', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({address: addr, name: name, category: cat, pnl: 0}),
+    body: JSON.stringify({address: addr, name: name, category: cat, pnl: analyzePnl}),
   });
   const d = await r.json();
   if (d.status === 'added') {

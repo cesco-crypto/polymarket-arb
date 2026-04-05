@@ -881,12 +881,16 @@ def _fetch_copy_source_lookup() -> dict:
     if _time.time() - _copy_source_cache["ts"] < 300 and _copy_source_cache["data"]:
         return _copy_source_cache["data"]
 
-    # Import tracked wallets config
-    try:
-        from strategies.copy_trading import DEFAULT_TRACKED_WALLETS
-        wallets = DEFAULT_TRACKED_WALLETS
-    except Exception:
-        return {}
+    # Use live tracked wallets from running strategy (includes runtime-added)
+    strat = active_strategies.get("copy_trading")
+    if strat and hasattr(strat, "tracked_wallets"):
+        wallets = strat.tracked_wallets
+    else:
+        try:
+            from strategies.copy_trading import DEFAULT_TRACKED_WALLETS
+            wallets = DEFAULT_TRACKED_WALLETS
+        except Exception:
+            return {}
 
     lookup: dict = {}  # conditionId → {source_name, source_tx_hash, ...}
 
@@ -1432,13 +1436,28 @@ async def api_copy_analyze(wallet: str = "") -> dict:
 
     result = {"address": wallet, "recent_trades": [], "positions": [], "summary": {}}
 
-    # Fetch activity + positions PARALLEL (async!)
-    activity_url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=100&type=TRADE"
-    positions_url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=50"
-    trades_raw, positions_raw = await asyncio.gather(
+    # Fetch activity + first positions page PARALLEL (async!)
+    activity_url = f"https://data-api.polymarket.com/activity?user={wallet}&limit=500&type=TRADE"
+    positions_url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=200"
+    trades_raw, positions_page1 = await asyncio.gather(
         _async_fetch_json(activity_url, timeout=10),
         _async_fetch_json(positions_url, timeout=10),
     )
+
+    # Paginate ALL positions (critical for accurate PnL on large portfolios)
+    all_positions = positions_page1 if isinstance(positions_page1, list) else []
+    if len(all_positions) >= 200:
+        offset = 200
+        while offset < 15000:  # Safety cap
+            page_url = f"https://data-api.polymarket.com/positions?user={wallet}&limit=200&offset={offset}"
+            page = await _async_fetch_json(page_url, timeout=8)
+            if not isinstance(page, list) or not page:
+                break
+            all_positions.extend(page)
+            if len(page) < 200:
+                break
+            offset += 200
+    positions_raw = all_positions
 
     # Fetch activity
     try:
@@ -1490,18 +1509,23 @@ async def api_copy_analyze(wallet: str = "") -> dict:
             "avg_trade_size_usd": round(total_usd / max(1, len(trades)), 2),
             "buys": sum(1 for t in trades if t.get("side") == "BUY"),
             "sells": sum(1 for t in trades if t.get("side") == "SELL"),
+            "trades_note": f"Last {len(trades)} trades" if len(trades) >= 500 else "",
         }
     except Exception as e:
         result["summary"]["error"] = str(e)
 
-    # Process positions (already fetched in parallel above)
+    # Process ALL positions (paginated above for accuracy)
     try:
         positions = positions_raw if isinstance(positions_raw, list) else []
+        # PnL from ALL positions (including resolved/zero-value!)
+        total_pnl = sum(p.get("cashPnl", 0) for p in positions)
+        total_invested = sum(p.get("initialValue", 0) for p in positions)
+        # Active = has current value
         active_pos = [p for p in positions if p.get("currentValue", 0) > 0.01]
         total_value = sum(p.get("currentValue", 0) for p in active_pos)
-        total_invested = sum(p.get("initialValue", 0) for p in active_pos)
-        total_pnl = sum(p.get("cashPnl", 0) for p in active_pos)
 
+        # Show top positions by value (for display)
+        top_pos = sorted(active_pos, key=lambda p: p.get("currentValue", 0), reverse=True)
         result["positions"] = [
             {
                 "title": p.get("title", "")[:50],
@@ -1511,8 +1535,9 @@ async def api_copy_analyze(wallet: str = "") -> dict:
                 "pnl": round(p.get("cashPnl", 0), 2),
                 "avg_price": round(p.get("avgPrice", 0), 3),
             }
-            for p in active_pos[:15]
+            for p in top_pos[:15]
         ]
+        result["summary"]["total_positions"] = len(positions)
         result["summary"]["active_positions"] = len(active_pos)
         result["summary"]["portfolio_value"] = round(total_value, 2)
         result["summary"]["portfolio_invested"] = round(total_invested, 2)
