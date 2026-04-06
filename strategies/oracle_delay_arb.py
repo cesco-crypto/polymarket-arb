@@ -115,7 +115,7 @@ class OracleDelayArbStrategy(StrategyBase):
         self.min_entry_price = 0.90        # Kaufen wenn Preis >= 0.90 (mehr Profit, etwas mehr Risiko)
         self.max_entry_price = 0.99        # Max 0.99 (CLOB Limit)
         self.delay_after_close_s = 60.0    # 60s nach Close warten (Gamma API braucht ~60-90s)
-        self.max_delay_s = 120.0           # Max 120s nach Close
+        self.max_delay_s = 180.0           # Max 180s nach Close (einige Windows brauchen laenger)
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
 
         # State
@@ -296,10 +296,10 @@ class OracleDelayArbStrategy(StrategyBase):
                     except Exception as e:
                         logger.debug(f"ODA Gamma fetch error: {e}")
 
-                    if gamma_up > 0.70 and gamma_down < 0.30:
+                    if gamma_up > 0.65 and gamma_down < 0.35:
                         winner = "UP"
                         winner_tid = up_tid
-                    elif gamma_down > 0.70 and gamma_up < 0.30:
+                    elif gamma_down > 0.65 and gamma_up < 0.35:
                         winner = "DOWN"
                         winner_tid = down_tid
                     else:
