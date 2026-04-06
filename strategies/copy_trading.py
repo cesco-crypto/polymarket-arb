@@ -711,6 +711,23 @@ class CopyTradingStrategy(StrategyBase):
             f"live_trading={self.settings.live_trading}"
         )
 
+        # Recent Copies aus Journal füllen (letzte 20 CT-opens, für Dashboard)
+        all_ct_opens = sorted(opens.values(), key=lambda e: e.get("entry_ts", 0), reverse=True)
+        for data in all_ct_opens[:20]:
+            self._recent_copies.append({
+                "ts": time.strftime("%H:%M", time.localtime(data.get("entry_ts", 0))),
+                "trade_id": data.get("trade_id", ""),
+                "source": data.get("source_wallet_name", "") or data.get("asset", ""),
+                "side": "BUY",
+                "outcome": data.get("direction", ""),
+                "price": round(data.get("executed_price", 0), 3),
+                "market": (data.get("market_question", "") or "")[:40],
+                "source_tx_hash": data.get("source_tx_hash", ""),
+                "condition_id": data.get("condition_id", ""),
+            })
+        if self._recent_copies:
+            logger.info(f"REBUILD: {len(self._recent_copies)} recent copies restored from journal")
+
         # Copy-Count auf letzten Stand setzen
         if open_trades:
             max_num = max(
@@ -1548,8 +1565,10 @@ class CopyTradingStrategy(StrategyBase):
     def get_status(self) -> dict:
         active = sum(1 for p in self._copied_positions if not p.resolved)
 
-        # Per-wallet stats
+        # Per-wallet stats — from RAM positions + journal fallback
         per_wallet: dict[str, dict] = {}
+
+        # 1. RAM positions (current session + rebuilt)
         for p in self._copied_positions:
             name = p.source_name or "unknown"
             if name not in per_wallet:
@@ -1560,6 +1579,41 @@ class CopyTradingStrategy(StrategyBase):
             else:
                 per_wallet[name]["active"] += 1
             per_wallet[name]["pnl"] += p.pnl_usd
+
+        # 2. Journal fallback — ensure wallets with only resolved trades also show counts
+        try:
+            journal_path = Path("data/trade_journal.jsonl")
+            for p in [journal_path, Path(__file__).parent.parent / "data" / "trade_journal.jsonl"]:
+                if p.exists():
+                    journal_path = p
+                    break
+            if journal_path.exists():
+                journal_wallet_stats: dict[str, dict] = {}
+                with open(journal_path) as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        try:
+                            e = json.loads(line)
+                        except Exception:
+                            continue
+                        tid = e.get("trade_id", "")
+                        if not tid.startswith("CT-"):
+                            continue
+                        ev = e.get("event", "")
+                        wname = e.get("source_wallet_name", "") or e.get("asset", "") or "unknown"
+                        if ev == "open":
+                            if wname not in journal_wallet_stats:
+                                journal_wallet_stats[wname] = {"copies": 0}
+                            journal_wallet_stats[wname]["copies"] += 1
+                # Merge: journal counts override RAM if higher (RAM may miss resolved)
+                for wname, jstats in journal_wallet_stats.items():
+                    if wname not in per_wallet:
+                        per_wallet[wname] = {"copies": jstats["copies"], "active": 0, "resolved": jstats["copies"], "pnl": 0.0}
+                    elif jstats["copies"] > per_wallet[wname]["copies"]:
+                        per_wallet[wname]["copies"] = jstats["copies"]
+        except Exception:
+            pass  # Journal read is best-effort
 
         return {
             "strategy": self.STRATEGY_NAME,
