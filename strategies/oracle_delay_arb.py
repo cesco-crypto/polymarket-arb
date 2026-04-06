@@ -586,7 +586,27 @@ class OracleDelayArbStrategy(StrategyBase):
                     if fill_status == "FILLED":
                         filled = True
                         trade.pnl_usd = expected_pnl
+                        trade.resolved = True
                         logger.info(f"SNIPE FILLED: {trade_id} — expected +${expected_pnl:.3f}")
+                        # Sofort close Event schreiben — nicht auf Redeemer warten
+                        # ODA kauft den Winner NACH Ergebnis, Outcome ist bei Fill sicher
+                        self.journal.record_close(TradeRecord(
+                            trade_id=trade_id,
+                            event="close",
+                            exit_ts=time.time(),
+                            asset=asset,
+                            direction=winner,
+                            executed_price=ask_price,
+                            size_usd=self.trade_size_usd,
+                            shares=float(shares),
+                            pnl_usd=expected_pnl,
+                            pnl_pct=net_ev_pct,
+                            outcome_correct=True,
+                            condition_id=condition_id,
+                            order_type="oracle_delay_arb",
+                            live_order_id=res.order_id,
+                            live_order_success=True,
+                        ))
                     elif fill_status == "UNFILLED":
                         logger.warning(f"SNIPE NOT FILLED: {trade_id} — cancelling")
                         await self._cancel_order(res.order_id)
