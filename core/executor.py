@@ -91,6 +91,18 @@ class PolymarketExecutor:
             except Exception as ae:
                 logger.warning(f"Executor: Allowance-Update fehlgeschlagen (evtl. schon OK): {ae}")
 
+            # FIX: Patch ROUNDING_CONFIG — py-clob-client erlaubt 5-6 Dezimalen
+            # aber die Polymarket API akzeptiert max 2 (maker) / 4 (taker).
+            # Bekanntes Issue: github.com/Polymarket/py-clob-client/issues/253
+            try:
+                from py_clob_client.order_builder.builder import ROUNDING_CONFIG
+                for tick_size, rc in ROUNDING_CONFIG.items():
+                    if rc.amount > 4:
+                        logger.info(f"ROUNDING_CONFIG patch: tick={tick_size} amount {rc.amount}→4")
+                        rc.amount = 4
+            except Exception as rce:
+                logger.warning(f"ROUNDING_CONFIG patch failed (non-critical): {rce}")
+
             self._ready = True
             logger.info("Executor: LIVE MODE AKTIV — echte Orders werden platziert!")
 
@@ -134,10 +146,17 @@ class PolymarketExecutor:
                 logger.debug(f"Pre-Sign abgebrochen: {round(size_shares, 2)} shares < {self.MIN_SHARES} Minimum")
                 return
 
+            import math
+            safe_price = round(order_price, 2)
+            safe_size = math.floor(size_shares * 100) / 100
+            if safe_size < self.MIN_SHARES:
+                logger.debug(f"Pre-Sign abgebrochen: {safe_size} shares < {self.MIN_SHARES} after floor")
+                return
+
             order_args = OrderArgs(
                 token_id=token_id,
-                price=order_price,
-                size=round(size_shares, 2),
+                price=safe_price,
+                size=safe_size,
                 side=BUY,
             )
             signed = self._client.create_order(order_args)
@@ -233,10 +252,19 @@ class PolymarketExecutor:
                 else:
                     order_price = price
 
+                # FIX: Ensure maker_amount (price × size) has max 2 decimals
+                # and taker_amount (size) has max 4 decimals.
+                # Round price to 2 decimals, size DOWN to 2 decimals (safe side).
+                import math
+                safe_price = round(order_price, 2)
+                safe_size = math.floor(size_shares * 100) / 100  # Floor to 2 decimals
+                if safe_size < self.MIN_SHARES:
+                    return ExecutionResult(success=False, error=f"Size too small after rounding: {safe_size}")
+
                 order_args = OrderArgs(
                     token_id=token_id,
-                    price=order_price,
-                    size=round(size_shares, 2),
+                    price=safe_price,
+                    size=safe_size,
                     side=order_side,
                 )
                 signed_order = self._client.create_order(order_args)
