@@ -265,7 +265,7 @@ class OracleDelayArbStrategy(StrategyBase):
                     # Hole Token-IDs von laufender Discovery
                     token_ids = await self._get_token_ids(slug, asset)
                     if not token_ids:
-                        logger.info(f"ODA: No token IDs for {asset} {slug[-15:]} — skipping")
+                        logger.info(f"ODA: No token IDs for {asset} {slug[-15:]} (age={seconds_since_close:.0f}s)")
                         self._sniped_windows.add(slug)  # Don't retry
                         continue
 
@@ -309,9 +309,9 @@ class OracleDelayArbStrategy(StrategyBase):
                         winner_tid = down_tid
                     else:
                         # Noch kein klarer Winner — NICHT skippen, naechsten Zyklus nochmal pruefen
-                        logger.debug(
+                        logger.info(
                             f"ODA Wait: {asset} {slug[-15:]} — no clear winner yet "
-                            f"(gamma_up={gamma_up:.3f}, gamma_dn={gamma_down:.3f})"
+                            f"(gamma_up={gamma_up:.3f}, gamma_dn={gamma_down:.3f}, age={seconds_since_close:.0f}s)"
                         )
                         continue
 
