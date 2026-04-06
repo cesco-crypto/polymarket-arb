@@ -114,8 +114,8 @@ class OracleDelayArbStrategy(StrategyBase):
         self.trade_size_usd = 5.0          # $5 pro Trade (Daten sammeln, später skalieren)
         self.min_entry_price = 0.90        # Kaufen wenn Preis >= 0.90 (mehr Profit, etwas mehr Risiko)
         self.max_entry_price = 0.99        # Max 0.99 (CLOB Limit)
-        self.delay_after_close_s = 2.0     # 2 Sekunden nach Window-Close warten
-        self.max_delay_s = 45.0            # Max 45s nach Close (schneller sein als Sharky's 71s)
+        self.delay_after_close_s = 15.0    # 15 Sekunden nach Close warten (Gamma braucht ~10-20s)
+        self.max_delay_s = 60.0            # Max 60s nach Close
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
 
         # State
@@ -308,11 +308,11 @@ class OracleDelayArbStrategy(StrategyBase):
                         winner = "DOWN"
                         winner_tid = down_tid
                     else:
-                        logger.info(
-                            f"ODA Skip: {asset} {slug[-15:]} — can't determine winner "
+                        # Noch kein klarer Winner — NICHT skippen, naechsten Zyklus nochmal pruefen
+                        logger.debug(
+                            f"ODA Wait: {asset} {slug[-15:]} — no clear winner yet "
                             f"(gamma_up={gamma_up:.3f}, gamma_dn={gamma_down:.3f})"
                         )
-                        self._sniped_windows.add(slug)
                         continue
 
                     # Hole den echten CLOB-Ask fuer den Winner-Token (fuer Order-Preis)
