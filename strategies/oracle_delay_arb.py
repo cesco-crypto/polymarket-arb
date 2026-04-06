@@ -525,6 +525,15 @@ class OracleDelayArbStrategy(StrategyBase):
             "slug": slug[:30],
         })
 
+        # Berechnungen (VOR Order — brauchen wir fuer Journal + Telegram)
+        import math
+        shares = math.floor(self.trade_size_usd / ask_price)
+        fee_pct = 1.80 * 4 * ask_price * (1 - ask_price)  # z.B. 0.99 -> 0.07%
+        fee_usd = shares * ask_price * fee_pct / 100
+        expected_pnl = shares * (1.0 - ask_price) - fee_usd
+        net_ev_pct = (1.0 / ask_price - 1.0) * 100 - fee_pct
+        filled = False
+
         # LIVE Order
         if self.executor.is_live and token_id:
             try:
@@ -545,9 +554,11 @@ class OracleDelayArbStrategy(StrategyBase):
                     await asyncio.sleep(2)  # Give CLOB time to match
                     fill_status = await self._check_fill(res.order_id)
                     if fill_status == "FILLED":
-                        logger.info(f"SNIPE FILLED ✅: {trade_id}")
+                        filled = True
+                        trade.pnl_usd = expected_pnl
+                        logger.info(f"SNIPE FILLED: {trade_id} — expected +${expected_pnl:.3f}")
                     elif fill_status == "UNFILLED":
-                        logger.warning(f"SNIPE NOT FILLED ⚠️: {trade_id} — cancelling")
+                        logger.warning(f"SNIPE NOT FILLED: {trade_id} — cancelling")
                         await self._cancel_order(res.order_id)
                         trade.live_success = False
                     else:
@@ -557,27 +568,20 @@ class OracleDelayArbStrategy(StrategyBase):
             except Exception as e:
                 logger.error(f"SNIPE EXCEPTION: {trade_id} — {e}")
 
-        # Berechnungen fuer Journal + Telegram
-        import math
-        shares = math.floor(self.trade_size_usd / ask_price)
-        fee_pct = 1.80 * 4 * ask_price * (1 - ask_price)  # z.B. 0.99 -> 0.07%
-        fee_usd = shares * ask_price * fee_pct / 100
-        expected_pnl = shares * (1.0 - ask_price) - fee_usd
-        net_ev_pct = (1.0 / ask_price - 1.0) * 100 - fee_pct
-
         # Telegram Alert
+        status_emoji = "✅" if filled else "📋"
+        order_ref = f"\n🔗 Order: {trade.live_order_id[:20]}..." if trade.live_order_id else ""
         asyncio.create_task(telegram.send_alert(
-            f"🎯 <b>ORACLE SNIPE #{self._trade_count}</b>\n"
+            f"🎯 <b>{status_emoji} ORACLE SNIPE #{self._trade_count}</b>\n"
             f"{'─'*26}\n"
             f"📊 {asset} {winner} @ {ask_price:.3f}\n"
             f"💰 Size: ${self.trade_size_usd:.2f} ({shares} shares)\n"
             f"📈 Expected: ${expected_pnl:.3f} ({net_ev_pct:.2f}%)\n"
             f"💸 Fee: {fee_pct:.2f}% (${fee_usd:.3f})\n"
-            f"📍 {slug[:35]}\n"
-            f"🔗 Order: {trade.live_order_id[:20]}..." if trade.live_order_id else ""
+            f"📍 {slug[:35]}{order_ref}"
         ))
 
-        # Journal — enriched mit allen Profi-Feldern
+        # Journal — ODA kauft den Winner NACH Ergebnis, daher ist PnL bei Fill bekannt
         self.journal.record_open(TradeRecord(
             trade_id=trade_id,
             asset=asset,
@@ -591,6 +595,9 @@ class OracleDelayArbStrategy(StrategyBase):
             fee_pct=fee_pct,
             fee_usd=fee_usd,
             net_ev_pct=net_ev_pct,
+            pnl_usd=expected_pnl if filled else 0.0,
+            pnl_pct=net_ev_pct if filled else 0.0,
+            outcome_correct=filled,  # Bei FILL = Winner gekauft = korrekt
             order_type="oracle_delay_arb",
             live_order_id=trade.live_order_id,
             live_order_success=trade.live_success,

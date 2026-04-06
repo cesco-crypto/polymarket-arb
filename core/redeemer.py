@@ -98,9 +98,11 @@ class AutoRedeemer:
             with urlopen(req, timeout=10) as resp:
                 positions = json.loads(resp.read())
 
+            # redeemable=True genuegt — currentValue kann 0 sein obwohl
+            # die Position gewonnen hat (Polymarket API Bug bei resolved markets)
             return [
                 p for p in positions
-                if p.get("redeemable") and p.get("currentValue", 0) > 0
+                if p.get("redeemable") and float(p.get("size", 0)) > 0
             ]
         except Exception as e:
             logger.error(f"AutoRedeemer: Position fetch error: {e}")
