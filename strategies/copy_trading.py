@@ -1565,22 +1565,10 @@ class CopyTradingStrategy(StrategyBase):
     def get_status(self) -> dict:
         active = sum(1 for p in self._copied_positions if not p.resolved)
 
-        # Per-wallet stats — from RAM positions + journal fallback
+        # Per-wallet stats — Journal = copies total, RAM = active positions
         per_wallet: dict[str, dict] = {}
 
-        # 1. RAM positions (current session + rebuilt)
-        for p in self._copied_positions:
-            name = p.source_name or "unknown"
-            if name not in per_wallet:
-                per_wallet[name] = {"copies": 0, "active": 0, "resolved": 0, "pnl": 0.0}
-            per_wallet[name]["copies"] += 1
-            if p.resolved:
-                per_wallet[name]["resolved"] += 1
-            else:
-                per_wallet[name]["active"] += 1
-            per_wallet[name]["pnl"] += p.pnl_usd
-
-        # 2. Journal fallback — ensure wallets with only resolved trades also show counts
+        # 1. Journal: total copies per wallet (Single Source of Truth for history)
         try:
             journal_path = Path("data/trade_journal.jsonl")
             for p in [journal_path, Path(__file__).parent.parent / "data" / "trade_journal.jsonl"]:
@@ -1588,7 +1576,6 @@ class CopyTradingStrategy(StrategyBase):
                     journal_path = p
                     break
             if journal_path.exists():
-                journal_wallet_stats: dict[str, dict] = {}
                 with open(journal_path) as f:
                     for line in f:
                         if not line.strip():
@@ -1598,22 +1585,23 @@ class CopyTradingStrategy(StrategyBase):
                         except Exception:
                             continue
                         tid = e.get("trade_id", "")
-                        if not tid.startswith("CT-"):
+                        if not tid.startswith("CT-") or e.get("event") != "open":
                             continue
-                        ev = e.get("event", "")
                         wname = e.get("source_wallet_name", "") or e.get("asset", "") or "unknown"
-                        if ev == "open":
-                            if wname not in journal_wallet_stats:
-                                journal_wallet_stats[wname] = {"copies": 0}
-                            journal_wallet_stats[wname]["copies"] += 1
-                # Merge: journal counts override RAM if higher (RAM may miss resolved)
-                for wname, jstats in journal_wallet_stats.items():
-                    if wname not in per_wallet:
-                        per_wallet[wname] = {"copies": jstats["copies"], "active": 0, "resolved": jstats["copies"], "pnl": 0.0}
-                    elif jstats["copies"] > per_wallet[wname]["copies"]:
-                        per_wallet[wname]["copies"] = jstats["copies"]
+                        if wname not in per_wallet:
+                            per_wallet[wname] = {"copies": 0, "active": 0, "resolved": 0, "pnl": 0.0}
+                        per_wallet[wname]["copies"] += 1
         except Exception:
-            pass  # Journal read is best-effort
+            pass
+
+        # 2. RAM: active positions (rebuilt from journal + wallet sanity check)
+        for p in self._copied_positions:
+            name = p.source_name or "unknown"
+            if name not in per_wallet:
+                per_wallet[name] = {"copies": 0, "active": 0, "resolved": 0, "pnl": 0.0}
+            if not p.resolved:
+                per_wallet[name]["active"] += 1
+            per_wallet[name]["pnl"] += p.pnl_usd
 
         return {
             "strategy": self.STRATEGY_NAME,
