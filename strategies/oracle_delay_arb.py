@@ -557,29 +557,40 @@ class OracleDelayArbStrategy(StrategyBase):
             except Exception as e:
                 logger.error(f"SNIPE EXCEPTION: {trade_id} — {e}")
 
+        # Berechnungen fuer Journal + Telegram
+        import math
+        shares = math.floor(self.trade_size_usd / ask_price)
+        fee_pct = 1.80 * 4 * ask_price * (1 - ask_price)  # z.B. 0.99 -> 0.07%
+        fee_usd = shares * ask_price * fee_pct / 100
+        expected_pnl = shares * (1.0 - ask_price) - fee_usd
+        net_ev_pct = (1.0 / ask_price - 1.0) * 100 - fee_pct
+
         # Telegram Alert
-        fee_pct = 1.80 * 4 * ask_price * (1 - ask_price)  # z.B. 0.99 → 0.07%
-        expected_profit = self.trade_size_usd * (1.0 / ask_price - 1.0) - self.trade_size_usd * fee_pct / 100
         asyncio.create_task(telegram.send_alert(
             f"🎯 <b>ORACLE SNIPE #{self._trade_count}</b>\n"
             f"{'─'*26}\n"
             f"📊 {asset} {winner} @ {ask_price:.3f}\n"
-            f"💰 Size: ${self.trade_size_usd:.2f}\n"
-            f"📈 Expected: ${expected_profit:.2f} ({(1/ask_price - 1)*100:.1f}%)\n"
-            f"💸 Fee: {fee_pct:.2f}%\n"
-            f"📍 {slug[:35]}"
+            f"💰 Size: ${self.trade_size_usd:.2f} ({shares} shares)\n"
+            f"📈 Expected: ${expected_pnl:.3f} ({net_ev_pct:.2f}%)\n"
+            f"💸 Fee: {fee_pct:.2f}% (${fee_usd:.3f})\n"
+            f"📍 {slug[:35]}\n"
+            f"🔗 Order: {trade.live_order_id[:20]}..." if trade.live_order_id else ""
         ))
 
-        # Journal
+        # Journal — enriched mit allen Profi-Feldern
         self.journal.record_open(TradeRecord(
             trade_id=trade_id,
             asset=asset,
             direction=winner,
             entry_ts=time.time(),
             window_slug=slug,
-            market_question=window.get("question", "")[:60],
+            market_question=window.get("question", f"{asset} Up or Down 5m")[:60],
             executed_price=ask_price,
             size_usd=self.trade_size_usd,
+            shares=float(shares),
+            fee_pct=fee_pct,
+            fee_usd=fee_usd,
+            net_ev_pct=net_ev_pct,
             order_type="oracle_delay_arb",
             live_order_id=trade.live_order_id,
             live_order_success=trade.live_success,
