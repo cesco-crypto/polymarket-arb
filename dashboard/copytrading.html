@@ -343,6 +343,7 @@
 // ═══════════════════════════════════════════
 let _status = null;
 let _leaderboard = [];
+let _leaderboardTs = 0;
 let _currentSort = 'ai_score';
 let _analyzeAddr = '';
 
@@ -367,6 +368,20 @@ function toast(msg, ok) {
   t.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
   t.style.display = 'block';
   setTimeout(() => t.style.display = 'none', 3000);
+}
+function _pnlAge(lb, w) {
+  if (lb && _leaderboardTs) {
+    const ago = Math.round((Date.now() - _leaderboardTs) / 1000);
+    const label = ago < 60 ? `${ago}s ago` : `${Math.floor(ago/60)}m ago`;
+    return `<span style="font-size:8px;color:var(--dim)">(${label})</span>`;
+  }
+  if (w.added_ts) {
+    const ago = Math.round((Date.now()/1000 - w.added_ts) / 60);
+    if (ago < 60) return `<span style="font-size:8px;color:var(--dim)">(added ${ago}m ago)</span>`;
+    if (ago < 1440) return `<span style="font-size:8px;color:var(--dim)">(added ${Math.floor(ago/60)}h ago)</span>`;
+    return `<span style="font-size:8px;color:var(--dim)">(added ${Math.floor(ago/1440)}d ago)</span>`;
+  }
+  return '<span style="font-size:8px;color:var(--dim)">(default)</span>';
 }
 function catBadge(c) {
   const cls = {'sports':'badge-sports','crypto':'badge-crypto','politics':'badge-politics'}[c] || 'badge-mixed';
@@ -423,7 +438,7 @@ function renderWallets(d) {
     return `<div class="wcard ${isPaused ? 'paused' : 'active'}">
       <div class="wcard-name">${esc(w.name)}${statusTag}</div>
       <div class="wcard-addr">${shortAddr(w.address)}</div>
-      <div class="wcard-pnl ${pnlColor}">${fmt(displayPnl)}${lb ? '' : ' <span style="font-size:8px;color:var(--dim)">(cached)</span>'}</div>
+      <div class="wcard-pnl ${pnlColor}">${fmt(displayPnl)} ${_pnlAge(lb, w)}</div>
       <div class="wcard-meta">
         ${catBadge(w.category)}
         <span class="badge ${isPaused?'badge-paused':'badge-active'}">${w.status}</span>
@@ -720,6 +735,7 @@ async function loadLeaderboard() {
     const r = await fetch('/api/copy/leaderboard?limit=50');
     const d = await r.json();
     _leaderboard = d.traders || [];
+    _leaderboardTs = Date.now();
     renderLeaderboard();
     renderAIPicks();
   } catch(e) {
