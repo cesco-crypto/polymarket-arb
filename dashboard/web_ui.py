@@ -1347,6 +1347,45 @@ async def masterplan() -> HTMLResponse:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# TERMINAL — /terminal
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/terminal", response_class=HTMLResponse)
+async def terminal_page() -> HTMLResponse:
+    """Terminal — Real-time trade execution and monitoring."""
+    html_path = Path(__file__).parent / "terminal.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/logs/recent")
+async def api_logs_recent() -> dict:
+    """Letzte 50 wichtige Log-Zeilen fuer das Terminal Activity Log."""
+    import re
+    log_path = Path("/home/ubuntu/bot.log")
+    if not log_path.exists():
+        log_path = Path("bot.log")
+    if not log_path.exists():
+        return {"lines": ["No log file found"]}
+    try:
+        with open(log_path, "rb") as f:
+            # Lese die letzten 20KB (schnell, kein voller Scan)
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 20000))
+            raw = f.read().decode("utf-8", errors="replace")
+        all_lines = raw.strip().split("\n")
+        # Filtere nur wichtige Events
+        keywords = ("SNIPE", "COPY #", "FILLED", "FAILED", "ERROR", "REDEEM",
+                    "WARNING", "BLOCKED", "Winner", "ODA", "Kill-Switch",
+                    "CONFIG CHANGE", "LIVE", "Verbunden", "gestartet")
+        filtered = [l for l in all_lines if any(k in l for k in keywords)]
+        # Letzte 50, neueste zuerst
+        return {"lines": list(reversed(filtered[-50:]))}
+    except Exception as e:
+        return {"lines": [f"Log read error: {e}"]}
+
+
+# ═══════════════════════════════════════════════════════════════════
 # COPY TRADING DASHBOARD — /copytrading
 # ═══════════════════════════════════════════════════════════════════
 

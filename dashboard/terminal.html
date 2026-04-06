@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Terminal — Polymarket Bot</title>
+<style>
+:root{--bg:#060810;--bg2:#0c0f18;--bg3:#111520;--border:#1a1e2e;--border-hi:#252a3a;--text:#d0d4de;--dim:#505868;--mid:#808898;--accent:#3b82f6;--green:#22c55e;--green-dim:#0a2a16;--red:#ef4444;--red-dim:#2a0e0e;--yellow:#eab308;--orange:#f97316;--purple:#a855f7;--cyan:#06b6d4;--font:'SF Mono','JetBrains Mono','Cascadia Code','Fira Code',monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:11px;overflow:hidden;height:100vh}
+a{color:var(--mid);text-decoration:none;transition:color .15s}a:hover{color:var(--text)}
+
+/* Header */
+.hdr{display:flex;align-items:center;justify-content:space-between;padding:6px 16px;background:var(--bg2);border-bottom:1px solid var(--border);height:36px}
+.logo{font-size:12px;font-weight:800;letter-spacing:2px;color:var(--cyan)}
+.logo span{color:var(--green);font-size:9px;margin-left:8px;padding:2px 6px;border:1px solid var(--green);border-radius:3px}
+.nav{display:flex;gap:14px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+.nav a.on{color:var(--cyan);border-bottom:1px solid var(--cyan)}
+
+/* Grid */
+.grid{display:grid;grid-template-columns:1fr 380px;grid-template-rows:1fr 260px;height:calc(100vh - 36px);gap:1px;background:var(--border)}
+.panel{background:var(--bg);overflow:hidden;display:flex;flex-direction:column}
+.panel-hdr{padding:6px 12px;background:var(--bg2);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.panel-title{font-size:9px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim)}
+.panel-body{flex:1;overflow-y:auto;padding:8px 12px}
+.panel-body::-webkit-scrollbar{width:4px}
+.panel-body::-webkit-scrollbar-thumb{background:var(--border-hi);border-radius:2px}
+
+/* Trade Feed */
+.trade-row{display:grid;grid-template-columns:70px 40px 160px 50px 55px 55px 55px 70px;gap:4px;padding:4px 0;border-bottom:1px solid #0e1118;font-size:10px;align-items:center;animation:fadeIn .3s}
+.trade-row:first-child{background:var(--bg2);border-left:2px solid var(--cyan)}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.trade-hdr{color:var(--dim);font-size:8px;font-weight:600;letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid var(--border)!important;background:none!important;border-left:none!important}
+.badge{font-size:8px;padding:1px 4px;border-radius:2px;font-weight:700;display:inline-block}
+.badge-ct{background:#eab30818;color:var(--yellow)}
+.badge-oda{background:#a855f718;color:var(--purple)}
+.badge-mom{background:#3b82f618;color:var(--accent)}
+.filled{color:var(--green)}.failed{color:var(--red)}.pending{color:var(--yellow)}
+
+/* Status Items */
+.stat{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #0e1118}
+.stat-label{color:var(--dim);font-size:9px}
+.stat-val{font-weight:600;font-size:10px}
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:4px}
+.dot-g{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dot-r{background:var(--red);box-shadow:0 0 6px var(--red)}
+.dot-y{background:var(--yellow);box-shadow:0 0 6px var(--yellow)}
+
+/* Portfolio */
+.port-val{font-size:22px;font-weight:800;color:var(--green);margin:8px 0 4px;text-shadow:0 0 20px rgba(34,197,94,.15)}
+.port-sub{font-size:9px;color:var(--dim)}
+.port-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:10px}
+.port-card{background:var(--bg2);padding:8px;border-radius:4px;border:1px solid var(--border)}
+.port-card-label{font-size:8px;color:var(--dim);text-transform:uppercase;letter-spacing:.5px}
+.port-card-val{font-size:14px;font-weight:700;margin-top:2px}
+
+/* Log Console */
+.log-line{padding:2px 0;font-size:9px;border-bottom:1px solid #080a10;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.log-info{color:var(--dim)}.log-warn{color:var(--yellow)}.log-err{color:var(--red)}.log-ok{color:var(--green)}
+
+/* Scan line effect */
+.panel::before{content:'';position:absolute;top:0;left:0;right:0;height:1px;background:linear-gradient(90deg,transparent,var(--cyan),transparent);opacity:.08;animation:scan 4s linear infinite;pointer-events:none}
+@keyframes scan{from{top:0}to{top:100%}}
+.panel{position:relative}
+
+/* Pulse */
+.pulse{animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div style="display:flex;align-items:center;gap:16px">
+    <span class="logo">TERMINAL <span id="status-badge">LIVE</span></span>
+    <span style="color:var(--dim);font-size:9px">Uptime: <strong id="uptime" style="color:var(--text)">--:--:--</strong></span>
+    <span style="color:var(--dim);font-size:9px"><span id="ws-dot" class="dot dot-r"></span><span id="ws-status">Connecting</span></span>
+  </div>
+  <div class="nav">
+    <a href="/">Dashboard</a>
+    <a href="/strategy">Strategies</a>
+    <a href="/copytrading">Copy Trading</a>
+    <a href="/safeguard">Safeguard</a>
+    <a href="/wallet">Wallet</a>
+    <a href="/terminal" class="on">Terminal</a>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- PANEL 1: Live Trade Feed -->
+  <div class="panel">
+    <div class="panel-hdr">
+      <span class="panel-title">Live Trade Feed</span>
+      <span id="trade-count" style="color:var(--dim);font-size:9px">0 trades</span>
+    </div>
+    <div class="panel-body" id="trade-feed">
+      <div class="trade-row trade-hdr">
+        <span>Time</span><span>Strat</span><span>Market</span><span>Side</span><span class="r">Entry</span><span class="r">Size</span><span class="r">PnL</span><span>Status</span>
+      </div>
+      <div style="color:var(--dim);padding:20px;text-align:center">Waiting for trades...</div>
+    </div>
+  </div>
+
+  <!-- PANEL 2: System Status -->
+  <div class="panel">
+    <div class="panel-hdr">
+      <span class="panel-title">System Status</span>
+      <span id="clock" style="color:var(--dim);font-size:9px"></span>
+    </div>
+    <div class="panel-body" id="sys-status">
+      <div class="stat"><span class="stat-label">Binance BTC</span><span class="stat-val" id="price-btc">—</span></div>
+      <div class="stat"><span class="stat-label">Binance ETH</span><span class="stat-val" id="price-eth">—</span></div>
+      <div class="stat"><span class="stat-label">CLOB Status</span><span class="stat-val" id="clob-status">—</span></div>
+      <div class="stat"><span class="stat-label">Active Strategies</span><span class="stat-val" id="strategies">—</span></div>
+      <div class="stat"><span class="stat-label">ODA Next Snipe</span><span class="stat-val" id="oda-countdown" style="color:var(--cyan)">—</span></div>
+      <div class="stat"><span class="stat-label">ODA Snipes Today</span><span class="stat-val" id="oda-snipes">—</span></div>
+      <div class="stat"><span class="stat-label">Copy WS</span><span class="stat-val" id="copy-ws">—</span></div>
+      <div class="stat"><span class="stat-label">Copy Tokens Tracked</span><span class="stat-val" id="copy-tokens">—</span></div>
+      <div class="stat"><span class="stat-label">Auto-Collect</span><span class="stat-val" id="collect-status">—</span></div>
+      <div class="stat"><span class="stat-label">Markets Discovered</span><span class="stat-val" id="markets">—</span></div>
+      <div class="stat"><span class="stat-label">Mode</span><span class="stat-val" id="mode" style="color:var(--green)">—</span></div>
+    </div>
+  </div>
+
+  <!-- PANEL 3: Portfolio Live -->
+  <div class="panel">
+    <div class="panel-hdr">
+      <span class="panel-title">Portfolio Live</span>
+      <span id="port-update" style="color:var(--dim);font-size:8px">—</span>
+    </div>
+    <div class="panel-body">
+      <div class="port-sub">PORTFOLIO TOTAL</div>
+      <div class="port-val" id="port-total">$—</div>
+      <div class="port-grid">
+        <div class="port-card">
+          <div class="port-card-label">USDC.e Balance</div>
+          <div class="port-card-val" id="port-usdc" style="color:var(--green)">—</div>
+        </div>
+        <div class="port-card">
+          <div class="port-card-label">Open Positions</div>
+          <div class="port-card-val" id="port-pos" style="color:var(--cyan)">—</div>
+        </div>
+        <div class="port-card">
+          <div class="port-card-label">Positions Count</div>
+          <div class="port-card-val" id="port-count" style="color:var(--mid)">—</div>
+        </div>
+      </div>
+      <div class="port-grid" style="margin-top:6px">
+        <div class="port-card">
+          <div class="port-card-label">Live Orders</div>
+          <div class="port-card-val" id="port-orders">—</div>
+        </div>
+        <div class="port-card">
+          <div class="port-card-label">Volume</div>
+          <div class="port-card-val" id="port-vol">—</div>
+        </div>
+        <div class="port-card">
+          <div class="port-card-label">Win Rate (Live)</div>
+          <div class="port-card-val" id="port-wr">—</div>
+        </div>
+      </div>
+      <div class="port-grid" style="margin-top:6px">
+        <div class="port-card" style="border-color:var(--yellow)33">
+          <div class="port-card-label" style="color:var(--yellow)">Copy PnL</div>
+          <div class="port-card-val" id="pnl-ct">—</div>
+        </div>
+        <div class="port-card" style="border-color:var(--purple)33">
+          <div class="port-card-label" style="color:var(--purple)">ODA PnL</div>
+          <div class="port-card-val" id="pnl-oda">—</div>
+        </div>
+        <div class="port-card" style="border-color:var(--accent)33">
+          <div class="port-card-label" style="color:var(--accent)">Momentum PnL</div>
+          <div class="port-card-val" id="pnl-mom">—</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PANEL 4: Activity Log -->
+  <div class="panel">
+    <div class="panel-hdr">
+      <span class="panel-title">Activity Log</span>
+      <span id="log-count" style="color:var(--dim);font-size:9px">0 events</span>
+    </div>
+    <div class="panel-body" id="log-feed" style="font-size:9px">
+      <div style="color:var(--dim);padding:10px;text-align:center">Loading logs...</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ═══════════════════════════════════════
+// WebSocket
+// ═══════════════════════════════════════
+let ws = null;
+let reconnectTimer = null;
+
+function connectWS() {
+  const prot = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const cookie = document.cookie.split(';').map(c=>c.trim()).find(c=>c.startsWith('session='));
+  const token = cookie ? cookie.split('=')[1] : '';
+  ws = new WebSocket(`${prot}//${location.host}/ws${token?'?token='+token:''}`);
+
+  ws.onopen = () => {
+    $('ws-dot').className = 'dot dot-g';
+    $('ws-status').textContent = 'Connected';
+    $('status-badge').style.borderColor = 'var(--green)';
+    $('status-badge').style.color = 'var(--green)';
+    clearTimeout(reconnectTimer);
+  };
+  ws.onclose = () => {
+    $('ws-dot').className = 'dot dot-r';
+    $('ws-status').textContent = 'Reconnecting...';
+    reconnectTimer = setTimeout(connectWS, 2000);
+  };
+  ws.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      updateFromWS(d);
+    } catch(err) {}
+  };
+}
+
+function updateFromWS(d) {
+  // Uptime
+  if (d.uptime) $('uptime').textContent = d.uptime;
+
+  // Oracle prices
+  const oracle = d.oracle || {};
+  const feeds = oracle.feeds || {};
+  if (feeds['BTC/USDT']) {
+    const btc = feeds['BTC/USDT'];
+    $('price-btc').textContent = '$' + (btc.price || 0).toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
+    $('price-btc').style.color = 'var(--green)';
+  }
+  if (feeds['ETH/USDT']) {
+    const eth = feeds['ETH/USDT'];
+    $('price-eth').textContent = '$' + (eth.price || 0).toLocaleString('en', {minimumFractionDigits:2, maximumFractionDigits:2});
+    $('price-eth').style.color = 'var(--green)';
+  }
+
+  // Discovery
+  const disc = d.discovery || {};
+  $('markets').textContent = (disc.total_windows || 0) + ' windows';
+
+  // Executor mode
+  const exec = d.executor || {};
+  $('mode').textContent = exec.live ? 'LIVE TRADING' : 'PAPER';
+  $('mode').style.color = exec.live ? 'var(--green)' : 'var(--yellow)';
+}
+
+// ═══════════════════════════════════════
+// Polling: Journal Stats
+// ═══════════════════════════════════════
+let lastTradeCount = 0;
+
+async function loadTrades() {
+  try {
+    const r = await fetch('/api/journal/stats');
+    const d = await r.json();
+    const trades = (d.trades || []).filter(t => t.live_order_success);
+    $('trade-count').textContent = trades.length + ' live trades';
+
+    const bs = d.by_strategy || {};
+    const live = d.live || {};
+
+    // Win Rate
+    const wr = live.win_rate || 0;
+    $('port-wr').textContent = wr + '%';
+    $('port-wr').style.color = wr >= 50 ? 'var(--green)' : 'var(--red)';
+
+    // Per-strategy PnL
+    const ct = bs.copy_trade || {};
+    const oda = bs.oda || {};
+    const mom = bs.momentum_live || {};
+    function pnlFmt(v) { return (v>=0?'+':'') + '$' + (v||0).toFixed(2); }
+    function pnlClr(v) { return v >= 0 ? 'var(--green)' : 'var(--red)'; }
+    $('pnl-ct').textContent = pnlFmt(ct.total_pnl) + ` (${ct.wins||0}W/${ct.losses||0}L)`;
+    $('pnl-ct').style.color = pnlClr(ct.total_pnl);
+    $('pnl-oda').textContent = pnlFmt(oda.total_pnl) + ` (${oda.wins||0}W/${oda.losses||0}L)`;
+    $('pnl-oda').style.color = pnlClr(oda.total_pnl);
+    $('pnl-mom').textContent = pnlFmt(mom.total_pnl) + ` (${mom.wins||0}W/${mom.losses||0}L)`;
+    $('pnl-mom').style.color = pnlClr(mom.total_pnl);
+
+    // ODA snipes count
+    $('oda-snipes').textContent = (oda.opens || 0) + ' snipes';
+
+    // Strategies active
+    const strats = [];
+    if ((ct.opens||0) > 0) strats.push('CT');
+    if ((oda.opens||0) > 0) strats.push('ODA');
+    if ((mom.opens||0) > 0) strats.push('MOM');
+    $('strategies').innerHTML = strats.map(s => `<span class="dot dot-g"></span>${s}`).join('  ') || '<span class="dot dot-r"></span>None';
+
+    // Render trade feed
+    if (trades.length !== lastTradeCount) {
+      lastTradeCount = trades.length;
+      renderTrades(trades.slice(0, 60));
+    }
+  } catch(e) {}
+}
+
+function renderTrades(trades) {
+  const feed = $('trade-feed');
+  const hdr = '<div class="trade-row trade-hdr"><span>Time</span><span>Strat</span><span>Market</span><span>Side</span><span class="r">Entry</span><span class="r">Size</span><span class="r">PnL</span><span>Status</span></div>';
+
+  const rows = trades.map(t => {
+    const ts = t.entry_ts ? new Date(t.entry_ts*1000) : null;
+    const time = ts ? ts.getHours().toString().padStart(2,'0')+':'+ts.getMinutes().toString().padStart(2,'0')+':'+ts.getSeconds().toString().padStart(2,'0') : '—';
+
+    const strat = t.strategy || '';
+    let badge = '';
+    if (strat === 'copy_trade') badge = '<span class="badge badge-ct">CT</span>';
+    else if (strat === 'oda') badge = '<span class="badge badge-oda">ODA</span>';
+    else if (strat === 'momentum_live') badge = '<span class="badge badge-mom">MOM</span>';
+    else badge = '<span class="badge" style="color:var(--dim)">' + strat.substring(0,3).toUpperCase() + '</span>';
+
+    const market = (t.market_question || '').substring(0, 22);
+    const dir = (t.direction || '').substring(0, 6);
+    const entry = (t.executed_price || 0).toFixed(3);
+    const size = '$' + (t.size_usd || 0).toFixed(2);
+    const pnl = t.pnl_usd ? ((t.pnl_usd>=0?'+':'') + '$' + t.pnl_usd.toFixed(2)) : '—';
+    const pnlClr = t.pnl_usd > 0 ? 'color:var(--green)' : t.pnl_usd < 0 ? 'color:var(--red)' : '';
+
+    let status = '';
+    if (t.outcome_correct === true) status = '<span class="filled">WON</span>';
+    else if (t.outcome_correct === false) status = '<span class="failed">LOST</span>';
+    else if (t.live_order_success) status = '<span class="pending">OPEN</span>';
+    else status = '<span style="color:var(--dim)">—</span>';
+
+    return `<div class="trade-row"><span style="color:var(--dim)">${time}</span><span>${badge}</span><span style="color:var(--mid)">${market}</span><span>${dir}</span><span class="r">${entry}</span><span class="r">${size}</span><span class="r" style="${pnlClr};font-weight:600">${pnl}</span><span>${status}</span></div>`;
+  }).join('');
+
+  feed.innerHTML = hdr + rows;
+}
+
+// ═══════════════════════════════════════
+// Polling: Wallet / Portfolio
+// ═══════════════════════════════════════
+async function loadPortfolio() {
+  try {
+    const r = await fetch('/api/wallet');
+    const d = await r.json();
+    $('port-usdc').textContent = '$' + (d.balance || 0).toFixed(2);
+    $('port-pos').textContent = '$' + (d.positions_value || 0).toFixed(2);
+    $('port-total').textContent = '$' + (d.portfolio_total || d.balance || 0).toFixed(2);
+    $('port-total').style.color = 'var(--green)';
+    $('port-orders').textContent = d.orders_placed || 0;
+    $('port-vol').textContent = '$' + (d.total_volume || 0).toFixed(0);
+    $('port-update').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+    // Positions count from separate endpoint
+    const r2 = await fetch('/api/positions');
+    const d2 = await r2.json();
+    $('port-count').textContent = (d2.count || 0) + ' open';
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════
+// Polling: Copy + Collect Status
+// ═══════════════════════════════════════
+async function loadStatus() {
+  try {
+    const [copyR, collectR, clobR] = await Promise.all([
+      fetch('/api/copy/status'),
+      fetch('/api/collect/status'),
+      fetch('/api/strategies'),
+    ]);
+    const copy = await copyR.json();
+    const collect = await collectR.json();
+    const strats = await clobR.json();
+
+    // Copy WS
+    const ws = copy.ws || {};
+    $('copy-ws').innerHTML = ws.connected
+      ? '<span class="dot dot-g"></span>Connected'
+      : '<span class="dot dot-r"></span>Disconnected';
+    $('copy-tokens').textContent = (ws.subscribed_tokens || 0) + ' tokens';
+
+    // CLOB
+    $('clob-status').innerHTML = '<span class="dot dot-g"></span>Connected';
+
+    // Collect
+    const redeemed = collect.redeemed || 0;
+    const merged = collect.merged || 0;
+    $('collect-status').textContent = redeemed > 0 || merged > 0
+      ? `${redeemed} redeemed, ${merged} merged`
+      : 'Idle (60s cycle)';
+  } catch(e) {}
+}
+
+// ═══════════════════════════════════════
+// Polling: Activity Logs
+// ═══════════════════════════════════════
+async function loadLogs() {
+  try {
+    const r = await fetch('/api/logs/recent');
+    const d = await r.json();
+    const lines = d.lines || [];
+    $('log-count').textContent = lines.length + ' events';
+
+    $('log-feed').innerHTML = lines.map(l => {
+      let cls = 'log-info';
+      if (l.includes('ERROR') || l.includes('FAILED') || l.includes('EXCEPTION')) cls = 'log-err';
+      else if (l.includes('WARNING') || l.includes('Skip')) cls = 'log-warn';
+      else if (l.includes('FILLED') || l.includes('SNIPE') || l.includes('COPY #') || l.includes('Redeemed')) cls = 'log-ok';
+      // Strip ANSI color codes
+      const clean = l.replace(/\x1b\[[0-9;]*m/g, '').substring(0, 120);
+      return `<div class="log-line ${cls}">${clean}</div>`;
+    }).join('');
+  } catch(e) {
+    $('log-feed').innerHTML = '<div class="log-line log-err">Failed to load logs</div>';
+  }
+}
+
+// ═══════════════════════════════════════
+// ODA Countdown
+// ═══════════════════════════════════════
+function updateCountdown() {
+  const now = Date.now() / 1000;
+  const interval = 300;
+  const nextClose = (Math.floor(now / interval) + 1) * interval;
+  const delay = 15; // ODA waits 15s after close
+  const snipeAt = nextClose + delay;
+  const remaining = Math.max(0, snipeAt - now);
+  const min = Math.floor(remaining / 60);
+  const sec = Math.floor(remaining % 60);
+  $('oda-countdown').textContent = `${min}:${sec.toString().padStart(2,'0')}`;
+  if (remaining < 20) $('oda-countdown').style.color = 'var(--green)';
+  else $('oda-countdown').style.color = 'var(--cyan)';
+}
+
+// ═══════════════════════════════════════
+// Clock
+// ═══════════════════════════════════════
+function updateClock() {
+  $('clock').textContent = new Date().toLocaleTimeString();
+}
+
+// ═══════════════════════════════════════
+// Init
+// ═══════════════════════════════════════
+connectWS();
+loadTrades();
+loadPortfolio();
+loadStatus();
+loadLogs();
+updateClock();
+updateCountdown();
+
+setInterval(loadTrades, 5000);
+setInterval(loadPortfolio, 10000);
+setInterval(loadStatus, 15000);
+setInterval(loadLogs, 8000);
+setInterval(updateClock, 1000);
+setInterval(updateCountdown, 1000);
+</script>
+</body>
+</html>
