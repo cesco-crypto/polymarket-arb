@@ -444,7 +444,7 @@ function renderWallets(d) {
         <span class="badge ${isPaused?'badge-paused':'badge-active'}">${w.status}</span>
       </div>
       <div style="font-size:9px;color:var(--dim);margin-bottom:6px">
-        Copies: ${st.copies||0} | Active: ${st.active||0}
+        <span title="Gesamtzahl aller jemals kopierten Trades dieses Wallets (aus Journal)" style="cursor:help">Hist. Copies: ${st.copies||0}</span> | <span title="Aktuell offene, nicht-resolved Positionen dieses Wallets in deiner Wallet" style="cursor:help;${(st.active||0)>0?'color:var(--green);font-weight:600':''}">Live Active: ${st.active||0}</span>
       </div>
       <div class="wcard-actions">
         ${isPaused
