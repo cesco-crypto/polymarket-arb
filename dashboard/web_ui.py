@@ -627,8 +627,8 @@ def _read_journal_stats() -> dict:
         if tid:
             by_trade[tid].append(e)
 
-    # Strategie-Zuordnung via Prefix + order_type
-    def get_strategy(tid: str, order_type: str) -> str:
+    # Strategie-Zuordnung via Prefix + order_type + live_order_success
+    def get_strategy(tid: str, order_type: str, is_live: bool = False) -> str:
         if tid.startswith("REDEEM-CLEANUP"):
             return "cleanup"  # Ignoriert in Stats
         if tid.startswith("CT-"):
@@ -636,7 +636,8 @@ def _read_journal_stats() -> dict:
         if tid.startswith("ODA"):
             return "oda"
         if tid.startswith("LT-"):
-            return "momentum_live"
+            # LT- Trades sind nur "live" wenn sie wirklich platziert wurden
+            return "momentum_live" if is_live else "momentum_paper"
         if tid.startswith("PT-"):
             return "momentum_paper"
         if order_type in ("copy_trade", "copy_hedge", "copy_sell"):
@@ -669,7 +670,8 @@ def _read_journal_stats() -> dict:
                 open_ev["live_order_id"] = live_upd["live_order_id"]
 
         order_type = open_ev.get("order_type", "")
-        strat = get_strategy(tid, order_type)
+        is_live = bool(open_ev.get("live_order_success", False))
+        strat = get_strategy(tid, order_type, is_live)
         strat_stats[strat]["opens"] += 1
         strat_stats[strat]["total_invested"] += open_ev.get("size_usd", 0)
 
