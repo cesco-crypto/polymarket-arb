@@ -285,19 +285,13 @@ class OracleDelayArbStrategy(StrategyBase):
                                 break
                         if oracle:
                             symbol = f"{asset}/USDT"
-                            window_obj = oracle.get_window(symbol)
-                            if window_obj:
-                                start_price = None
-                                current_price = None
-                                latest = window_obj.latest()
-                                if latest:
-                                    current_price = latest.mid
-                                # Preis vor 5 Minuten approximieren via Momentum
-                                mom = window_obj.momentum(300)
-                                if mom is not None and current_price:
-                                    start_price = current_price / (1 + mom / 100)
+                            latest = oracle.get_latest(symbol)
+                            mom = oracle.get_momentum(symbol, 300)
+                            if latest and mom is not None:
+                                current_price = latest.mid
+                                start_price = current_price / (1 + mom / 100)
 
-                                if start_price and current_price:
+                                if current_price and start_price:
                                     if current_price > start_price:
                                         winner = "UP"
                                         winner_tid = up_tid
