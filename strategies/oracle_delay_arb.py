@@ -166,6 +166,12 @@ class OracleDelayArbStrategy(StrategyBase):
 
         logger.info(f"Oracle Delay Arb startet — Sharky6999 Style! (Counter: {self._trade_count})")
 
+        # EMERGENCY STOP: Token-ID Zuordnung ist invertiert (kauft Verlierer statt Gewinner)
+        # Deaktiviert bis Bug gefixt ist
+        logger.error("ODA DEAKTIVIERT: Token-ID Bug — kauft Verlierer statt Gewinner. Fix pending.")
+        self._running = False
+        return
+
         if self.settings.live_trading:
             live_ok = await self.executor.initialize()
             if live_ok:
