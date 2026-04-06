@@ -271,61 +271,85 @@ class OracleDelayArbStrategy(StrategyBase):
 
                     up_tid, down_tid, condition_id = token_ids
 
-                    # 2. Bestimme den Winner via GAMMA-PREISE (nicht CLOB!)
-                    # CLOB zeigt beide Seiten bei ~0.99 kurz nach Close (Bug).
-                    # Gamma-Preise zeigen den echten Marktpreis: Winner ~0.90+, Loser ~0.10-.
-                    gamma_up = 0.0
-                    gamma_down = 0.0
+                    # 2. Bestimme den Winner via BINANCE PREIS-VERGLEICH
+                    # Direkt und deterministisch: Preis bei Window-Start vs Preis jetzt
+                    # BTC stieg → UP gewinnt. BTC fiel → DOWN gewinnt.
+                    winner = None
+                    winner_tid = ""
                     try:
                         from dashboard.web_ui import active_strategies
+                        oracle = None
                         for sn, st in active_strategies.items():
-                            if not hasattr(st, "discovery"):
-                                continue
-                            for s, wnd in st.discovery.windows.items():
-                                if wnd.condition_id == condition_id:
-                                    gamma_up = wnd.gamma_up_price or wnd.up_best_ask
-                                    gamma_down = wnd.gamma_down_price or wnd.down_best_ask
-                                    break
-                            if gamma_up > 0:
+                            if hasattr(st, "oracle"):
+                                oracle = st.oracle
                                 break
-                    except Exception:
-                        pass
+                        if oracle:
+                            symbol = f"{asset}/USDT"
+                            window_obj = oracle.get_window(symbol)
+                            if window_obj:
+                                start_price = None
+                                current_price = None
+                                latest = window_obj.latest()
+                                if latest:
+                                    current_price = latest.mid
+                                # Preis vor 5 Minuten approximieren via Momentum
+                                mom = window_obj.momentum(300)
+                                if mom is not None and current_price:
+                                    start_price = current_price / (1 + mom / 100)
 
-                    # Fallback: Fetch vom CLOB (nur wenn Gamma nicht verfuegbar)
-                    if gamma_up <= 0 and gamma_down <= 0:
-                        gamma_up = await self._fetch_ask(up_tid) if up_tid else 0
-                        gamma_down = await self._fetch_ask(down_tid) if down_tid else 0
+                                if start_price and current_price:
+                                    if current_price > start_price:
+                                        winner = "UP"
+                                        winner_tid = up_tid
+                                    else:
+                                        winner = "DOWN"
+                                        winner_tid = down_tid
+                                    logger.info(
+                                        f"ODA Binance: {asset} start={start_price:.2f} → now={current_price:.2f} "
+                                        f"→ {winner} (mom={mom:+.3f}%)"
+                                    )
+                    except Exception as e:
+                        logger.warning(f"ODA Binance lookup error: {e}")
 
-                    winner = None
-                    winner_ask = 0
-                    winner_tid = ""
+                    # Fallback: Gamma-Preise aus Discovery (weniger zuverlaessig)
+                    if not winner:
+                        try:
+                            from dashboard.web_ui import active_strategies
+                            for sn, st in active_strategies.items():
+                                if not hasattr(st, "discovery"):
+                                    continue
+                                for s, wnd in st.discovery.windows.items():
+                                    if wnd.condition_id == condition_id:
+                                        gup = wnd.up_best_ask or wnd.gamma_up_price
+                                        gdn = wnd.down_best_ask or wnd.gamma_down_price
+                                        if gup > 0.7 and gdn < 0.3:
+                                            winner = "UP"
+                                            winner_tid = up_tid
+                                        elif gdn > 0.7 and gup < 0.3:
+                                            winner = "DOWN"
+                                            winner_tid = down_tid
+                                        break
+                                if winner:
+                                    break
+                        except Exception:
+                            pass
 
-                    # Winner = die Seite mit dem HOEHEREN Gamma-Preis
-                    if gamma_up > gamma_down and gamma_up >= self.min_entry_price:
-                        winner = "UP"
-                        winner_tid = up_tid
-                    elif gamma_down > gamma_up and gamma_down >= self.min_entry_price:
-                        winner = "DOWN"
-                        winner_tid = down_tid
-                    else:
-                        # Noch kein klarer Winner — NICHT skippen, naechsten Zyklus nochmal pruefen
+                    if not winner:
                         logger.info(
-                            f"ODA Wait: {asset} {slug[-15:]} — no clear winner yet "
-                            f"(gamma_up={gamma_up:.3f}, gamma_dn={gamma_down:.3f}, age={seconds_since_close:.0f}s)"
+                            f"ODA Wait: {asset} {slug[-15:]} — winner unclear (age={seconds_since_close:.0f}s)"
                         )
                         continue
 
-                    # Hole den echten CLOB-Ask fuer den Winner-Token (fuer Order-Preis)
+                    # Hole CLOB-Ask fuer den Winner-Token (fuer Order-Preis)
                     winner_ask = await self._fetch_ask(winner_tid) if winner_tid else 0
                     if winner_ask <= 0 or winner_ask > self.max_entry_price:
-                        logger.info(f"ODA Skip: {asset} {winner} CLOB ask={winner_ask:.3f} (range {self.min_entry_price}-{self.max_entry_price})")
+                        logger.info(f"ODA Skip: {asset} {winner} CLOB ask={winner_ask:.3f}")
                         self._sniped_windows.add(slug)
                         continue
 
-                    logger.info(
-                        f"ODA Winner: {asset} {winner} — gamma={gamma_up:.3f}/{gamma_down:.3f}, "
-                        f"CLOB ask={winner_ask:.3f}"
-                    )
+                    if winner_ask < self.min_entry_price:
+                        logger.info(f"ODA Wait: {asset} {winner} ask={winner_ask:.3f} < {self.min_entry_price}")
+                        continue
 
                     # 3. SNIPE! Kaufe den Winner
                     self._sniped_windows.add(slug)
