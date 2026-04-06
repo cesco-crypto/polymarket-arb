@@ -687,6 +687,7 @@ def _read_journal_stats() -> dict:
             "live_order_success": open_ev.get("live_order_success", False),
             "source_tx_hash": open_ev.get("source_tx_hash", ""),
             "live_order_id": open_ev.get("live_order_id", ""),
+            "market_end_date": open_ev.get("market_end_date", ""),
         }
 
         if close_ev:

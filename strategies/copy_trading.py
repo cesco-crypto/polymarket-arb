@@ -1602,6 +1602,8 @@ class CopyTradingStrategy(StrategyBase):
             source_wallet=trade.wallet_address,
             source_wallet_name=trade.wallet_name,
             source_tx_hash=trade.source_tx_hash,
+            # Market Ablaufdatum (async fetch, non-blocking)
+            market_end_date=await self._fetch_market_end_date(trade.condition_id),
         ))
 
     # ═══════════════════════════════════════════════════════════════
@@ -1621,6 +1623,27 @@ class CopyTradingStrategy(StrategyBase):
         except Exception as e:
             logger.debug(f"Fetch Activity Error: {e}")
             return []
+
+    _end_date_cache: dict[str, str] = {}  # condition_id -> endDate (ISO 8601)
+
+    async def _fetch_market_end_date(self, condition_id: str) -> str:
+        """Holt das Ablaufdatum eines Markets via Gamma API (cached)."""
+        if condition_id in self._end_date_cache:
+            return self._end_date_cache[condition_id]
+        if not self._session or self._session.closed or not condition_id:
+            return ""
+        try:
+            url = f"https://gamma-api.polymarket.com/markets?condition_id={condition_id}"
+            async with self._session.get(url) as resp:
+                if resp.status == 200:
+                    markets = await resp.json()
+                    if isinstance(markets, list) and markets:
+                        end_date = markets[0].get("endDate", "") or ""
+                        self._end_date_cache[condition_id] = end_date
+                        return end_date
+        except Exception:
+            pass
+        return ""
 
     async def _fetch_current_ask(self, token_id: str) -> float:
         """Holt den aktuellen Best-Ask-Preis vom CLOB Orderbook."""

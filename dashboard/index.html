@@ -273,7 +273,7 @@
     </div>
     <!-- Unified Trade Table (Journal = Source of Truth) -->
     <table>
-      <tr><th>Time</th><th>Strat</th><th>Market</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th>Source</th><th style="font-size:8px">TX/Ref</th><th>Status</th></tr>
+      <tr><th>Time</th><th>Strat</th><th>Market</th><th>Side</th><th class="r">Entry</th><th class="r">Size</th><th class="r">PnL</th><th>Source</th><th style="font-size:8px">TX/Ref</th><th>Expires</th><th>Status</th></tr>
     </table>
     <table id="hist-body"><tr><td colspan="10" class="empty">Loading from Journal...</td></tr></table>
   </div>
@@ -945,6 +945,25 @@ function switchTab(btn, tab) {
       const isRecent = ts && (Date.now()/1000 - ts) < 7200;
       const rowOpacity = isRecent ? '' : 'opacity:0.7';
 
+      // Expires: Countdown oder Datum
+      let expiresCell = '<span class="d" style="font-size:8px">—</span>';
+      const endDate = t.market_end_date || '';
+      if (endDate) {
+        const endMs = new Date(endDate).getTime();
+        const nowMs = Date.now();
+        const diffS = Math.floor((endMs - nowMs) / 1000);
+        if (diffS <= 0) {
+          expiresCell = '<span style="font-size:8px;color:var(--text-dim)">Expired</span>';
+        } else if (diffS < 3600) {
+          expiresCell = `<span style="font-size:9px;color:var(--yellow)">${Math.floor(diffS/60)}m</span>`;
+        } else if (diffS < 86400) {
+          expiresCell = `<span style="font-size:9px;color:var(--text-mid)">${Math.floor(diffS/3600)}h ${Math.floor((diffS%3600)/60)}m</span>`;
+        } else {
+          const d = new Date(endDate);
+          expiresCell = `<span style="font-size:8px;color:var(--text-dim)">${d.getDate()}.${d.getMonth()+1} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}</span>`;
+        }
+      }
+
       return `<tr style="${rowOpacity}">
         <td class="d" style="font-size:9px;white-space:nowrap" title="${timeRel}">${timeExact}</td>
         <td>${badge}</td>
@@ -955,6 +974,7 @@ function switchTab(btn, tab) {
         <td class="r ${pnlC} b" style="font-size:11px;white-space:nowrap">${pnl!==0 ? (pnl>=0?'+':'')+'$'+pnl.toFixed(2) : '—'}</td>
         <td>${srcTag}</td>
         <td style="white-space:nowrap">${txCell}</td>
+        <td style="white-space:nowrap">${expiresCell}</td>
         <td style="white-space:nowrap">${statusTag}${t.live_order_success ? ' <span style="font-size:7px;color:var(--green)">LIVE</span>' : ''}</td>
       </tr>`;
     }).join('');

@@ -99,6 +99,7 @@ class TradeRecord:
     live_error: str = ""
 
     # --- Meta ---
+    market_end_date: str = ""         # ISO 8601 Ablaufdatum des Markets (z.B. "2026-04-06T18:00:00Z")
     seconds_to_expiry: float = 0.0
     market_liquidity_usd: float = 0.0
     spread_pct: float = 0.0
@@ -165,7 +166,7 @@ class TradeJournal:
                     "p_market", "raw_edge_pct", "fee_pct", "net_ev_pct",
                     "shares", "kelly_fraction",
                     "signal_to_order_ms", "transit_latency_ms", "tick_age_ms",
-                    "order_type", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+                    "order_type", "market_end_date", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
                     # Advanced HFT metrics (entry-time)
                     "orderbook_imbalance_pct", "cex_lag_ms", "implied_prob",
                     "regime_tag", "signal_confluence_count", "confidence_score",
@@ -274,7 +275,7 @@ class TradeJournal:
         "p_market", "raw_edge_pct", "fee_pct", "net_ev_pct",
         "shares", "kelly_fraction",
         "signal_to_order_ms", "transit_latency_ms", "tick_age_ms",
-        "order_type", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
+        "order_type", "market_end_date", "seconds_to_expiry", "market_liquidity_usd", "spread_pct",
         # Advanced HFT metrics (entry-time, must propagate to close)
         "orderbook_imbalance_pct", "cex_lag_ms", "implied_prob",
         "regime_tag", "signal_confluence_count", "confidence_score",
