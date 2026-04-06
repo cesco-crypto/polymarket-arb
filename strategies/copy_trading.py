@@ -22,6 +22,7 @@ import aiohttp
 from loguru import logger
 
 from config import Settings
+from core.copy_trade_ws import CopyTradeWebSocket
 from core.executor import PolymarketExecutor
 from core.trade_journal import TradeJournal, TradeRecord
 from strategies.base import StrategyBase
@@ -185,8 +186,11 @@ class SmartGuards:
     """
 
     def __init__(self) -> None:
-        # Slippage
-        self.max_slippage_pct: float = 12.0  # Max 12% Preisverschiebung (3s-Polling braucht Spielraum)
+        # EV-Based Slippage (ersetzt altes %-Drift-System)
+        self.taker_fee_rate: float = 0.018   # Polymarket taker fee: 1.8% von $1 payout
+        self.min_ev_threshold: float = 0.04  # Min $0.04 EV pro Share (= max ask ~0.942)
+        self.max_drift_pct: float = 50.0     # Soft-Cap: >50% Drift = Alpha weg
+        self.max_slippage_pct: float = 12.0  # Legacy (backward-compat für Dashboard)
 
         # Bait Detection
         self._recent_copies_ts: dict[str, float] = {}  # condition_id → timestamp of our copy
@@ -201,18 +205,33 @@ class SmartGuards:
         self._wallet_categories: dict[str, Counter] = {}  # wallet → category histogram
 
     def check_slippage(self, original_price: float, current_ask: float) -> tuple[bool, str]:
-        """Prüft ob sich der Preis seit dem Original-Trade zu stark verschlechtert hat."""
+        """EV-basierte Prüfung: Ist der Trade JETZT noch profitabel?
+
+        Drei Stufen:
+        1. Market resolved (>0.95) → block (kein Profit möglich)
+        2. EV-Check: (payout - fee) - current_ask >= min_ev → min $0.04 Expected Value
+        3. Drift Soft-Cap: >50% Preisdrift = Alpha verbraucht, selbst wenn EV positiv
+        """
         if original_price <= 0 or current_ask <= 0:
             return True, "no price data"
-        # Hard-Cap: Markt entschieden (>0.95) → immer blocken, kein Profit möglich
+
+        # 1. Hard-Cap: Markt entschieden → immer blocken
         if current_ask > 0.95:
             return False, f"Market resolved (ask {current_ask:.3f} > 0.95)"
-        # Nur GEGEN uns (Preis gestiegen = schlechter für BUY) blocken
-        # Preis gefallen = besser für uns → NICHT blocken
+
+        # 2. Expected Value: Payout ($1) minus Fee minus Kaufpreis
+        net_payout = 1.0 - self.taker_fee_rate  # $0.982
+        ev = net_payout - current_ask
+        if ev < self.min_ev_threshold:
+            return False, f"EV ${ev:.3f} < ${self.min_ev_threshold:.3f} (ask {current_ask:.3f}, breakeven {net_payout:.3f})"
+
+        # 3. Drift Soft-Cap: Preis zu weit vom Original → Alpha verbraucht
         drift_pct = (current_ask - original_price) / original_price * 100
-        if drift_pct > self.max_slippage_pct:
-            return False, f"Slippage +{drift_pct:.1f}% > {self.max_slippage_pct}% (orig: {original_price:.3f}, now: {current_ask:.3f})"
-        return True, f"Slippage OK ({drift_pct:+.1f}%)"
+        if drift_pct > self.max_drift_pct:
+            return False, f"Drift +{drift_pct:.1f}% > {self.max_drift_pct:.0f}% — alpha gone (orig {original_price:.3f} → now {current_ask:.3f})"
+
+        # Alles OK — EV positiv und Drift akzeptabel
+        return True, f"EV OK: ${ev:.3f} (drift {drift_pct:+.1f}%, ask {current_ask:.3f})"
 
     def check_liquidity(self, trade: dict) -> tuple[bool, str]:
         """Prüft ob der Market genug Liquidität hat für unseren Copy-Trade."""
@@ -302,7 +321,10 @@ class SmartGuards:
             "blacklisted": list(self._blacklisted),
             "dump_alerts": dict(self._dump_alerts),
             "active_markets": dict(self._active_markets),
-            "slippage_max": self.max_slippage_pct,
+            "slippage_max": self.max_slippage_pct,  # Legacy
+            "min_ev_threshold": self.min_ev_threshold,
+            "max_drift_pct": self.max_drift_pct,
+            "taker_fee_rate": self.taker_fee_rate,
         }
 
 
@@ -458,7 +480,7 @@ class CopyTradingStrategy(StrategyBase):
         self.journal = TradeJournal()
 
         # Config
-        self.poll_interval_s = 3.0         # Poll alle 3 Sekunden (schneller = weniger Slippage)
+        self.poll_interval_s = 1.5         # Poll alle 1.5s + WS-Events fuer sub-second
         self.max_copy_size_usd = 5.0       # Fix $5 pro Copy-Trade
         self.max_concurrent = 10           # Max 10 Markets (bei $5/Trade = $50-$100 max exposure)
         self.min_seconds_to_copy = 5       # Trade muss < 5 Min alt sein
@@ -480,6 +502,11 @@ class CopyTradingStrategy(StrategyBase):
         self._recent_copies: deque = deque(maxlen=50)
         self._session: Optional[aiohttp.ClientSession] = None
         self._paused_wallets: set[str] = set()  # Paused wallet addresses
+
+        # WebSocket — Hybrid Trade Detection
+        self._trade_event = asyncio.Event()           # Wake-up Signal fuer Poll-Loop
+        self._ws: CopyTradeWebSocket | None = None    # WS-Verbindung
+        self._ws_triggered_wallets: set[str] = set()  # Wallets fuer targeted fast-path
 
         # AI Risk Management
         self.risk = CopyRiskManager()
@@ -786,10 +813,14 @@ class CopyTradingStrategy(StrategyBase):
         # MEMORY REBUILD: Offene Positionen aus Journal + Wallet wiederherstellen
         await self._rebuild_copied_positions()
 
+        # WebSocket: Initialisieren und Subscriptions aus Last-Seen-Daten aufbauen
+        await self._init_ws()
+
         try:
             await asyncio.gather(
                 self._poll_loop(),
                 self._status_loop(),
+                self._ws_monitor_loop(),
                 return_exceptions=True,
             )
         except asyncio.CancelledError:
@@ -799,6 +830,8 @@ class CopyTradingStrategy(StrategyBase):
 
     async def shutdown(self) -> None:
         self._running = False
+        if self._ws:
+            await self._ws.stop()
         if self._session and not self._session.closed:
             await self._session.close()
         logger.info(f"Copy Trading beendet. {self._copy_count} Trades kopiert.")
@@ -873,24 +906,115 @@ class CopyTradingStrategy(StrategyBase):
             logger.error(f"Copy Seen Save Error: {e}")
 
     # ═══════════════════════════════════════════════════════════════
-    # POLL LOOP
+    # WEBSOCKET INITIALIZATION
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _init_ws(self) -> None:
+        """Initialisiert den CopyTrade WebSocket und subscribed bekannte Tokens."""
+        def on_activity(token_id: str) -> None:
+            """Callback: WS meldet Aktivitaet -> Wake Poll-Loop."""
+            if self._ws:
+                wallets = self._ws.get_wallets_for_token(token_id)
+                if wallets:
+                    self._ws_triggered_wallets.update(wallets)
+                    self._trade_event.set()
+
+        self._ws = CopyTradeWebSocket(on_market_activity=on_activity)
+
+        # Subscriptions aus initialisierten Wallet-Daten aufbauen
+        subscribed = 0
+        for wallet in self.tracked_wallets:
+            addr = wallet["address"]
+            if addr.lower() in self._paused_wallets:
+                continue
+            try:
+                trades = await self._fetch_activity(addr, limit=self._api_limit)
+                for t in (trades or []):
+                    token_id = t.get("asset", "")
+                    if token_id:
+                        self._ws.subscribe_market(token_id, addr)
+                        subscribed += 1
+            except Exception:
+                pass
+
+        await self._ws.start()
+        logger.info(f"CopyTradeWS: {subscribed} Token-Wallet Paare initial subscribed")
+
+    # ═══════════════════════════════════════════════════════════════
+    # POLL LOOP (Hybrid: WebSocket + Regular Polling)
     # ═══════════════════════════════════════════════════════════════
 
     async def _poll_loop(self) -> None:
-        """Hauptloop: Pollt alle Wallets auf neue Trades."""
-        logger.info("Copy Trading Poll-Loop gestartet")
-        while self._running:
-            for wallet in list(self.tracked_wallets):  # list() copy: safe against mutation
-                if not self._running:
-                    break
-                if wallet["address"].lower() in self._paused_wallets:
-                    continue  # Paused wallet — skip
-                try:
-                    await self._check_wallet(wallet)
-                except Exception as e:
-                    logger.error(f"Copy Poll Error ({wallet['name']}): {e}")
+        """Hybrid Poll-Loop: Event-driven (WebSocket) + regulaerer Poll (1.5s).
 
-            await asyncio.sleep(self.poll_interval_s)
+        Fast-Path: WS meldet Preisaenderung -> sofort targeted Poll der betroffenen Wallets
+        Regular-Path: Alle 1.5s voller Poll aller Wallets (Fallback + neue Markets)
+        Graceful Degradation: Ohne WS -> reiner 1.5s-Poll (wait_for timeout)
+        """
+        logger.info(f"Copy Trading Poll-Loop gestartet (Hybrid: WS + {self.poll_interval_s}s Poll)")
+        while self._running:
+            try:
+                # -- FAST PATH: WS-getriggerte Wallets sofort pruefen --
+                triggered = set()
+                if self._ws_triggered_wallets:
+                    triggered = self._ws_triggered_wallets.copy()
+                    self._ws_triggered_wallets.clear()
+
+                if triggered:
+                    for wallet in list(self.tracked_wallets):
+                        if wallet["address"].lower() in triggered:
+                            if wallet["address"].lower() not in self._paused_wallets:
+                                try:
+                                    await self._check_wallet(wallet)
+                                except Exception as e:
+                                    logger.error(f"Copy WS-Poll Error ({wallet['name']}): {e}")
+
+                # -- REGULAR PATH: Alle Wallets pruefen --
+                for wallet in list(self.tracked_wallets):
+                    if not self._running:
+                        break
+                    if wallet["address"].lower() in self._paused_wallets:
+                        continue
+                    try:
+                        await self._check_wallet(wallet)
+                    except Exception as e:
+                        logger.error(f"Copy Poll Error ({wallet['name']}): {e}")
+
+                # -- WAIT: Event oder Timeout (Graceful Degradation) --
+                try:
+                    await asyncio.wait_for(self._trade_event.wait(), timeout=self.poll_interval_s)
+                except asyncio.TimeoutError:
+                    pass  # Kein WS-Event -> normaler 1.5s Zyklus
+                self._trade_event.clear()
+
+            except Exception as e:
+                logger.error(f"Copy Poll-Loop Error: {e}")
+                await asyncio.sleep(1.0)
+
+    async def _ws_monitor_loop(self) -> None:
+        """Ueberwacht WebSocket-Gesundheit und pruned stale Subscriptions."""
+        while self._running:
+            try:
+                await asyncio.sleep(60)  # Alle 60 Sekunden
+                if not self._ws:
+                    continue
+
+                # Health-Check loggen
+                ws_status = self._ws.status()
+                logger.info(
+                    f"CopyTradeWS Health: connected={ws_status['connected']} | "
+                    f"tokens={ws_status['subscribed_tokens']} | "
+                    f"events={ws_status['events_fired']}/{ws_status['events_received']} | "
+                    f"reconnects={ws_status['reconnect_count']}"
+                )
+
+                # Stale Subscriptions prunen (>24h ohne Event)
+                self._ws.prune_stale(max_age_s=86400)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.debug(f"WS Monitor Error: {e}")
 
     async def _check_wallet(self, wallet: dict) -> None:
         """Prüft eine Wallet auf neue Trades — mit allen Safety Guards.
@@ -1400,6 +1524,10 @@ class CopyTradingStrategy(StrategyBase):
         )
         self._copied_positions.append(pos)
 
+        # WebSocket: Neuen Token subscriben fuer Echtzeit-Tracking
+        if self._ws and trade.asset_id:
+            self._ws.subscribe_market(trade.asset_id, trade.wallet_address)
+
         # Recent Copies für Dashboard
         self._recent_copies.appendleft({
             "ts": time.strftime("%H:%M:%S"),
@@ -1644,6 +1772,7 @@ class CopyTradingStrategy(StrategyBase):
             },
             "risk": self.risk.get_status(),
             "guards": self.guards.get_status(),
+            "ws": self._ws.status() if self._ws else {"connected": False},
         }
 
 
