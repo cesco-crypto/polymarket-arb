@@ -647,14 +647,7 @@ class CopyTradingStrategy(StrategyBase):
             logger.error(f"REBUILD: Journal read error: {e}")
             return
 
-        # 2. Offene Trades = Opens OHNE Close
-        open_trades = {tid: data for tid, data in opens.items() if tid not in closed_ids}
-
-        if not open_trades:
-            logger.info("REBUILD: Keine offenen Copy-Trades im Journal gefunden")
-            return
-
-        # 3. Wallet-Positionen als Sanity-Check
+        # 2. Wallet-Positionen als Sanity-Check (BEFORE open_trades filter)
         wallet_cids: set[str] = set()
         if self._session and not self._session.closed:
             try:
@@ -668,6 +661,20 @@ class CopyTradingStrategy(StrategyBase):
                                 wallet_cids.add(p.get("conditionId", ""))
             except Exception:
                 pass  # Sanity-Check optional
+
+        # 3. Offene Trades = Opens OHNE Close
+        #    ABER: Wenn Journal sagt "closed" aber Wallet sagt "still exists" → Blockchain wins
+        open_trades = {}
+        for tid, data in opens.items():
+            if tid not in closed_ids:
+                open_trades[tid] = data
+            elif wallet_cids and data.get("condition_id", "") in wallet_cids:
+                # Journal says closed, but blockchain says still open → trust blockchain
+                open_trades[tid] = data
+                logger.info(f"REBUILD OVERRIDE: {tid} marked closed in journal but still in wallet — restoring")
+
+        if not open_trades:
+            logger.info("REBUILD: Keine offenen Copy-Trades im Journal gefunden")
 
         # 4. Rebuild CopiedPosition Objekte
         rebuilt = 0
