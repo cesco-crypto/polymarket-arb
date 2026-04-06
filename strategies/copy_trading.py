@@ -674,8 +674,13 @@ class CopyTradingStrategy(StrategyBase):
         for tid, data in open_trades.items():
             cid = data.get("condition_id", "")
 
+            # Sanity: Skip positions without condition_id (legacy, can't verify)
+            if not cid:
+                logger.debug(f"REBUILD SKIP: {tid} — no condition_id (legacy trade)")
+                continue
+
             # Sanity: Wenn wir Wallet-Daten haben, prüfe ob Position noch existiert
-            if wallet_cids and cid and cid not in wallet_cids:
+            if wallet_cids and cid not in wallet_cids:
                 logger.debug(f"REBUILD SKIP: {tid} — nicht mehr in Wallet (redeemed/resolved)")
                 continue
 
