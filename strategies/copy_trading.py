@@ -186,7 +186,7 @@ class SmartGuards:
 
     def __init__(self) -> None:
         # Slippage
-        self.max_slippage_pct: float = 5.0  # Max 5% Preisverschiebung seit Original
+        self.max_slippage_pct: float = 12.0  # Max 12% Preisverschiebung (3s-Polling braucht Spielraum)
 
         # Bait Detection
         self._recent_copies_ts: dict[str, float] = {}  # condition_id → timestamp of our copy
@@ -204,6 +204,9 @@ class SmartGuards:
         """Prüft ob sich der Preis seit dem Original-Trade zu stark verschlechtert hat."""
         if original_price <= 0 or current_ask <= 0:
             return True, "no price data"
+        # Hard-Cap: Markt entschieden (>0.95) → immer blocken, kein Profit möglich
+        if current_ask > 0.95:
+            return False, f"Market resolved (ask {current_ask:.3f} > 0.95)"
         # Nur GEGEN uns (Preis gestiegen = schlechter für BUY) blocken
         # Preis gefallen = besser für uns → NICHT blocken
         drift_pct = (current_ask - original_price) / original_price * 100
@@ -218,8 +221,8 @@ class SmartGuards:
         if usdc_size >= 50:
             return True, f"Liquidity OK (orig: ${usdc_size:.0f})"
         # Kleine Trades in potentiell illiquiden Markets → vorsichtig
-        if usdc_size < 5:
-            return False, f"Tiny trade ${usdc_size:.1f} — likely illiquid"
+        if usdc_size < 1:
+            return False, f"Tiny trade ${usdc_size:.2f} — below $1 minimum"
         return True, f"Liquidity acceptable (${usdc_size:.0f})"
 
     def check_market_correlation(self, condition_id: str) -> tuple[bool, str]:
@@ -460,8 +463,8 @@ class CopyTradingStrategy(StrategyBase):
         self.max_concurrent = 10           # Max 10 Markets (bei $5/Trade = $50-$100 max exposure)
         self.min_seconds_to_copy = 5       # Trade muss < 5 Min alt sein
         self.only_buys = False             # BUY + SELL kopieren (SELL = Exit-Signal)
-        self.min_copy_price = 0.25         # Nicht unter 25¢ (>75% Verlustchance)
-        self.max_copy_price = 0.85         # Nicht über 85¢ (schlechtes Risk/Reward)
+        self.min_copy_price = 0.15         # Value Bets ab 15¢ (3:1+ R/R)
+        self.max_copy_price = 0.90         # High-Confidence bis 90¢ (11% Return)
 
         # Tracked Wallets
         self.tracked_wallets = list(DEFAULT_TRACKED_WALLETS)
@@ -868,7 +871,7 @@ class CopyTradingStrategy(StrategyBase):
         addr = wallet["address"]
         name = wallet["name"]
 
-        trades = await self._fetch_activity(addr, limit=5)
+        trades = await self._fetch_activity(addr, limit=20)
         if not trades:
             return
 
