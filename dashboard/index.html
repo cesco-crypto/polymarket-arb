@@ -90,6 +90,7 @@
     </div>
   </div>
   <div id="pnl-chart" style="height:180px;width:100%"></div>
+  <div id="perf-metrics" style="padding:6px 0 0 0"></div>
 </div>
 <style>
   .tf-btn{padding:4px 12px;border-radius:4px;font-size:10px;font-weight:600;cursor:pointer;border:1px solid var(--border);color:var(--text-dim);background:transparent;font-family:var(--font);transition:all .15s}
@@ -1189,6 +1190,22 @@ function switchTab(btn, tab) {
       }
       const ctEl = document.getElementById('chart-trades');
       if (ctEl) ctEl.textContent = (d.count || 0) + ' resolved trades';
+
+      // Performance-Metriken rendern
+      const m = d.metrics || {};
+      const metricsEl = document.getElementById('perf-metrics');
+      if (metricsEl && m.sharpe_ratio !== undefined) {
+        const pf = m.profit_factor || 0;
+        metricsEl.innerHTML = `
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;font-size:10px">
+            <div><span class="d">Sharpe</span><br><b style="color:${m.sharpe_ratio>=0?'var(--green)':'var(--red)'}">${m.sharpe_ratio}</b></div>
+            <div><span class="d">Max DD</span><br><b style="color:var(--red)">$${m.max_drawdown}</b></div>
+            <div><span class="d">Profit Factor</span><br><b style="color:${pf>=1?'var(--green)':'var(--red)'}">${pf.toFixed(2)}</b></div>
+            <div><span class="d">Avg Win</span><br><b style="color:var(--green)">$${m.avg_win.toFixed(2)}</b></div>
+            <div><span class="d">Avg Loss</span><br><b style="color:var(--red)">$${m.avg_loss.toFixed(2)}</b></div>
+            <div><span class="d">Best / Worst</span><br><b style="color:var(--green)">+$${m.best_trade}</b> / <b style="color:var(--red)">$${m.worst_trade}</b></div>
+          </div>`;
+      }
       renderChart();
     } catch(e) { console.error('Chart data error:', e); }
   }

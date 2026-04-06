@@ -507,14 +507,52 @@ async def api_wallet() -> dict:
             pnl = strategy.paper_trader.daily_pnl_usd()
         except Exception:
             pass
+    # Orders + Volume aus Journal berechnen (autoritativ statt Executor-RAM)
+    orders_placed = 0
+    total_volume = 0.0
+    journal_path = Path("data/trade_journal.jsonl")
+    try:
+        if journal_path.exists():
+            with open(journal_path) as f:
+                for line in f:
+                    if '"live_order_success": true' not in line:
+                        continue
+                    try:
+                        e = json.loads(line)
+                        if e.get("event") == "open" and e.get("live_order_success"):
+                            orders_placed += 1
+                            total_volume += e.get("size_usd", 0)
+                    except Exception:
+                        continue
+    except Exception:
+        pass
+
+    # Offene Positionen Wert (fuer Portfolio-Total)
+    positions_value = 0.0
+    try:
+        import urllib.request
+        wallet_addr = stats.get("wallet", "")
+        if wallet_addr:
+            url = f"https://data-api.polymarket.com/positions?user={wallet_addr}&limit=50"
+            req = urllib.request.Request(url, headers={"User-Agent": "polymarket-arb/2.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                positions = json.loads(resp.read())
+            positions_value = sum(float(p.get("currentValue", 0)) for p in positions if float(p.get("currentValue", 0)) > 0.01)
+    except Exception:
+        pass
+
+    portfolio_total = round(balance + positions_value, 2)
+
     return {
         "live": True,
         "balance": round(balance, 2),
+        "positions_value": round(positions_value, 2),
+        "portfolio_total": portfolio_total,
         "wallet": stats.get("wallet", ""),
         "chain": "Polygon",
         "token": "USDC.e",
-        "orders_placed": stats.get("orders_placed", 0),
-        "total_volume": stats.get("total_volume_usd", 0),
+        "orders_placed": orders_placed,
+        "total_volume": round(total_volume, 2),
         "donation_10pct": round(max(0, pnl * 0.10), 2),
     }
 
@@ -591,6 +629,8 @@ def _read_journal_stats() -> dict:
 
     # Strategie-Zuordnung via Prefix + order_type
     def get_strategy(tid: str, order_type: str) -> str:
+        if tid.startswith("REDEEM-CLEANUP"):
+            return "cleanup"  # Ignoriert in Stats
         if tid.startswith("CT-"):
             return "copy_trade"
         if tid.startswith("ODA"):
@@ -1830,8 +1870,10 @@ async def api_journal_chart_data() -> dict:
                 else:
                     strat = ot or "Other"
 
-                # Paper-Trades nicht im echten PnL-Chart
+                # Paper-Trades und Cleanup-Redemptions nicht im PnL-Chart
                 if strat == "Paper":
+                    continue
+                if tid.startswith("REDEEM-CLEANUP"):
                     continue
 
                 resolved_events.append({
@@ -1863,10 +1905,65 @@ async def api_journal_chart_data() -> dict:
             "event": ev["event"],
         })
 
+    # Performance-Metriken berechnen
+    import math as _math
+    wins = [ev["pnl"] for ev in resolved_events if ev["pnl"] > 0]
+    losses = [ev["pnl"] for ev in resolved_events if ev["pnl"] < 0]
+    all_pnls = [ev["pnl"] for ev in resolved_events]
+
+    avg_win = sum(wins) / len(wins) if wins else 0
+    avg_loss = sum(losses) / len(losses) if losses else 0
+    profit_factor = abs(sum(wins) / sum(losses)) if losses and sum(losses) != 0 else 0
+    best_trade = max(all_pnls) if all_pnls else 0
+    worst_trade = min(all_pnls) if all_pnls else 0
+
+    # Max Drawdown
+    peak = 0
+    max_dd = 0
+    running = 0
+    for ev in resolved_events:
+        running += ev["pnl"]
+        peak = max(peak, running)
+        dd = peak - running
+        max_dd = max(max_dd, dd)
+
+    # Sharpe Ratio (annualized, assume ~100 trades/day for ODA)
+    sharpe = 0
+    if len(all_pnls) >= 5:
+        mean_pnl = sum(all_pnls) / len(all_pnls)
+        std_pnl = _math.sqrt(sum((p - mean_pnl) ** 2 for p in all_pnls) / len(all_pnls))
+        if std_pnl > 0:
+            sharpe = round(mean_pnl / std_pnl * _math.sqrt(365), 2)
+
+    # Per-strategy cumulative (fuer Multi-Line Chart)
+    strat_cumulative: dict[str, float] = {}
+    per_strategy_points: dict[str, list] = {}
+    for ev in resolved_events:
+        s = ev["strategy"]
+        strat_cumulative[s] = strat_cumulative.get(s, 0) + ev["pnl"]
+        if s not in per_strategy_points:
+            per_strategy_points[s] = []
+        per_strategy_points[s].append({
+            "time": int(ev["ts"]),
+            "value": round(strat_cumulative[s], 2),
+        })
+
     return {
         "points": points,
         "total_pnl": round(cumulative, 2),
         "count": len(points),
+        "per_strategy": per_strategy_points,
+        "metrics": {
+            "sharpe_ratio": sharpe,
+            "max_drawdown": round(max_dd, 2),
+            "profit_factor": round(profit_factor, 2),
+            "avg_win": round(avg_win, 3),
+            "avg_loss": round(avg_loss, 3),
+            "best_trade": round(best_trade, 2),
+            "worst_trade": round(worst_trade, 2),
+            "total_wins": len(wins),
+            "total_losses": len(losses),
+        },
     }
 
 

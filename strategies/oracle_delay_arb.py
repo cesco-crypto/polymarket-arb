@@ -20,9 +20,11 @@ RISIKEN:
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import aiohttp
@@ -131,10 +133,38 @@ class OracleDelayArbStrategy(StrategyBase):
     # LIFECYCLE
     # ═══════════════════════════════════════════════════════════════
 
+    def _load_trade_counter(self) -> None:
+        """Laedt den hoechsten ODA Trade-Counter aus dem Journal (verhindert ID-Kollisionen)."""
+        journal_path = Path("data/trade_journal.jsonl")
+        max_num = 0
+        try:
+            if journal_path.exists():
+                with open(journal_path) as f:
+                    for line in f:
+                        if "ODA-" not in line:
+                            continue
+                        try:
+                            e = json.loads(line)
+                            tid = e.get("trade_id", "")
+                            if tid.startswith("ODA-"):
+                                num = int(tid.split("-")[1])
+                                max_num = max(max_num, num)
+                        except (json.JSONDecodeError, ValueError, IndexError):
+                            continue
+        except Exception as e:
+            logger.warning(f"ODA Counter Load Error: {e}")
+        self._trade_count = max_num
+        if max_num > 0:
+            logger.info(f"ODA: Trade-Counter bei {max_num} fortgesetzt (aus Journal)")
+
     async def run(self) -> None:
         self._running = True
         telegram.configure(self.settings)
-        logger.info("Oracle Delay Arb startet — Sharky6999 Style!")
+
+        # Trade-Counter aus Journal laden (verhindert ID-Kollisionen nach Restart)
+        self._load_trade_counter()
+
+        logger.info(f"Oracle Delay Arb startet — Sharky6999 Style! (Counter: {self._trade_count})")
 
         if self.settings.live_trading:
             live_ok = await self.executor.initialize()

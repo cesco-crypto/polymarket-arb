@@ -216,11 +216,9 @@ class AutoRedeemer:
         """
         JOURNAL_PATH = Path("data/trade_journal.jsonl")
 
-        # 1. Finde den Original-Trade im Journal via condition_id
-        matched_trade_id = "REDEEM-UNKNOWN"
-        matched_order_type = "unknown"
-        matched_source = ""
-        matched_entry_price = 0.0
+        # 1. Sammle ALLE open-Events und bereits geschlossene trade_ids
+        open_entries = []     # Alle offenen Trades
+        closed_tids = set()   # Trade-IDs die bereits ein close/redeemed Event haben
 
         try:
             if JOURNAL_PATH.exists():
@@ -228,43 +226,62 @@ class AutoRedeemer:
                     for line in f:
                         if not line.strip():
                             continue
-                        entry = json.loads(line)
-                        if entry.get("event") != "open":
-                            continue
-                        if entry.get("condition_id") == condition_id:
-                            matched_trade_id = entry.get("trade_id", "REDEEM-UNKNOWN")
-                            matched_order_type = entry.get("order_type", "unknown")
-                            matched_source = entry.get("source_wallet_name", "")
-                            matched_entry_price = entry.get("executed_price", 0.0)
-                            break
-        except Exception as e:
-            logger.debug(f"Journal match error: {e}")
-
-        # 2. Wenn kein CID-Match, versuche Fuzzy-Match über Titel
-        if matched_trade_id == "REDEEM-UNKNOWN" and title:
-            try:
-                if JOURNAL_PATH.exists():
-                    with open(JOURNAL_PATH) as f:
-                        for line in f:
-                            if not line.strip():
-                                continue
+                        try:
                             entry = json.loads(line)
-                            if entry.get("event") != "open":
-                                continue
-                            q = entry.get("market_question", "")
-                            if title[:20].lower() in q.lower() and q:
-                                matched_trade_id = entry.get("trade_id", "REDEEM-UNKNOWN")
-                                matched_order_type = entry.get("order_type", "unknown")
-                                matched_source = entry.get("source_wallet_name", "")
-                                matched_entry_price = entry.get("executed_price", 0.0)
-                                break
-            except Exception:
-                pass
+                        except json.JSONDecodeError:
+                            continue
+                        ev = entry.get("event", "")
+                        if ev == "open":
+                            open_entries.append(entry)
+                        elif ev in ("redeemed", "resolved_loss", "close"):
+                            closed_tids.add(entry.get("trade_id", ""))
+        except Exception as e:
+            logger.debug(f"Journal read error: {e}")
 
-        # 3. Berechne PnL
+        # 2. Finde den BESTEN Match: condition_id + live + noch nicht geschlossen
+        matched_trade_id = "REDEEM-UNKNOWN"
+        matched_order_type = "unknown"
+        matched_source = ""
+        matched_entry_price = 0.0
+
+        # Prioritaet: live_order_success=True UND noch nicht geschlossen
+        for entry in reversed(open_entries):  # Neueste zuerst
+            if entry.get("condition_id") != condition_id:
+                continue
+            tid = entry.get("trade_id", "")
+            if tid in closed_tids:
+                continue  # Bereits geschlossen — nicht nochmal matchen
+            if not entry.get("live_order_success"):
+                continue  # Nur echte Live-Trades matchen
+            matched_trade_id = tid
+            matched_order_type = entry.get("order_type", "unknown")
+            matched_source = entry.get("source_wallet_name", "")
+            matched_entry_price = entry.get("executed_price", 0.0)
+            break
+
+        # Fallback: Auch nicht-live Trades (Paper) matchen wenn noetig
+        if matched_trade_id == "REDEEM-UNKNOWN":
+            for entry in reversed(open_entries):
+                if entry.get("condition_id") != condition_id:
+                    continue
+                tid = entry.get("trade_id", "")
+                if tid in closed_tids:
+                    continue
+                matched_trade_id = tid
+                matched_order_type = entry.get("order_type", "unknown")
+                matched_source = entry.get("source_wallet_name", "")
+                matched_entry_price = entry.get("executed_price", 0.0)
+                break
+
+        # 3. $0-Payout ohne Match = Verlierer-Token Cleanup (kein falscher Verlust)
+        if payout_usd <= 0.001 and matched_trade_id == "REDEEM-UNKNOWN":
+            matched_trade_id = "REDEEM-CLEANUP"
+            logger.debug(f"Redeemer: $0 payout cleanup for {title[:30]} (no matching trade)")
+
+        # 4. Berechne PnL
         pnl_usd = payout_usd - initial_value if initial_value > 0 else payout_usd
 
-        # 4. Schreibe Close-Event ins JSONL
+        # 5. Schreibe Close-Event ins JSONL
         close_event = {
             "trade_id": matched_trade_id,
             "event": "redeemed",
@@ -278,7 +295,7 @@ class AutoRedeemer:
             "size_usd": initial_value,
             "pnl_usd": round(pnl_usd, 4),
             "pnl_pct": round(pnl_usd / max(0.01, initial_value) * 100, 2),
-            "outcome_correct": True,  # Redeemed = gewonnen
+            "outcome_correct": payout_usd > 0.001,  # True nur bei echtem Payout
             "payout_usd": round(payout_usd, 4),
             "redeem_tx_hash": tx_hash_hex,
         }
