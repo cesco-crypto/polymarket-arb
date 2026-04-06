@@ -166,12 +166,6 @@ class OracleDelayArbStrategy(StrategyBase):
 
         logger.info(f"Oracle Delay Arb startet — Sharky6999 Style! (Counter: {self._trade_count})")
 
-        # EMERGENCY STOP: Token-ID Zuordnung ist invertiert (kauft Verlierer statt Gewinner)
-        # Deaktiviert bis Bug gefixt ist
-        logger.error("ODA DEAKTIVIERT: Token-ID Bug — kauft Verlierer statt Gewinner. Fix pending.")
-        self._running = False
-        return
-
         if self.settings.live_trading:
             live_ok = await self.executor.initialize()
             if live_ok:
@@ -277,34 +271,61 @@ class OracleDelayArbStrategy(StrategyBase):
 
                     up_tid, down_tid, condition_id = token_ids
 
-                    # 2. Bestimme den Winner: Welcher Ask ist >= 0.95?
-                    up_ask = await self._fetch_ask(up_tid) if up_tid else 0
-                    down_ask = await self._fetch_ask(down_tid) if down_tid else 0
+                    # 2. Bestimme den Winner via GAMMA-PREISE (nicht CLOB!)
+                    # CLOB zeigt beide Seiten bei ~0.99 kurz nach Close (Bug).
+                    # Gamma-Preise zeigen den echten Marktpreis: Winner ~0.90+, Loser ~0.10-.
+                    gamma_up = 0.0
+                    gamma_down = 0.0
+                    try:
+                        from dashboard.web_ui import active_strategies
+                        for sn, st in active_strategies.items():
+                            if not hasattr(st, "discovery"):
+                                continue
+                            for s, wnd in st.discovery.windows.items():
+                                if wnd.condition_id == condition_id:
+                                    gamma_up = wnd.gamma_up_price or wnd.up_best_ask
+                                    gamma_down = wnd.gamma_down_price or wnd.down_best_ask
+                                    break
+                            if gamma_up > 0:
+                                break
+                    except Exception:
+                        pass
+
+                    # Fallback: Fetch vom CLOB (nur wenn Gamma nicht verfuegbar)
+                    if gamma_up <= 0 and gamma_down <= 0:
+                        gamma_up = await self._fetch_ask(up_tid) if up_tid else 0
+                        gamma_down = await self._fetch_ask(down_tid) if down_tid else 0
 
                     winner = None
                     winner_ask = 0
                     winner_tid = ""
 
-                    if up_ask >= self.min_entry_price:
+                    # Winner = die Seite mit dem HOEHEREN Gamma-Preis
+                    if gamma_up > gamma_down and gamma_up >= self.min_entry_price:
                         winner = "UP"
-                        winner_ask = up_ask
                         winner_tid = up_tid
-                    elif down_ask >= self.min_entry_price:
+                    elif gamma_down > gamma_up and gamma_down >= self.min_entry_price:
                         winner = "DOWN"
-                        winner_ask = down_ask
                         winner_tid = down_tid
                     else:
                         logger.info(
-                            f"ODA Skip: {asset} {slug[-15:]} — asks too low "
-                            f"(up={up_ask:.3f}, dn={down_ask:.3f}) < {self.min_entry_price}"
+                            f"ODA Skip: {asset} {slug[-15:]} — can't determine winner "
+                            f"(gamma_up={gamma_up:.3f}, gamma_dn={gamma_down:.3f})"
                         )
-                        self._sniped_windows.add(slug)  # Don't retry
-                        continue
-
-                    if winner_ask > self.max_entry_price:
-                        logger.info(f"ODA Skip: {asset} {winner} ask={winner_ask:.3f} > {self.max_entry_price}")
                         self._sniped_windows.add(slug)
                         continue
+
+                    # Hole den echten CLOB-Ask fuer den Winner-Token (fuer Order-Preis)
+                    winner_ask = await self._fetch_ask(winner_tid) if winner_tid else 0
+                    if winner_ask <= 0 or winner_ask > self.max_entry_price:
+                        logger.info(f"ODA Skip: {asset} {winner} CLOB ask={winner_ask:.3f} (range {self.min_entry_price}-{self.max_entry_price})")
+                        self._sniped_windows.add(slug)
+                        continue
+
+                    logger.info(
+                        f"ODA Winner: {asset} {winner} — gamma={gamma_up:.3f}/{gamma_down:.3f}, "
+                        f"CLOB ask={winner_ask:.3f}"
+                    )
 
                     # 3. SNIPE! Kaufe den Winner
                     self._sniped_windows.add(slug)
