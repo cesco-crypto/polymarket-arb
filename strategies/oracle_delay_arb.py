@@ -232,9 +232,11 @@ class OracleDelayArbStrategy(StrategyBase):
 
                     asset = w["asset"]
 
-                    # Hole Market-Daten von der Momentum-Discovery
+                    # Hole Token-IDs von laufender Discovery
                     token_ids = await self._get_token_ids(slug, asset)
                     if not token_ids:
+                        logger.info(f"ODA: No token IDs for {asset} {slug[-15:]} — skipping")
+                        self._sniped_windows.add(slug)  # Don't retry
                         continue
 
                     up_tid, down_tid, condition_id = token_ids
@@ -256,7 +258,7 @@ class OracleDelayArbStrategy(StrategyBase):
                         winner_ask = down_ask
                         winner_tid = down_tid
                     else:
-                        logger.debug(
+                        logger.info(
                             f"ODA Skip: {asset} {slug[-15:]} — asks too low "
                             f"(up={up_ask:.3f}, dn={down_ask:.3f}) < {self.min_entry_price}"
                         )
@@ -264,7 +266,7 @@ class OracleDelayArbStrategy(StrategyBase):
                         continue
 
                     if winner_ask > self.max_entry_price:
-                        logger.debug(f"ODA Skip: {asset} {winner} ask={winner_ask:.3f} > {self.max_entry_price}")
+                        logger.info(f"ODA Skip: {asset} {winner} ask={winner_ask:.3f} > {self.max_entry_price}")
                         self._sniped_windows.add(slug)
                         continue
 
@@ -290,74 +292,87 @@ class OracleDelayArbStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     async def _get_token_ids(self, slug: str, asset: str) -> tuple | None:
-        """Holt Token-IDs — zuerst Discovery, dann DIREKT vom Polymarket CLOB."""
-        # 1. Versuche von der laufenden Discovery
+        """Holt Token-IDs von jeder laufenden Strategie mit MarketDiscovery.
+
+        Prueft hmsf_decision_engine, momentum_latency_v2, und alle anderen
+        Strategien die ein .discovery Attribut haben. Fallback: Gamma API.
+        """
+        start_ts = int(slug.split("-")[-1])
+
+        # 1. Versuche von JEDER laufenden Strategie mit Discovery
         try:
             from dashboard.web_ui import active_strategies
-            momentum = active_strategies.get("momentum_latency_v2")
-            if momentum and hasattr(momentum, "discovery"):
-                for s, w in momentum.discovery.windows.items():
+            for strat_name, strat in active_strategies.items():
+                if not hasattr(strat, "discovery"):
+                    continue
+                discovery = strat.discovery
+                if not hasattr(discovery, "windows"):
+                    continue
+                for s, w in discovery.windows.items():
                     if w.asset.upper() == asset and w.up_token_id and w.down_token_id:
-                        start_ts = int(slug.split("-")[-1])
                         if abs(w.window_start_ts - start_ts) < 30:
+                            logger.debug(f"ODA Token-IDs via {strat_name}: {asset} {slug[-15:]}")
                             return (w.up_token_id, w.down_token_id, w.condition_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"ODA Discovery lookup error: {e}")
 
-        # 2. Fallback: Direkt von Polymarket CLOB Markets API
+        # 2. Fallback: Gamma API (korrekte Quelle fuer Crypto Markets)
         if not self._session or self._session.closed:
+            logger.warning(f"ODA: No session for fallback — {slug}")
             return None
         try:
-            # Suche den Market über die CLOB API
-            url = f"https://clob.polymarket.com/markets?next_cursor=LTE%3D"
+            asset_lower = asset.lower()
+            asset_name = "bitcoin" if asset_lower == "btc" else "ethereum"
+            url = f"https://gamma-api.polymarket.com/markets?closed=false&limit=50"
             async with self._session.get(url) as resp:
                 if resp.status != 200:
+                    logger.warning(f"ODA Gamma API error: status {resp.status}")
                     return None
                 markets = await resp.json()
 
-            asset_lower = asset.lower()
-            start_ts = int(slug.split("-")[-1])
-            end_ts = start_ts + 300
-
-            for m in markets if isinstance(markets, list) else markets.get("data", []):
+            for m in markets if isinstance(markets, list) else []:
                 q = m.get("question", "").lower()
-                cid = m.get("condition_id", "")
-                tokens = m.get("tokens", [])
-
-                if asset_lower not in q or "up or down" not in q:
-                    continue
-                if len(tokens) < 2:
+                if asset_name not in q or "up or down" not in q:
                     continue
 
-                # Match by end date/time in question
+                cid = m.get("conditionId", "")
+                tokens = m.get("clobTokenIds", [])
+                outcomes = m.get("outcomes", [])
+
+                if len(tokens) < 2 or len(outcomes) < 2:
+                    continue
+
                 up_tid = ""
                 down_tid = ""
-                for tok in tokens:
-                    outcome = tok.get("outcome", "").lower()
-                    if outcome in ("up", "yes"):
-                        up_tid = tok.get("token_id", "")
-                    elif outcome in ("down", "no"):
-                        down_tid = tok.get("token_id", "")
+                for i, outcome in enumerate(outcomes):
+                    ol = outcome.lower() if isinstance(outcome, str) else ""
+                    if ol in ("up", "yes") and i < len(tokens):
+                        up_tid = tokens[i]
+                    elif ol in ("down", "no") and i < len(tokens):
+                        down_tid = tokens[i]
 
                 if up_tid and down_tid:
-                    logger.info(f"ODA Token-IDs via CLOB: {asset} up={up_tid[:16]}... dn={down_tid[:16]}...")
+                    logger.info(f"ODA Token-IDs via Gamma API: {asset} up={up_tid[:16]}... dn={down_tid[:16]}...")
                     return (up_tid, down_tid, cid)
+
+            logger.info(f"ODA: No matching market in Gamma API for {asset} {slug[-15:]}")
         except Exception as e:
-            logger.debug(f"ODA CLOB token fetch error: {e}")
+            logger.warning(f"ODA Gamma API token fetch error: {e}")
 
         return None
 
     async def _fetch_active_windows(self) -> list[dict]:
-        """Holt aktive 5-Min Windows von der bestehenden Discovery API."""
-        # Nutze die bestehende Strategy (momentum) um Windows zu bekommen
-        # Die MarketDiscovery ist schon im Momentum-Strategy aktiv
-        # Wir holen die Daten via den internen Status
+        """Holt aktive 5-Min Windows von jeder Strategie mit MarketDiscovery."""
         try:
             from dashboard.web_ui import active_strategies
-            momentum = active_strategies.get("momentum_latency_v2")
-            if momentum and hasattr(momentum, "discovery"):
+            for strat_name, strat in active_strategies.items():
+                if not hasattr(strat, "discovery"):
+                    continue
+                discovery = strat.discovery
+                if not hasattr(discovery, "windows") or not discovery.windows:
+                    continue
                 windows = []
-                for slug, w in momentum.discovery.windows.items():
+                for slug, w in discovery.windows.items():
                     windows.append({
                         "slug": slug,
                         "asset": w.asset,
@@ -369,7 +384,8 @@ class OracleDelayArbStrategy(StrategyBase):
                         "up_best_ask": w.up_best_ask,
                         "down_best_ask": w.down_best_ask,
                     })
-                return windows
+                if windows:
+                    return windows
         except Exception:
             pass
 
