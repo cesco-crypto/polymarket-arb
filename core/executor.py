@@ -252,12 +252,13 @@ class PolymarketExecutor:
                 else:
                     order_price = price
 
-                # FIX: Ensure maker_amount (price × size) has max 2 decimals
-                # and taker_amount (size) has max 4 decimals.
-                # Round price to 2 decimals, size DOWN to 2 decimals (safe side).
+                # FIX: Polymarket CLOB requires:
+                # - maker_amount (price * size): max 2 decimals
+                # - taker_amount (size in shares): max 4 decimals
+                # Floor size to integer to guarantee maker_amount = price * N has <= 2 decimals.
                 import math
                 safe_price = round(order_price, 2)
-                safe_size = math.floor(size_shares * 100) / 100  # Floor to 2 decimals
+                safe_size = math.floor(size_shares)  # Integer shares — guarantees clean maker_amount
                 if safe_size < self.MIN_SHARES:
                     return ExecutionResult(success=False, error=f"Size too small after rounding: {safe_size}")
 
