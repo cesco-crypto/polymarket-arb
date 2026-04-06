@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Safeguard | Copy Trading Guards</title>
+<style>
+:root{--bg:#0a0c10;--card:#13151c;--card2:#181b24;--border:#1e2230;--border-hi:#2a3040;--text:#e1e4eb;--dim:#6b7080;--mid:#9298a8;--accent:#3b82f6;--green:#22c55e;--green-dim:#0a2f1a;--red:#ef4444;--red-dim:#2d0f0f;--yellow:#eab308;--orange:#f97316;--purple:#a855f7;--font:'SF Mono','JetBrains Mono','Cascadia Code','Fira Code',monospace}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:12px;min-height:100vh}
+.nav{display:flex;gap:16px;padding:10px 20px;background:var(--card);border-bottom:1px solid var(--border);align-items:center}
+.nav a{color:var(--dim);text-decoration:none;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px;border-radius:4px}
+.nav a:hover{color:var(--text)}
+.nav a.on{color:var(--orange);background:#f9731610}
+.nav .brand{color:var(--orange);font-weight:700;font-size:13px;margin-right:auto}
+.main{max-width:1100px;margin:0 auto;padding:20px}
+h1{font-size:22px;font-weight:700;color:var(--text);margin-bottom:4px}
+.subtitle{color:var(--dim);font-size:11px;margin-bottom:24px}
+.section{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.section-title{color:var(--dim);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px}
+.btn{padding:6px 14px;border:1px solid var(--border);background:transparent;color:var(--text);border-radius:4px;cursor:pointer;font-family:var(--font);font-size:11px;font-weight:600}
+.btn:hover{background:var(--card2)}
+.btn-green{border-color:var(--green);color:var(--green)}
+.btn-green:hover{background:var(--green-dim)}
+.btn-red{border-color:var(--red);color:var(--red)}
+.btn-red:hover{background:var(--red-dim)}
+.btn-sm{padding:4px 10px;font-size:10px}
+.toast{display:none;position:fixed;top:16px;right:16px;padding:10px 18px;border-radius:6px;font-size:11px;font-weight:600;z-index:999;box-shadow:0 4px 12px #0005}
+.toast-ok{background:var(--green-dim);color:var(--green);border:1px solid var(--green)}
+.toast-err{background:var(--red-dim);color:var(--red);border:1px solid var(--red)}
+
+/* Flow Diagram */
+.flow{display:flex;flex-wrap:wrap;gap:4px;align-items:center;justify-content:center;margin-bottom:8px}
+.flow-box{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;text-align:center;min-width:100px;position:relative;transition:border-color .2s}
+.flow-box:hover{border-color:var(--accent)}
+.flow-box .fb-name{font-size:9px;color:var(--dim);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.flow-box .fb-val{font-size:13px;font-weight:700;color:var(--text)}
+.flow-box .fb-desc{font-size:8px;color:var(--mid);margin-top:2px}
+.flow-box.pass{border-color:var(--green)}
+.flow-box.fail{border-color:var(--red)}
+.flow-arrow{color:var(--dim);font-size:16px;font-weight:700}
+.flow-result{background:var(--green-dim);border:1px solid var(--green);border-radius:6px;padding:8px 16px;color:var(--green);font-weight:700;font-size:12px}
+
+/* Config Grid */
+.cfg-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:700px){.cfg-grid{grid-template-columns:1fr}}
+.cfg-group{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:14px}
+.cfg-group-title{font-size:10px;color:var(--accent);font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;display:flex;align-items:center;gap:6px}
+.cfg-group-title .icon{font-size:14px}
+.cfg-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border)}
+.cfg-row:last-child{border-bottom:none}
+.cfg-label{font-size:11px;color:var(--text);flex:1}
+.cfg-hint{font-size:8px;color:var(--dim);display:block;margin-top:1px}
+.cfg-input{width:90px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:5px 8px;border-radius:4px;font-family:var(--font);font-size:12px;text-align:right}
+.cfg-input:focus{outline:none;border-color:var(--accent)}
+.cfg-unit{font-size:9px;color:var(--dim);margin-left:4px;width:24px}
+
+/* Actions */
+.actions{display:flex;gap:10px;margin-top:16px;justify-content:flex-end}
+
+/* Change Log */
+.log-box{background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:10px;max-height:200px;overflow-y:auto;font-size:10px;color:var(--mid);white-space:pre;line-height:1.6}
+.log-box:empty::before{content:'No changes recorded yet';color:var(--dim)}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <span class="brand">COPY TRADING</span>
+  <span style="font-size:10px;padding:2px 8px;border-radius:3px;background:var(--green-dim);color:var(--green);font-weight:700" id="mode-badge">LIVE</span>
+  <a href="/">Dashboard</a>
+  <a href="/strategy">Strategies</a>
+  <a href="/copytrading">Copy Trading</a>
+  <a href="/safeguard" class="on">Safeguard</a>
+  <a href="/wallet">Wallet</a>
+  <a href="/auth/logout" style="color:var(--red)">Logout</a>
+</nav>
+
+<div class="main">
+  <h1>Copy Trading Safeguards</h1>
+  <p class="subtitle">Guard Chain Visualisierung &amp; Parameter-Kontrolle. Jede Aenderung wird protokolliert.</p>
+
+  <!-- Flow Diagram -->
+  <div class="section">
+    <div class="section-hdr">
+      <span class="section-title">Guard Chain Flow</span>
+      <span style="font-size:9px;color:var(--dim)" id="flow-status">Loading...</span>
+    </div>
+    <div class="flow" id="flow">
+      <div class="flow-box"><div class="fb-name">Poll API</div><div class="fb-val" id="fv-api">20</div><div class="fb-desc">trades/request</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Dedup</div><div class="fb-val">tx_hash</div><div class="fb-desc">seen keys</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Price</div><div class="fb-val" id="fv-price">0.15-0.90</div><div class="fb-desc">range filter</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Age</div><div class="fb-val" id="fv-age">5 min</div><div class="fb-desc">max trade age</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Markets</div><div class="fb-val" id="fv-concurrent">10</div><div class="fb-desc">max concurrent</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Balance</div><div class="fb-val">1.5x</div><div class="fb-desc">min reserve</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Kill-Switch</div><div class="fb-val" id="fv-kill">-$15/d</div><div class="fb-desc">loss limit</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Bait</div><div class="fb-val">3 dumps</div><div class="fb-desc">auto-blacklist</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Slippage</div><div class="fb-val" id="fv-slip">12%</div><div class="fb-desc">max drift</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Liquidity</div><div class="fb-val">&gt;$1</div><div class="fb-desc">min trade size</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-box"><div class="fb-name">Correlation</div><div class="fb-val" id="fv-corr">2</div><div class="fb-desc">per market</div></div>
+      <span class="flow-arrow">&rarr;</span>
+      <div class="flow-result">COPY TRADE</div>
+    </div>
+  </div>
+
+  <!-- Editable Parameters -->
+  <div class="section">
+    <div class="section-hdr">
+      <span class="section-title">Parameters</span>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm" style="border-color:var(--yellow);color:var(--yellow)" onclick="resetDefaults()">RESET DEFAULTS</button>
+        <button class="btn btn-green btn-sm" onclick="saveConfig()">SAVE</button>
+      </div>
+    </div>
+    <div class="cfg-grid">
+      <!-- Guard Chain -->
+      <div class="cfg-group">
+        <div class="cfg-group-title"><span class="icon">&#9899;</span> Guard Chain</div>
+        <div class="cfg-row">
+          <div class="cfg-label">Min Copy Price<span class="cfg-hint">Floor for trade price (Value Bets)</span></div>
+          <input class="cfg-input" id="cfg-min-price" type="number" step="0.01" min="0.01" max="0.50">
+          <span class="cfg-unit">$</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Max Copy Price<span class="cfg-hint">Ceiling for trade price (High Confidence)</span></div>
+          <input class="cfg-input" id="cfg-max-price" type="number" step="0.01" min="0.50" max="0.99">
+          <span class="cfg-unit">$</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Max Slippage<span class="cfg-hint">Max price drift since original trade</span></div>
+          <input class="cfg-input" id="cfg-slippage" type="number" step="0.5" min="1" max="50">
+          <span class="cfg-unit">%</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Max Concurrent Markets<span class="cfg-hint">Max open markets at once</span></div>
+          <input class="cfg-input" id="cfg-concurrent" type="number" step="1" min="1" max="30">
+          <span class="cfg-unit"></span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Max Trade Age<span class="cfg-hint">Max minutes since original trade</span></div>
+          <input class="cfg-input" id="cfg-age" type="number" step="1" min="1" max="30">
+          <span class="cfg-unit">min</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">API Limit<span class="cfg-hint">Trades fetched per wallet poll</span></div>
+          <input class="cfg-input" id="cfg-api-limit" type="number" step="5" min="5" max="100">
+          <span class="cfg-unit"></span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Max Correlation<span class="cfg-hint">Max copies per condition_id</span></div>
+          <input class="cfg-input" id="cfg-correlation" type="number" step="1" min="1" max="10">
+          <span class="cfg-unit"></span>
+        </div>
+      </div>
+      <!-- Sizing & Timing -->
+      <div class="cfg-group">
+        <div class="cfg-group-title"><span class="icon">&#9899;</span> Sizing &amp; Risk</div>
+        <div class="cfg-row">
+          <div class="cfg-label">Copy Size<span class="cfg-hint">USD per copy trade</span></div>
+          <input class="cfg-input" id="cfg-size" type="number" step="0.5" min="1" max="50">
+          <span class="cfg-unit">$</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Poll Interval<span class="cfg-hint">Seconds between wallet checks</span></div>
+          <input class="cfg-input" id="cfg-poll" type="number" step="0.5" min="1" max="30">
+          <span class="cfg-unit">s</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Daily Loss Limit<span class="cfg-hint">Halt trading at this daily loss</span></div>
+          <input class="cfg-input" id="cfg-daily-loss" type="number" step="1" min="-100" max="0">
+          <span class="cfg-unit">$</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Total Loss Limit<span class="cfg-hint">Permanent halt at this total loss</span></div>
+          <input class="cfg-input" id="cfg-total-loss" type="number" step="1" min="-500" max="0">
+          <span class="cfg-unit">$</span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Max Daily Trades<span class="cfg-hint">Trade count limit per day</span></div>
+          <input class="cfg-input" id="cfg-daily-trades" type="number" step="5" min="5" max="200">
+          <span class="cfg-unit"></span>
+        </div>
+        <div class="cfg-row">
+          <div class="cfg-label">Max Consecutive Losses<span class="cfg-hint">Pause after N losses in a row</span></div>
+          <input class="cfg-input" id="cfg-consec-losses" type="number" step="1" min="2" max="20">
+          <span class="cfg-unit"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Change Log -->
+  <div class="section">
+    <div class="section-hdr">
+      <span class="section-title">Change Log (Audit Trail)</span>
+      <button class="btn btn-sm" onclick="loadLog()">REFRESH</button>
+    </div>
+    <div class="log-box" id="change-log"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const id = s => document.getElementById(s);
+
+function toast(msg, ok) {
+  const t = id('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + (ok ? 'toast-ok' : 'toast-err');
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}
+
+const DEFAULTS = {
+  min_copy_price: 0.15, max_copy_price: 0.90, max_slippage_pct: 12.0,
+  max_concurrent: 10, min_seconds_to_copy: 5, poll_interval_s: 3.0,
+  max_copy_size_usd: 5.0, api_limit: 20, max_market_exposure: 2,
+  max_daily_loss_usd: -15, max_total_loss_usd: -30,
+  max_daily_trades: 30, max_consecutive_losses: 5
+};
+
+function fillInputs(c) {
+  id('cfg-min-price').value = c.min_copy_price ?? DEFAULTS.min_copy_price;
+  id('cfg-max-price').value = c.max_copy_price ?? DEFAULTS.max_copy_price;
+  id('cfg-slippage').value = c.max_slippage_pct ?? DEFAULTS.max_slippage_pct;
+  id('cfg-concurrent').value = c.max_concurrent ?? DEFAULTS.max_concurrent;
+  id('cfg-age').value = c.min_seconds_to_copy ?? DEFAULTS.min_seconds_to_copy;
+  id('cfg-poll').value = c.poll_interval_s ?? DEFAULTS.poll_interval_s;
+  id('cfg-size').value = c.max_copy_size_usd ?? DEFAULTS.max_copy_size_usd;
+  id('cfg-api-limit').value = c.api_limit ?? DEFAULTS.api_limit;
+  id('cfg-correlation').value = c.max_market_exposure ?? DEFAULTS.max_market_exposure;
+  id('cfg-daily-loss').value = c.max_daily_loss_usd ?? DEFAULTS.max_daily_loss_usd;
+  id('cfg-total-loss').value = c.max_total_loss_usd ?? DEFAULTS.max_total_loss_usd;
+  id('cfg-daily-trades').value = c.max_daily_trades ?? DEFAULTS.max_daily_trades;
+  id('cfg-consec-losses').value = c.max_consecutive_losses ?? DEFAULTS.max_consecutive_losses;
+  // Update flow diagram values
+  id('fv-api').textContent = c.api_limit ?? 20;
+  id('fv-price').textContent = `${(c.min_copy_price??0.15).toFixed(2)}-${(c.max_copy_price??0.90).toFixed(2)}`;
+  id('fv-age').textContent = (c.min_seconds_to_copy ?? 5) + ' min';
+  id('fv-concurrent').textContent = c.max_concurrent ?? 10;
+  id('fv-kill').textContent = '-$' + Math.abs(c.max_daily_loss_usd ?? 15) + '/d';
+  id('fv-slip').textContent = (c.max_slippage_pct ?? 12) + '%';
+  id('fv-corr').textContent = c.max_market_exposure ?? 2;
+}
+
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/safeguard/status');
+    const d = await r.json();
+    if (d.error) { toast(d.error, false); return; }
+    fillInputs(d.config || {});
+    id('flow-status').textContent = d.running ? 'Strategy ACTIVE' : 'Strategy STOPPED';
+    id('flow-status').style.color = d.running ? 'var(--green)' : 'var(--red)';
+    id('mode-badge').textContent = d.live_trading ? 'LIVE' : 'PAPER';
+  } catch(e) { toast('Failed to load status', false); }
+}
+
+async function saveConfig() {
+  const body = {
+    min_copy_price: parseFloat(id('cfg-min-price').value),
+    max_copy_price: parseFloat(id('cfg-max-price').value),
+    max_slippage_pct: parseFloat(id('cfg-slippage').value),
+    max_concurrent: parseInt(id('cfg-concurrent').value),
+    min_seconds_to_copy: parseInt(id('cfg-age').value),
+    poll_interval_s: parseFloat(id('cfg-poll').value),
+    max_copy_size_usd: parseFloat(id('cfg-size').value),
+    api_limit: parseInt(id('cfg-api-limit').value),
+    max_market_exposure: parseInt(id('cfg-correlation').value),
+    max_daily_loss_usd: parseFloat(id('cfg-daily-loss').value),
+    max_total_loss_usd: parseFloat(id('cfg-total-loss').value),
+    max_daily_trades: parseInt(id('cfg-daily-trades').value),
+    max_consecutive_losses: parseInt(id('cfg-consec-losses').value),
+  };
+  try {
+    const r = await fetch('/api/safeguard/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    });
+    const d = await r.json();
+    if (d.status === 'updated') {
+      toast('Safeguard config saved! ' + (d.changes || 0) + ' parameter(s) changed.', true);
+      loadStatus();
+      loadLog();
+    } else {
+      toast(d.error || 'Save failed', false);
+    }
+  } catch(e) { toast('Save failed: ' + e, false); }
+}
+
+function resetDefaults() {
+  if (!confirm('Reset all parameters to defaults?')) return;
+  fillInputs(DEFAULTS);
+  toast('Defaults loaded. Click SAVE to apply.', true);
+}
+
+async function loadLog() {
+  try {
+    const r = await fetch('/api/safeguard/log');
+    const d = await r.json();
+    id('change-log').textContent = d.log || '';
+  } catch(e) {}
+}
+
+loadStatus();
+loadLog();
+setInterval(loadStatus, 30000);
+</script>
+</body>
+</html>

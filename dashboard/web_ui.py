@@ -1603,6 +1603,120 @@ async def api_copy_resume_wallet(body: dict) -> dict:
     return {"error": "wallet not found or not paused"}
 
 
+# ═══════════════════════════════════════════════════════════════════
+# SAFEGUARD PAGE — /safeguard
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/safeguard", response_class=HTMLResponse)
+async def safeguard_page() -> HTMLResponse:
+    html_path = Path(__file__).parent / "safeguard.html"
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/safeguard/status")
+async def api_safeguard_status() -> dict:
+    """Alle Guard-Parameter + Risk-Status für das Safeguard Panel."""
+    strat = active_strategies.get("copy_trading")
+    if not strat:
+        return {"error": "copy trading not running"}
+
+    return {
+        "running": strat._running,
+        "live_trading": strat.settings.live_trading if hasattr(strat, "settings") else False,
+        "config": {
+            "min_copy_price": strat.min_copy_price,
+            "max_copy_price": strat.max_copy_price,
+            "max_slippage_pct": strat.guards.max_slippage_pct,
+            "max_concurrent": strat.max_concurrent,
+            "min_seconds_to_copy": strat.min_seconds_to_copy,
+            "poll_interval_s": strat.poll_interval_s,
+            "max_copy_size_usd": strat.max_copy_size_usd,
+            "api_limit": getattr(strat, "_api_limit", 20),
+            "max_market_exposure": strat.guards.max_market_exposure,
+            "max_daily_loss_usd": strat.risk.max_daily_loss_usd,
+            "max_total_loss_usd": strat.risk.max_total_loss_usd,
+            "max_daily_trades": strat.risk.max_daily_trades,
+            "max_consecutive_losses": strat.risk.max_consecutive_losses,
+        },
+    }
+
+
+_SAFEGUARD_DEFAULTS = {
+    "min_copy_price": 0.15, "max_copy_price": 0.90, "max_slippage_pct": 12.0,
+    "max_concurrent": 10, "min_seconds_to_copy": 5, "poll_interval_s": 3.0,
+    "max_copy_size_usd": 5.0, "api_limit": 20, "max_market_exposure": 2,
+    "max_daily_loss_usd": -15.0, "max_total_loss_usd": -30.0,
+    "max_daily_trades": 30, "max_consecutive_losses": 5,
+}
+
+
+@app.post("/api/safeguard/config")
+async def api_safeguard_config(body: dict) -> dict:
+    """Aktualisiert Guard-Parameter mit Audit-Logging."""
+    import os as _os
+    from datetime import datetime as _dt
+
+    strat = active_strategies.get("copy_trading")
+    if not strat:
+        return {"error": "copy trading not running"}
+
+    # Mapping: param_name → (getter, setter, min, max, type)
+    param_map = {
+        "min_copy_price": (lambda: strat.min_copy_price, lambda v: setattr(strat, "min_copy_price", v), 0.01, 0.50, float),
+        "max_copy_price": (lambda: strat.max_copy_price, lambda v: setattr(strat, "max_copy_price", v), 0.50, 0.99, float),
+        "max_slippage_pct": (lambda: strat.guards.max_slippage_pct, lambda v: setattr(strat.guards, "max_slippage_pct", v), 1.0, 50.0, float),
+        "max_concurrent": (lambda: strat.max_concurrent, lambda v: setattr(strat, "max_concurrent", v), 1, 30, int),
+        "min_seconds_to_copy": (lambda: strat.min_seconds_to_copy, lambda v: setattr(strat, "min_seconds_to_copy", v), 1, 30, int),
+        "poll_interval_s": (lambda: strat.poll_interval_s, lambda v: setattr(strat, "poll_interval_s", v), 1.0, 30.0, float),
+        "max_copy_size_usd": (lambda: strat.max_copy_size_usd, lambda v: setattr(strat, "max_copy_size_usd", v), 1.0, 100.0, float),
+        "api_limit": (lambda: getattr(strat, "_api_limit", 20), lambda v: setattr(strat, "_api_limit", v), 5, 100, int),
+        "max_market_exposure": (lambda: strat.guards.max_market_exposure, lambda v: setattr(strat.guards, "max_market_exposure", v), 1, 10, int),
+        "max_daily_loss_usd": (lambda: strat.risk.max_daily_loss_usd, lambda v: setattr(strat.risk, "max_daily_loss_usd", v), -500.0, 0.0, float),
+        "max_total_loss_usd": (lambda: strat.risk.max_total_loss_usd, lambda v: setattr(strat.risk, "max_total_loss_usd", v), -1000.0, 0.0, float),
+        "max_daily_trades": (lambda: strat.risk.max_daily_trades, lambda v: setattr(strat.risk, "max_daily_trades", v), 5, 200, int),
+        "max_consecutive_losses": (lambda: strat.risk.max_consecutive_losses, lambda v: setattr(strat.risk, "max_consecutive_losses", v), 2, 20, int),
+    }
+
+    changes = []
+    for param, (getter, setter, lo, hi, typ) in param_map.items():
+        if param not in body:
+            continue
+        old_val = getter()
+        new_val = typ(max(lo, min(hi, typ(body[param]))))
+        if old_val != new_val:
+            setter(new_val)
+            changes.append((param, old_val, new_val))
+            logger.info(f"SAFEGUARD CONFIG CHANGED: {param}: {old_val} -> {new_val}")
+
+    # Audit log to file
+    if changes:
+        log_path = Path("data/safeguard_changes.log")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_lines = [f"{ts} | USER_CHANGED | {p}: {old} -> {new}" for p, old, new in changes]
+        tmp = log_path.with_suffix(".tmp")
+        # Append (not overwrite)
+        existing = log_path.read_text() if log_path.exists() else ""
+        with open(tmp, "w") as f:
+            f.write(existing)
+            f.write("\n".join(log_lines) + "\n")
+        _os.replace(str(tmp), str(log_path))
+
+    return {"status": "updated", "changes": len(changes)}
+
+
+@app.get("/api/safeguard/log")
+async def api_safeguard_log() -> dict:
+    """Liest das Safeguard Audit Log."""
+    log_path = Path("data/safeguard_changes.log")
+    if log_path.exists():
+        content = log_path.read_text()
+        # Return last 50 lines
+        lines = content.strip().split("\n")
+        return {"log": "\n".join(lines[-50:])}
+    return {"log": ""}
+
+
 @app.get("/api/collect/status")
 async def api_collect_status() -> dict:
     """Auto-Collect Status: Redeem + Merge + Stuck Positionen."""

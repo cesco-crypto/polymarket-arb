@@ -465,6 +465,7 @@ class CopyTradingStrategy(StrategyBase):
         self.only_buys = False             # BUY + SELL kopieren (SELL = Exit-Signal)
         self.min_copy_price = 0.15         # Value Bets ab 15¢ (3:1+ R/R)
         self.max_copy_price = 0.90         # High-Confidence bis 90¢ (11% Return)
+        self._api_limit = 20              # Activity API trades per request
 
         # Tracked Wallets
         self.tracked_wallets = list(DEFAULT_TRACKED_WALLETS)
@@ -801,7 +802,7 @@ class CopyTradingStrategy(StrategyBase):
         for wallet in self.tracked_wallets:
             addr = wallet["address"]
             try:
-                trades = await self._fetch_activity(addr, limit=20)
+                trades = await self._fetch_activity(addr, limit=self._api_limit)
                 if trades:
                     for t in trades:
                         ts = t.get("timestamp", 0)
@@ -871,7 +872,7 @@ class CopyTradingStrategy(StrategyBase):
         addr = wallet["address"]
         name = wallet["name"]
 
-        trades = await self._fetch_activity(addr, limit=20)
+        trades = await self._fetch_activity(addr, limit=self._api_limit)
         if not trades:
             return
 
