@@ -114,8 +114,8 @@ class OracleDelayArbStrategy(StrategyBase):
         self.trade_size_usd = 5.0          # $5 pro Trade (Daten sammeln, später skalieren)
         self.min_entry_price = 0.90        # Kaufen wenn Preis >= 0.90 (mehr Profit, etwas mehr Risiko)
         self.max_entry_price = 0.99        # Max 0.99 (CLOB Limit)
-        self.delay_after_close_s = 15.0    # 15 Sekunden nach Close warten (Gamma braucht ~10-20s)
-        self.max_delay_s = 60.0            # Max 60s nach Close
+        self.delay_after_close_s = 60.0    # 60s nach Close warten (Gamma API braucht ~60-90s)
+        self.max_delay_s = 120.0           # Max 120s nach Close
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
 
         # State
@@ -165,11 +165,6 @@ class OracleDelayArbStrategy(StrategyBase):
         self._load_trade_counter()
 
         logger.info(f"Oracle Delay Arb startet — Sharky6999 Style! (Counter: {self._trade_count})")
-
-        # EMERGENCY STOP v2: Token-ID Mapping invertiert — down_tid zeigt auf UP token
-        logger.error("ODA DEAKTIVIERT v2: Token-ID Mapping in MarketDiscovery invertiert. Muss gefixt werden.")
-        self._running = False
-        return
 
         if self.settings.live_trading:
             live_ok = await self.executor.initialize()
@@ -276,66 +271,41 @@ class OracleDelayArbStrategy(StrategyBase):
 
                     up_tid, down_tid, condition_id = token_ids
 
-                    # 2. Bestimme den Winner via BINANCE PREIS-VERGLEICH
-                    # Direkt und deterministisch: Preis bei Window-Start vs Preis jetzt
-                    # BTC stieg → UP gewinnt. BTC fiel → DOWN gewinnt.
+                    # 2. Bestimme den Winner via LIVE GAMMA API FETCH
+                    # Einzige zuverlaessige Methode: Gamma outcomePrices nach ~60s
+                    # Winner zeigt >0.70, Loser <0.30. Alles andere = unklar.
                     winner = None
                     winner_tid = ""
+                    gamma_up = 0.0
+                    gamma_down = 0.0
+
                     try:
-                        from dashboard.web_ui import active_strategies
-                        oracle = None
-                        for sn, st in active_strategies.items():
-                            if hasattr(st, "oracle"):
-                                oracle = st.oracle
-                                break
-                        if oracle:
-                            symbol = f"{asset}/USDT"
-                            latest = oracle.get_latest(symbol)
-                            mom = oracle.get_momentum(symbol, 300)
-                            if latest and mom is not None:
-                                current_price = latest.mid
-                                start_price = current_price / (1 + mom / 100)
-
-                                if current_price and start_price:
-                                    if current_price > start_price:
-                                        winner = "UP"
-                                        winner_tid = up_tid
-                                    else:
-                                        winner = "DOWN"
-                                        winner_tid = down_tid
-                                    logger.info(
-                                        f"ODA Binance: {asset} start={start_price:.2f} → now={current_price:.2f} "
-                                        f"→ {winner} (mom={mom:+.3f}%)"
-                                    )
+                        if self._session and not self._session.closed:
+                            url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+                            async with self._session.get(url) as resp:
+                                if resp.status == 200:
+                                    gdata = await resp.json()
+                                    if gdata:
+                                        gm = gdata[0].get("markets", [{}])[0]
+                                        gprices = gm.get("outcomePrices", "[]")
+                                        if isinstance(gprices, str):
+                                            gprices = json.loads(gprices)
+                                        if len(gprices) >= 2:
+                                            gamma_up = float(gprices[0])
+                                            gamma_down = float(gprices[1])
                     except Exception as e:
-                        logger.warning(f"ODA Binance lookup error: {e}")
+                        logger.debug(f"ODA Gamma fetch error: {e}")
 
-                    # Fallback: Gamma-Preise aus Discovery (weniger zuverlaessig)
-                    if not winner:
-                        try:
-                            from dashboard.web_ui import active_strategies
-                            for sn, st in active_strategies.items():
-                                if not hasattr(st, "discovery"):
-                                    continue
-                                for s, wnd in st.discovery.windows.items():
-                                    if wnd.condition_id == condition_id:
-                                        gup = wnd.up_best_ask or wnd.gamma_up_price
-                                        gdn = wnd.down_best_ask or wnd.gamma_down_price
-                                        if gup > 0.7 and gdn < 0.3:
-                                            winner = "UP"
-                                            winner_tid = up_tid
-                                        elif gdn > 0.7 and gup < 0.3:
-                                            winner = "DOWN"
-                                            winner_tid = down_tid
-                                        break
-                                if winner:
-                                    break
-                        except Exception:
-                            pass
-
-                    if not winner:
+                    if gamma_up > 0.70 and gamma_down < 0.30:
+                        winner = "UP"
+                        winner_tid = up_tid
+                    elif gamma_down > 0.70 and gamma_up < 0.30:
+                        winner = "DOWN"
+                        winner_tid = down_tid
+                    else:
                         logger.info(
-                            f"ODA Wait: {asset} {slug[-15:]} — winner unclear (age={seconds_since_close:.0f}s)"
+                            f"ODA Wait: {asset} {slug[-15:]} — gamma not clear yet "
+                            f"(up={gamma_up:.3f}, dn={gamma_down:.3f}, age={seconds_since_close:.0f}s)"
                         )
                         continue
 
@@ -349,6 +319,11 @@ class OracleDelayArbStrategy(StrategyBase):
                     if winner_ask < self.min_entry_price:
                         logger.info(f"ODA Wait: {asset} {winner} ask={winner_ask:.3f} < {self.min_entry_price}")
                         continue
+
+                    logger.info(
+                        f"ODA Winner: {asset} {winner} — gamma={gamma_up:.3f}/{gamma_down:.3f}, "
+                        f"CLOB ask={winner_ask:.3f}, age={seconds_since_close:.0f}s"
+                    )
 
                     # 3. SNIPE! Kaufe den Winner
                     self._sniped_windows.add(slug)
