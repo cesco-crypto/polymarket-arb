@@ -320,6 +320,127 @@ class PolymarketExecutor:
 
             return ExecutionResult(success=False, error=error_msg)
 
+    # ═══════════════════════════════════════════════════════════════
+    # ASYNC ORDER EXECUTION — Bypass py-clob-client sync requests
+    # ═══════════════════════════════════════════════════════════════
+
+    _aiohttp_session: "aiohttp.ClientSession | None" = None
+
+    @classmethod
+    async def _get_async_session(cls):
+        """Persistente aiohttp Session — TCP Keep-Alive, kein TLS pro Order."""
+        import aiohttp
+        if cls._aiohttp_session is None or cls._aiohttp_session.closed:
+            connector = aiohttp.TCPConnector(
+                keepalive_timeout=300,
+                limit=20,
+                enable_cleanup_closed=True,
+            )
+            cls._aiohttp_session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=aiohttp.ClientTimeout(total=5, connect=2),
+            )
+        return cls._aiohttp_session
+
+    async def place_order_async(
+        self,
+        token_id: str,
+        side: str,
+        price: float,
+        size_usd: float,
+        asset: str = "",
+        direction: str = "",
+    ) -> "ExecutionResult":
+        """Asynchrone Order-Execution via aiohttp — kein sync requests, kein Sleep.
+
+        Baut die Order mit py-clob-client (Signing), sendet sie aber
+        ueber die persistente aiohttp Session statt sync requests.post().
+        """
+        if not self.is_live:
+            return ExecutionResult(success=False, error="Executor nicht initialisiert")
+
+        import math
+        import json as _json
+        from py_clob_client.clob_types import OrderArgs, OrderType
+        from py_clob_client.order_builder.constants import BUY, SELL
+
+        order_side = SELL if side.upper() == "SELL" else BUY
+        size_shares = size_usd / price if price > 0 else 0
+        safe_price = round(price, 2)
+        safe_size = math.floor(size_shares)
+
+        if safe_size < self.MIN_SHARES:
+            return ExecutionResult(success=False, error=f"Size too small: {safe_size}")
+
+        t0 = time.perf_counter()
+
+        try:
+            # 1. Pre-Signed Order nutzen oder neu signieren
+            pre_signed_data = self._pre_signed_orders.pop(token_id, None)
+            if pre_signed_data:
+                signed_price = pre_signed_data["signed_price"]
+                price_drift = abs(signed_price - price) / price if price > 0 else 1.0
+                if price_drift <= self.MAX_PRE_SIGN_PRICE_DRIFT:
+                    order = pre_signed_data["order"]
+                else:
+                    pre_signed_data = None
+
+            if not pre_signed_data:
+                order_args = OrderArgs(
+                    token_id=token_id, price=safe_price, size=safe_size, side=order_side,
+                )
+                order = self._client.create_order(order_args)
+
+            # 2. Build HTTP Request (gleiche Logik wie py-clob-client)
+            from py_clob_client.order_builder.helpers import order_to_json
+            from py_clob_client.headers.headers import create_level_2_headers
+            from py_clob_client.signer import Signer
+            from py_clob_client.clob_types import RequestArgs
+
+            body = order_to_json(order, self._creds.api_key, OrderType.FAK, False)
+            serialized = _json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+            request_args = RequestArgs(
+                method="POST",
+                request_path="/order",
+                body=body,
+                serialized_body=serialized,
+            )
+            headers = create_level_2_headers(self._client.signer, self._creds, request_args)
+            headers["Content-Type"] = "application/json"
+
+            # 3. ASYNC POST via persistente aiohttp Session
+            session = await self._get_async_session()
+            async with session.post(
+                "https://clob.polymarket.com/order",
+                headers=headers,
+                data=serialized,
+            ) as resp:
+                resp_data = await resp.json()
+
+            latency_ms = (time.perf_counter() - t0) * 1000
+            self._last_exec_latency_ms = latency_ms
+
+            if resp.status == 200:
+                order_id = resp_data.get("orderID", resp_data.get("id", "unknown"))
+                self._orders_placed += 1
+                self._total_volume_usd += size_usd
+                logger.info(
+                    f"ASYNC ORDER: {asset} {direction} @ {price:.3f} | "
+                    f"${size_usd:.2f} | {latency_ms:.0f}ms | {order_id}"
+                )
+                return ExecutionResult(
+                    success=True, order_id=str(order_id),
+                    filled_price=price, filled_size=size_usd,
+                    latency_ms=round(latency_ms, 1),
+                )
+            else:
+                error = str(resp_data.get("error", resp_data))[:200]
+                return ExecutionResult(success=False, error=error, latency_ms=round(latency_ms, 1))
+
+        except Exception as e:
+            latency_ms = (time.perf_counter() - t0) * 1000
+            return ExecutionResult(success=False, error=str(e)[:200], latency_ms=round(latency_ms, 1))
+
     # Polygon RPCs mit Fallback (getestet 02.04.2026)
     POLYGON_RPCS = [
         "https://polygon.gateway.tenderly.co",     # Funktioniert ✅

@@ -804,13 +804,15 @@ class OracleDelayArbStrategy(StrategyBase):
         net_ev_pct = (1.0 / ask_price - 1.0) * 100 - fee_pct
         filled = False
 
-        # LIVE Order
+        # LIVE Order — FIRE AND FORGET (kein Sleep, kein Fill-Check)
+        # FAK Order wird sofort gefuellt oder gekillt. Kein Warten noetig.
+        # PnL-Verifikation passiert spaeter durch AutoRedeemer (on-chain).
         if self.executor.is_live and token_id:
             try:
-                res = await self.executor.place_order(
+                res = await self.executor.place_order_async(
                     token_id=token_id,
                     side="BUY",
-                    price=min(0.99, ask_price),  # Max 0.99 (CLOB Limit!)
+                    price=min(0.99, ask_price),
                     size_usd=self.trade_size_usd,
                     asset=asset,
                     direction=winner,
@@ -818,25 +820,10 @@ class OracleDelayArbStrategy(StrategyBase):
                 if res.success:
                     trade.live_order_id = res.order_id
                     trade.live_success = True
-                    logger.info(f"SNIPE ORDER PLACED: {trade_id} — {res.order_id}")
-
-                    # FILL VERIFICATION: Check if order actually filled
-                    await asyncio.sleep(2)  # Give CLOB time to match
-                    fill_status = await self._check_fill(res.order_id)
-                    if fill_status == "FILLED":
-                        filled = True
-                        trade.pnl_usd = expected_pnl
-                        logger.info(f"SNIPE FILLED: {trade_id} — expected +${expected_pnl:.3f} (PENDING REDEEM)")
-                        # KEIN record_close hier! PnL wird erst vom AutoRedeemer
-                        # nach der 2h UMA Challenge Period on-chain bestaetigt.
-                    elif fill_status == "UNFILLED":
-                        logger.warning(f"SNIPE NOT FILLED: {trade_id} — cancelling")
-                        await self._cancel_order(res.order_id)
-                        trade.live_success = False
-                    else:
-                        logger.info(f"SNIPE STATUS: {trade_id} — {fill_status}")
+                    filled = True
+                    logger.info(f"SNIPE FIRED: {trade_id} — {res.order_id} (FAK fire-and-forget)")
                 else:
-                    logger.error(f"SNIPE LIVE FAILED: {trade_id} — {res.error}")
+                    logger.error(f"SNIPE FAILED: {trade_id} — {res.error}")
             except Exception as e:
                 logger.error(f"SNIPE EXCEPTION: {trade_id} — {e}")
 
