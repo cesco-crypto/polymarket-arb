@@ -347,9 +347,16 @@ class OracleDelayArbStrategy(StrategyBase):
                         continue
                     up_tid, down_tid, condition_id = token_ids
 
-                    # CLOB WS subscriben fuer lokales Orderbuch
+                    # CLOB WS subscriben + Re-Subscribe triggern
                     if self._clob_ws:
                         self._clob_ws.subscribe([up_tid, down_tid])
+                        # Verifiziere: Haben wir Orderbuch-Daten fuer beide Tokens?
+                        up_book = self._clob_ws.get_book(up_tid)
+                        dn_book = self._clob_ws.get_book(down_tid)
+                        has_up = up_book and up_book.best_ask > 0
+                        has_dn = dn_book and dn_book.best_ask > 0
+                        if not has_up or not has_dn:
+                            logger.debug(f"ODA: Orderbuch leer fuer {w['asset']} — WS re-subscribe triggered")
 
                     # Snapshot: Binance-Preis JETZT speichern (= Window-Start Referenz)
                     symbol = f"{w['asset']}/USDT"
@@ -478,15 +485,16 @@ class OracleDelayArbStrategy(StrategyBase):
             filled = False
             for shot in range(5):
                 try:
-                    # Fire-and-Forget: nicht auf Ergebnis warten zwischen Shots
-                    # Lese aktuellen Ask aus RAM (kann sich zwischen Shots aendern)
+                    # Lese Ask aus 3-Tier Fallback (RAM → Discovery → REST)
                     shot_ask = 0.0
+
+                    # Tier 1: CLOB WS RAM Orderbuch (O(1), <1µs)
                     if self._clob_ws:
                         book = self._clob_ws.get_book(winner_tid)
-                        if book:
+                        if book and book.best_ask > 0:
                             shot_ask = book.best_ask
 
-                    # Fallback Discovery
+                    # Tier 2: Discovery Cache
                     if shot_ask <= 0:
                         try:
                             from dashboard.web_ui import active_strategies
@@ -502,9 +510,13 @@ class OracleDelayArbStrategy(StrategyBase):
                         except Exception:
                             pass
 
+                    # Tier 3: REST Fetch (langsam aber zuverlaessig, nur Shot#0)
+                    if shot_ask <= 0 and shot == 0:
+                        shot_ask = await self._fetch_ask(winner_tid)
+
                     if shot_ask <= 0 or shot_ask > self.max_entry_price:
                         if shot == 0:
-                            logger.info(f"ODA Shot#{shot}: ask=${shot_ask:.3f} > max — skipping burst")
+                            logger.info(f"ODA Shot#{shot}: {asset} ask=${shot_ask:.3f} — no fill available")
                         break
 
                     if shot_ask < self.min_entry_price:

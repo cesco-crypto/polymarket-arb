@@ -76,6 +76,8 @@ class CLOBWebSocket:
         self._reconnect_count = 0
         self._events_processed = 0
         self._last_event_ts = 0.0
+        self._resub_needed = False
+        self._ws_ref = None  # Referenz fuer Re-Subscribe
 
     # ── Public API ────────────────────────────────
 
@@ -89,12 +91,15 @@ class CLOBWebSocket:
         return book.best_ask if book and book.is_fresh else 0.0
 
     def subscribe(self, token_ids: list[str]) -> None:
-        """Fuegt Token-IDs zur Subscription hinzu (aktiv beim naechsten Reconnect)."""
+        """Fuegt Token-IDs zur Subscription hinzu und triggert Re-Subscribe."""
+        new_added = False
         for tid in token_ids:
-            if tid:
+            if tid and tid not in self._token_ids:
                 self._token_ids.add(tid)
-                if tid not in self._books:
-                    self._books[tid] = OrderbookSnapshot()
+                self._books[tid] = OrderbookSnapshot()
+                new_added = True
+        if new_added:
+            self._resub_needed = True
 
     async def start(self) -> None:
         if self._running:
@@ -155,6 +160,8 @@ class CLOBWebSocket:
                         "type": "market",
                     })
                     await ws.send(sub_msg if isinstance(sub_msg, str) else sub_msg.decode())
+                    self._ws_ref = ws
+                    self._resub_needed = False
                     logger.info(f"CLOB WS: Verbunden — {len(tids)} tokens subscribed")
 
                     async for raw in ws:
@@ -163,6 +170,20 @@ class CLOBWebSocket:
                         if raw == "PING":
                             await ws.send("pong")
                             continue
+
+                        # Re-Subscribe wenn neue Tokens hinzugefuegt wurden
+                        if self._resub_needed:
+                            new_tids = list(self._token_ids)
+                            resub = orjson.dumps({
+                                "assets_ids": new_tids,
+                                "type": "market",
+                            }) if "orjson" in dir() else __import__("json").dumps({
+                                "assets_ids": new_tids,
+                                "type": "market",
+                            })
+                            await ws.send(resub if isinstance(resub, str) else resub.decode())
+                            self._resub_needed = False
+                            logger.info(f"CLOB WS: Re-Subscribed — {len(new_tids)} tokens")
 
                         # orjson Parse: C-Speed, kein GIL-Blocking
                         try:
