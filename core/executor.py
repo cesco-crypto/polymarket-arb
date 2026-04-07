@@ -383,7 +383,7 @@ class PolymarketExecutor:
             signed_order = self._client.create_order(order_args)
 
             # 2. Build HTTP Request (exakte py-clob-client Logik)
-            from py_clob_client.order_builder.helpers import order_to_json
+            from py_clob_client.utilities import order_to_json
             from py_clob_client.headers.headers import create_level_2_headers
             from py_clob_client.clob_types import RequestArgs
 
