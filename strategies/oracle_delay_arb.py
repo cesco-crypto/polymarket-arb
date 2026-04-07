@@ -125,13 +125,15 @@ class OracleDelayArbStrategy(StrategyBase):
         self._trade_count = 0
         self._recent_snipes: deque = deque(maxlen=50)
         self._sniped_windows: set[str] = set()  # Dedup: slug → bereits gesniped
-        self._tick_event = asyncio.Event()        # Binance Tick Trigger
+        self._scheduled_windows: set[str] = set()  # Timer bereits geplant
 
         # CLOB WebSocket — lokales RAM-Orderbuch
         self._clob_ws = None  # Initialisiert in run()
 
-        # Binance price tracking
-        self._last_prices: dict[str, float] = {}  # asset → last price
+        # Binance RAM-Preise: Werden von jedem Tick ueberschrieben (kein Event, kein Lock)
+        # Der Execution-Task liest diese Variable direkt — O(1), <1µs
+        self._latest_price: dict[str, float] = {}  # "BTC/USDT" → mid price
+        self._price_at_window_start: dict[str, float] = {}  # slug → price at start
 
     # ═══════════════════════════════════════════════════════════════
     # LIFECYCLE
@@ -193,14 +195,25 @@ class OracleDelayArbStrategy(StrategyBase):
         from core.clob_ws import CLOBWebSocket
         self._clob_ws = CLOBWebSocket()
 
-        # Subscribe Token-IDs SOFORT beim Start (kein 60s Warten)
-        await self._subscribe_clob_tokens()
-        # Fallback: Auch direkt aus _compute fuer sofortige Abdeckung
+        # Token-IDs SOFORT laden: Discovery + alle kommenden Windows
+        initial_tokens = []
+        try:
+            from dashboard.web_ui import active_strategies
+            for sn, st in active_strategies.items():
+                if hasattr(st, "discovery"):
+                    initial_tokens = st.discovery.get_all_token_ids()
+                    break
+        except Exception:
+            pass
+        # Zusaetzlich: Gamma API fuer kommende Windows
         for w in self._compute_next_window_closes():
             if w["seconds_to_close"] > 0:
                 tids = await self._get_token_ids(w["slug"], w["asset"])
                 if tids:
-                    self._clob_ws.subscribe([tids[0], tids[1]])
+                    initial_tokens.extend([tids[0], tids[1]])
+        if initial_tokens:
+            self._clob_ws.subscribe(initial_tokens)
+            logger.info(f"ODA: {len(initial_tokens)} Token-IDs SOFORT subscribed (kein 60s Warten)")
         await self._clob_ws.start()
 
         # Binance Tick-Callback registrieren (Event-Driven Trigger)
@@ -219,13 +232,18 @@ class OracleDelayArbStrategy(StrategyBase):
             await self.shutdown()
 
     def _register_binance_callback(self) -> None:
-        """Registriert Callback auf dem Binance Oracle fuer Event-Driven Triggering."""
+        """Binance Tick → schreibt nur RAM-Variable. Kein Event, kein Lock.
+
+        Der Praezisions-Timer liest self._latest_price direkt bei T+0ms.
+        """
         try:
             from dashboard.web_ui import active_strategies
             for sn, st in active_strategies.items():
                 if hasattr(st, "oracle"):
-                    st.oracle.set_on_tick(lambda sym, tick: self._tick_event.set())
-                    logger.info("ODA: Binance Tick-Callback registriert (event-driven)")
+                    def on_tick(symbol, tick):
+                        self._latest_price[symbol] = tick.mid
+                    st.oracle.set_on_tick(on_tick)
+                    logger.info("ODA: Binance RAM-Preis-Feed registriert (kein Event, nur RAM)")
                     return
         except Exception as e:
             logger.warning(f"ODA: Binance callback registration failed: {e}")
@@ -297,192 +315,205 @@ class OracleDelayArbStrategy(StrategyBase):
         return results
 
     async def _main_loop(self) -> None:
-        """Event-Driven Hauptloop mit Pre-Sign Phase.
+        """Praezisions-Timer Architektur: Plant dedizierte Tasks fuer jeden Window-Close.
 
-        Phase 1 (10-15s vor Close): Pre-sign 2 Orders (UP + DOWN)
-        Phase 2 (0ms nach Close): Binance Crossover → push Pre-Signed Order
+        Kein Polling-Loop. Stattdessen:
+        1. Scannt alle 5s nach kommenden Windows
+        2. Plant fuer jedes Window einen asyncio.sleep-Timer bis exakt window_end_ts
+        3. Timer wacht auf → liest RAM-Preis → feuert Pre-Signed Order → 0ms CPU
         """
-        logger.info("ODA Main-Loop gestartet (EVENT-DRIVEN + PRE-SIGN)")
-        self._pre_signed_for: set[str] = set()  # Slugs mit Pre-Signed Orders
+        logger.info("ODA Main-Loop gestartet (PRAEZISIONS-TIMER + PRE-SIGN)")
 
         while self._running:
             try:
-                # Block bis Binance-Tick (oder 1s Heartbeat)
-                try:
-                    await asyncio.wait_for(self._tick_event.wait(), timeout=1.0)
-                except asyncio.TimeoutError:
-                    pass
-                self._tick_event.clear()
-
                 windows = self._compute_next_window_closes()
 
-                # ── PRE-SIGN PHASE: 10-15s vor Close beide Orders vorbereiten ──
                 for w in windows:
                     slug = w["slug"]
                     secs_to = w["seconds_to_close"]
-                    if not (5 < secs_to < 15):
-                        continue  # Nur 5-15s vor Close
-                    if slug in self._pre_signed_for:
-                        continue  # Schon pre-signed
 
-                    asset = w["asset"]
-                    token_ids = await self._get_token_ids(slug, asset)
-                    if not token_ids:
+                    # Ueberspringe bereits geschlossene oder schon geplante Windows
+                    if secs_to < 0:
                         continue
-                    up_tid, down_tid, _ = token_ids
-
-                    # Pre-Sign BEIDE Seiten bei max_entry_price
-                    pre_price = 0.75  # Aggressiver Preis — hoher Edge
-                    if self.executor.is_live:
-                        self.executor.pre_sign_order(up_tid, pre_price, self.trade_size_usd)
-                        self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
-                        self._pre_signed_for.add(slug)
-                        logger.info(
-                            f"ODA PRE-SIGN: {asset} {w['timeframe']} | "
-                            f"UP+DOWN @ ${pre_price} | close in {secs_to:.0f}s"
-                        )
-
-                # ── EXECUTION PHASE: Window gerade geschlossen ──
-
-                for w in windows:
-                    slug = w["slug"]
-                    seconds_since_close = w["seconds_since_close"]
-
-                    # Nur Windows die GERADE geschlossen haben
-                    if seconds_since_close < self.delay_after_close_s:
-                        continue  # Zu frueh
-                    if seconds_since_close > self.max_delay_s:
-                        continue  # Zu spaet
-
-                    # Dedup
+                    if slug in self._scheduled_windows:
+                        continue
                     if slug in self._sniped_windows:
                         continue
+                    if secs_to > 120:
+                        continue  # Zu weit in der Zukunft
 
-                    # Max concurrent check
-                    active = sum(1 for t in self._trades if not t.resolved)
-                    if active >= self.max_concurrent:
-                        continue
-
-                    asset = w["asset"]
-
-                    # Hole Token-IDs von laufender Discovery
-                    token_ids = await self._get_token_ids(slug, asset)
+                    # Token-IDs holen + auf CLOB WS subscriben
+                    token_ids = await self._get_token_ids(slug, w["asset"])
                     if not token_ids:
-                        logger.info(f"ODA: No token IDs for {asset} {slug[-15:]} (age={seconds_since_close:.0f}s)")
-                        self._sniped_windows.add(slug)  # Don't retry
                         continue
-
                     up_tid, down_tid, condition_id = token_ids
 
-                    # 2. Winner via EXAKTEN Binance-Preis-Crossover (deterministisch)
-                    # Vergleiche: Binance-Preis bei window_start_ts vs JETZT
-                    # Preis gestiegen → UP gewinnt. Preis gefallen → DOWN gewinnt.
-                    winner = None
-                    winner_tid = ""
-                    start_price = 0.0
-                    current_price = 0.0
-
-                    try:
-                        from dashboard.web_ui import active_strategies
-                        oracle = None
-                        for sn, st in active_strategies.items():
-                            if hasattr(st, "oracle"):
-                                oracle = st.oracle
-                                break
-
-                        if oracle:
-                            symbol = f"{asset}/USDT"
-                            latest = oracle.get_latest(symbol)
-                            if latest:
-                                current_price = latest.mid
-
-                            # Finde den Preis bei window_start_ts aus der Tick-History
-                            window_start = w["window_start_ts"]
-                            pw = oracle._windows.get(symbol)
-                            if pw and pw._ticks:
-                                for tick in pw._ticks:
-                                    if tick.timestamp >= window_start:
-                                        start_price = tick.mid
-                                        break
-                    except Exception as e:
-                        logger.warning(f"ODA Binance lookup: {e}")
-
-                    if start_price <= 0 or current_price <= 0:
-                        logger.info(f"ODA Skip: {asset} {slug[-15:]} — no Binance price data")
-                        continue
-
-                    if current_price > start_price:
-                        winner = "UP"
-                        winner_tid = up_tid
-                    else:
-                        winner = "DOWN"
-                        winner_tid = down_tid
-
-                    price_change_pct = (current_price - start_price) / start_price * 100
-
-                    # 3. CLOB-Ask aus lokalem RAM-Orderbuch (O(1), kein I/O!)
-                    winner_ask = 0.0
-                    ask_depth = 0.0
+                    # CLOB WS subscriben fuer lokales Orderbuch
                     if self._clob_ws:
-                        book = self._clob_ws.get_book(winner_tid)
-                        if book and book.is_fresh:
-                            winner_ask = book.best_ask
-                            ask_depth = book.ask_depth_usd
+                        self._clob_ws.subscribe([up_tid, down_tid])
 
-                    # Fallback 1: Discovery Cache
-                    if winner_ask <= 0:
-                        try:
-                            from dashboard.web_ui import active_strategies
-                            for sn, st in active_strategies.items():
-                                if not hasattr(st, "discovery"):
-                                    continue
-                                for s, wnd in st.discovery.windows.items():
-                                    if wnd.condition_id == condition_id:
-                                        winner_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
-                                        break
-                                if winner_ask > 0:
-                                    break
-                        except Exception:
-                            pass
+                    # Snapshot: Binance-Preis JETZT speichern (= Window-Start Referenz)
+                    symbol = f"{w['asset']}/USDT"
+                    current_px = self._latest_price.get(symbol, 0)
+                    if current_px > 0:
+                        self._price_at_window_start[slug] = current_px
 
-                    # Fallback 2: REST (langsam, nur als letzter Ausweg)
-                    if winner_ask <= 0:
-                        winner_ask = await self._fetch_ask(winner_tid)
-
-                    if winner_ask <= 0 or winner_ask > self.max_entry_price:
-                        logger.info(
-                            f"ODA Skip: {asset} {winner} ask={winner_ask:.3f} "
-                            f"(change={price_change_pct:+.4f}%, age={seconds_since_close:.0f}s)"
-                        )
-                        self._sniped_windows.add(slug)
-                        continue
-
-                    if winner_ask < self.min_entry_price:
-                        continue  # Dust, skip silently
-
-                    edge_pct = (1.0 / winner_ask - 1.0) * 100
+                    # PLANEN: Dedizierter Timer-Task fuer dieses Window
+                    self._scheduled_windows.add(slug)
+                    asyncio.create_task(
+                        self._window_timer(w, up_tid, down_tid, condition_id),
+                        name=f"oda_{slug}",
+                    )
                     logger.info(
-                        f"ODA SNIPE: {asset} {winner} @ {winner_ask:.3f} | "
-                        f"Binance {start_price:.2f}→{current_price:.2f} ({price_change_pct:+.4f}%) | "
-                        f"Edge {edge_pct:.1f}% | depth ${ask_depth:.0f} | age={seconds_since_close:.1f}s"
+                        f"ODA SCHEDULED: {w['asset']} {w['timeframe']} | "
+                        f"close in {secs_to:.0f}s | {slug[-15:]}"
                     )
 
-                    # 3. SNIPE! Kaufe den Winner
-                    self._sniped_windows.add(slug)
-                    window_data = {
-                        "slug": slug,
-                        "asset": asset,
-                        "question": f"{asset} Up or Down 5m",
-                        "condition_id": condition_id,
-                        "up_token_id": up_tid,
-                        "down_token_id": down_tid,
-                    }
-                    await self._execute_snipe(window_data, winner, winner_tid, winner_ask)
-
             except Exception as e:
-                logger.error(f"ODA Loop Error: {e}")
+                logger.error(f"ODA Scheduler Error: {e}")
 
-            # Kein sleep — Loop wartet oben auf naechsten Binance-Tick via Event
+            await asyncio.sleep(5)  # Scanne alle 5s nach neuen Windows
+
+    async def _window_timer(
+        self, w: dict, up_tid: str, down_tid: str, condition_id: str
+    ) -> None:
+        """Praezisions-Timer fuer EIN Window. Schlaeft bis exakt window_end_ts.
+
+        Phase 1: Schlaeft bis T-12s → Pre-Sign beide Orders
+        Phase 2: Schlaeft bis T+0ms → Liest RAM-Preis → Feuert Order
+        """
+        slug = w["slug"]
+        asset = w["asset"]
+        symbol = f"{asset}/USDT"
+        end_ts = w["window_end_ts"]
+
+        try:
+            # ── PHASE 1: Pre-Sign bei T-12s ──
+            pre_sign_time = end_ts - 12
+            now = time.time()
+            if now < pre_sign_time:
+                await asyncio.sleep(pre_sign_time - now)
+
+            if not self._running:
+                return
+
+            # Pre-Sign BEIDE Seiten
+            pre_price = 0.75
+            if self.executor.is_live:
+                self.executor.pre_sign_order(up_tid, pre_price, self.trade_size_usd)
+                self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
+                logger.info(f"ODA PRE-SIGN: {asset} {w['timeframe']} UP+DOWN @ ${pre_price}")
+
+            # Speichere Start-Preis fuer Crossover-Vergleich
+            start_price = self._latest_price.get(symbol, 0)
+            if start_price <= 0:
+                start_price = self._price_at_window_start.get(slug, 0)
+
+            # ── PHASE 2: Praezisions-Sleep bis EXAKT window_end_ts ──
+            now = time.time()
+            sleep_s = end_ts - now
+            if sleep_s > 0:
+                await asyncio.sleep(sleep_s)
+
+            if not self._running:
+                return
+
+            # ═══ T+0ms: EXECUTION — Zero CPU, nur RAM-Reads + Network I/O ═══
+            t0 = time.perf_counter()
+
+            # 1. Binance-Preis aus RAM lesen (<1µs)
+            current_price = self._latest_price.get(symbol, 0)
+            if current_price <= 0 or start_price <= 0:
+                logger.info(f"ODA Skip: {asset} — no price data")
+                return
+
+            # 2. Winner bestimmen (<1µs)
+            if current_price > start_price:
+                winner = "UP"
+                winner_tid = up_tid
+            else:
+                winner = "DOWN"
+                winner_tid = down_tid
+
+            price_change_pct = (current_price - start_price) / start_price * 100
+
+            # 3. CLOB-Ask aus RAM-Orderbuch lesen (<1µs)
+            winner_ask = 0.0
+            ask_depth = 0.0
+            if self._clob_ws:
+                book = self._clob_ws.get_book(winner_tid)
+                if book and book.is_fresh:
+                    winner_ask = book.best_ask
+                    ask_depth = book.ask_depth_usd
+
+            # Fallback: Discovery Cache
+            if winner_ask <= 0:
+                try:
+                    from dashboard.web_ui import active_strategies
+                    for sn, st in active_strategies.items():
+                        if not hasattr(st, "discovery"):
+                            continue
+                        for s, wnd in st.discovery.windows.items():
+                            if wnd.condition_id == condition_id:
+                                winner_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
+                                break
+                        if winner_ask > 0:
+                            break
+                except Exception:
+                    pass
+
+            # Fallback: REST (langsam, letzter Ausweg)
+            if winner_ask <= 0:
+                winner_ask = await self._fetch_ask(winner_tid)
+
+            decision_us = (time.perf_counter() - t0) * 1_000_000  # Microseconds
+
+            if winner_ask <= 0 or winner_ask > self.max_entry_price:
+                logger.info(
+                    f"ODA Skip: {asset} {winner} ask=${winner_ask:.3f} "
+                    f"(change={price_change_pct:+.4f}%, decision={decision_us:.0f}µs)"
+                )
+                return
+
+            if winner_ask < self.min_entry_price:
+                return
+
+            edge_pct = (1.0 / winner_ask - 1.0) * 100
+            logger.info(
+                f"ODA FIRE: {asset} {winner} @ ${winner_ask:.3f} | "
+                f"Binance {start_price:.2f}→{current_price:.2f} ({price_change_pct:+.4f}%) | "
+                f"Edge {edge_pct:.1f}% | depth ${ask_depth:.0f} | "
+                f"decision={decision_us:.0f}µs"
+            )
+
+            # 4. Dedup check
+            if slug in self._sniped_windows:
+                return
+            active = sum(1 for t in self._trades if not t.resolved)
+            if active >= self.max_concurrent:
+                return
+            self._sniped_windows.add(slug)
+
+            # 5. FIRE! Pre-Signed Order pushen (nur Network I/O, keine CPU)
+            window_data = {
+                "slug": slug,
+                "asset": asset,
+                "question": f"{asset} Up or Down {w['timeframe']}",
+                "condition_id": condition_id,
+                "up_token_id": up_tid,
+                "down_token_id": down_tid,
+            }
+            await self._execute_snipe(window_data, winner, winner_tid, winner_ask)
+
+            exec_ms = (time.perf_counter() - t0) * 1000
+            logger.info(f"ODA EXEC: {slug[-15:]} total={exec_ms:.1f}ms (decision={decision_us:.0f}µs)")
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"ODA Timer Error ({slug}): {e}")
+
+    # (Legacy loop code removed — execution happens in _window_timer tasks)
 
     # ═══════════════════════════════════════════════════════════════
     # WINDOW DISCOVERY
