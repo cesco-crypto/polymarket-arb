@@ -54,6 +54,15 @@ CTF_ABI = [
 class AutoRedeemer:
     """Periodisch gewonnene Positionen redeemen."""
 
+    # Gas Pacing: Max baseFee in Gwei bevor Redeemer pausiert
+    MAX_BASE_FEE_GWEI = 100
+    # Batch Thresholds
+    BATCH_MIN_USD = 15.0    # Minimum $15 bevor Flush
+    BATCH_TTL_S = 4 * 3600  # Max 4h bevor Force-Flush
+    # Cooldown Eskalation
+    COOLDOWN_BASE_S = 2 * 3600   # 2h Basis
+    COOLDOWN_MAX_S = 48 * 3600   # 48h Cap
+
     def __init__(self, private_key: str, wallet_address: str):
         self._key = private_key
         self._wallet = wallet_address
@@ -61,9 +70,10 @@ class AutoRedeemer:
         self._ctf = None
         self._last_redeem_time = 0
         self._total_redeemed = 0
-        # Cooldown-Cache: condition_id -> Zeitpunkt ab dem erneuter Versuch erlaubt
-        # Verhindert Gas-Verschwendung durch wiederholte Reverts waehrend UMA Challenge
-        self._cooldown_cache: dict[str, float] = {}
+        # Dynamischer Cooldown: cid -> {"until": float, "attempts": int}
+        self._cooldown_cache: dict[str, dict] = {}
+        # Pending Batch: Positions die Pre-Check bestanden, warten auf Flush
+        self._pending_batch: list[dict] = []
         self._total_redeemed_usd = 0.0
         self._total_merged = 0
         self._total_merged_usd = 0.0
@@ -111,16 +121,100 @@ class AutoRedeemer:
             logger.error(f"AutoRedeemer: Position fetch error: {e}")
             return []
 
+    def _get_cooldown(self, cid: str) -> float:
+        """Gibt den Cooldown-Zeitpunkt fuer eine condition_id zurueck (0 = kein Cooldown)."""
+        entry = self._cooldown_cache.get(cid)
+        return entry["until"] if entry else 0
+
+    def _set_cooldown(self, cid: str, title: str, reason: str) -> None:
+        """Setzt dynamischen eskalierenden Cooldown fuer eine condition_id."""
+        entry = self._cooldown_cache.get(cid, {"until": 0, "attempts": 0})
+        attempts = entry["attempts"] + 1
+        # Eskalation: 2h → 6h → 18h → 48h (cap)
+        cooldown_s = min(self.COOLDOWN_BASE_S * (3 ** (attempts - 1)), self.COOLDOWN_MAX_S)
+        self._cooldown_cache[cid] = {"until": time.time() + cooldown_s, "attempts": attempts}
+        hours = cooldown_s / 3600
+        logger.warning(f"AutoRedeemer: {reason} ({title}) — {hours:.0f}h cooldown (attempt #{attempts})")
+
     def redeem_all(self) -> dict:
-        """Redeemed alle gewonnenen Positionen. Returns stats."""
+        """Institutioneller Redeemer: Pre-Check → Batch → Gas-Pacing → Flush."""
         from web3 import Web3
 
         if not self._connect():
             return {"redeemed": 0, "failed": 0, "error": "no web3 connection"}
 
+        # ── EIP-1559 GAS PACING: Pausiere bei Netzwerk-Ueberlast ──
+        try:
+            latest = self._w3.eth.get_block("latest")
+            base_fee = latest.get("baseFeePerGas", 0)
+            if base_fee > self.MAX_BASE_FEE_GWEI * 1e9:
+                gwei = base_fee / 1e9
+                logger.info(f"AutoRedeemer: Gas too high ({gwei:.0f} gwei > {self.MAX_BASE_FEE_GWEI}) — snoozing")
+                return {"redeemed": 0, "failed": 0, "snoozed": True, "gas_gwei": round(gwei)}
+        except Exception:
+            pass  # Gas-Check ist optional, nicht blockierend
+
         positions = self.get_redeemable_positions()
         if not positions:
             return {"redeemed": 0, "failed": 0, "positions": 0}
+
+        now = time.time()
+
+        # ── PRE-CHECK PHASE: payoutDenominator pruefen, Batch befuellen ──
+        for pos in positions:
+            cid_hex = pos.get("conditionId", "")
+            title = pos.get("title", "")[:40]
+            if not cid_hex:
+                continue
+
+            # Dynamischer Cooldown Check
+            if now < self._get_cooldown(cid_hex):
+                continue
+
+            # Bereits im Batch?
+            if any(p.get("conditionId") == cid_hex for p in self._pending_batch):
+                continue
+
+            # payoutDenominator — isoliertes try/except
+            payout = 0
+            try:
+                cid_bytes = bytes.fromhex(cid_hex[2:] if cid_hex.startswith("0x") else cid_hex)
+                payout = self._ctf.functions.payoutDenominator(cid_bytes).call()
+            except Exception as e:
+                self._set_cooldown(cid_hex, title, f"RPC error: {str(e)[:60]}")
+                continue
+
+            if payout == 0:
+                self._set_cooldown(cid_hex, title, "Not resolved")
+                continue
+
+            # Pre-Check bestanden → ab in den Batch
+            pos["_checked_at"] = now
+            pos["_cid_bytes"] = cid_bytes
+            self._pending_batch.append(pos)
+
+        # ── BATCH FLUSH CHECK ──
+        batch_value = sum(float(p.get("currentValue", 0)) + float(p.get("size", 0)) * 0.5
+                         for p in self._pending_batch)
+        oldest = min((p.get("_checked_at", now) for p in self._pending_batch), default=now)
+        batch_age = now - oldest
+
+        should_flush = (
+            len(self._pending_batch) > 0
+            and (batch_value >= self.BATCH_MIN_USD or batch_age >= self.BATCH_TTL_S)
+        )
+
+        if not should_flush:
+            pending_count = len(self._pending_batch)
+            if pending_count > 0:
+                logger.debug(
+                    f"AutoRedeemer: {pending_count} pending (${batch_value:.1f}, age {batch_age/60:.0f}min) "
+                    f"— waiting for ${self.BATCH_MIN_USD} or {self.BATCH_TTL_S/3600:.0f}h TTL"
+                )
+            return {"redeemed": 0, "failed": 0, "pending": pending_count, "pending_usd": round(batch_value, 2)}
+
+        # ── FLUSH: Sende einzelne TXs (kein atomic MultiSend) ──
+        logger.info(f"AutoRedeemer: FLUSH {len(self._pending_batch)} positions (${batch_value:.1f})")
 
         wallet = Web3.to_checksum_address(self._wallet)
         redeemed = 0
@@ -132,39 +226,17 @@ class AutoRedeemer:
         except Exception as e:
             return {"redeemed": 0, "failed": 0, "error": f"nonce error: {e}"}
 
-        now = time.time()
-
-        for pos in positions:
+        flushed = []
+        for pos in self._pending_batch:
             cid_hex = pos.get("conditionId", "")
-            value = pos.get("currentValue", 0)
+            cid_bytes = pos.get("_cid_bytes", b"")
+            value = float(pos.get("currentValue", 0))
             title = pos.get("title", "")[:40]
 
-            if not cid_hex:
+            if not cid_bytes:
+                flushed.append(pos)
                 continue
 
-            # ── COOLDOWN CHECK: Skip wenn in 2h Blacklist ──
-            cooldown_until = self._cooldown_cache.get(cid_hex, 0)
-            if now < cooldown_until:
-                continue  # Leise skippen — bereits geloggt beim Blacklisting
-
-            # ── PAYOUT DENOMINATOR CHECK (isoliertes try/except) ──
-            payout = 0
-            try:
-                cid_bytes = bytes.fromhex(cid_hex[2:] if cid_hex.startswith("0x") else cid_hex)
-                payout = self._ctf.functions.payoutDenominator(cid_bytes).call()
-            except Exception as e:
-                # RPC Fehler → Blacklist fuer 2h (UMA Challenge Period)
-                self._cooldown_cache[cid_hex] = now + 7200
-                logger.warning(f"AutoRedeemer: RPC error for {title} — 2h cooldown. Error: {e}")
-                continue
-
-            if payout == 0:
-                # Markt noch nicht resolved → Blacklist fuer 2h
-                self._cooldown_cache[cid_hex] = now + 7200
-                logger.warning(f"AutoRedeemer: Not resolved ({title}) — 2h cooldown added")
-                continue
-
-            # ── AB HIER: payout > 0 bestätigt → Redeem sicher ──
             try:
                 gas_price = int(self._w3.eth.gas_price * 1.2)
 
@@ -188,9 +260,8 @@ class AutoRedeemer:
                 if receipt.status == 1:
                     redeemed += 1
                     total_value += value
-                    tx_hash_hex = tx_hash.hex() if hasattr(tx_hash, 'hex') else str(tx_hash)
+                    tx_hash_hex = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
                     logger.info(f"AutoRedeemer: ✅ Redeemed ${value:.2f} from {title}")
-                    # Aus Cooldown entfernen bei Erfolg
                     self._cooldown_cache.pop(cid_hex, None)
 
                     self._log_redemption_to_journal(
@@ -203,21 +274,23 @@ class AutoRedeemer:
                     )
                 else:
                     failed += 1
-                    # TX Reverted trotz payout > 0 → Blacklist 2h
-                    self._cooldown_cache[cid_hex] = now + 7200
-                    logger.warning(f"AutoRedeemer: ❌ Reverted {title} — 2h cooldown")
+                    self._set_cooldown(cid_hex, title, "TX reverted")
 
+                flushed.append(pos)
                 current_nonce += 1
                 time.sleep(2)
 
             except Exception as e:
-                error_str = str(e).lower()
-                # Blacklist bei Revert oder unbekanntem Fehler
-                self._cooldown_cache[cid_hex] = now + 7200
-                logger.error(f"AutoRedeemer: Error {title} — 2h cooldown. {str(e)[:100]}")
+                self._set_cooldown(cid_hex, title, f"TX error: {str(e)[:60]}")
+                flushed.append(pos)
                 failed += 1
-                if "nonce" in error_str:
+                if "nonce" in str(e).lower():
                     current_nonce += 1
+
+        # Geflushed Positions aus Batch entfernen
+        for pos in flushed:
+            if pos in self._pending_batch:
+                self._pending_batch.remove(pos)
 
         self._total_redeemed += redeemed
         self._total_redeemed_usd += total_value
