@@ -919,10 +919,12 @@ function switchTab(btn, tab) {
         : '<span class="d" style="font-size:8px">—</span>';
 
       let statusTag;
-      if (t.status === 'redeemed' || (t.outcome_correct === true)) {
+      if (t.status === 'redeemed' || (t.outcome_correct === true && t.status !== 'pending_redeem')) {
         statusTag = '<span class="g b" style="font-size:9px">WON</span>';
-      } else if (t.status === 'lost' || (t.outcome_correct === false)) {
+      } else if (t.status === 'lost' || (t.outcome_correct === false && t.status === 'lost')) {
         statusTag = '<span class="rd" style="font-size:9px">LOST</span>';
+      } else if (t.status === 'pending_redeem') {
+        statusTag = '<span class="y" style="font-size:9px;background:#eab30815;padding:1px 4px;border-radius:2px">PENDING</span>';
       } else {
         statusTag = '<span class="y" style="font-size:9px">OPEN</span>';
       }

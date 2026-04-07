@@ -729,7 +729,12 @@ def _read_journal_stats() -> dict:
             trade_record["exit_ts"] = close_ev.get("exit_ts", 0)
         else:
             strat_stats[strat]["pending"] += 1
-            trade_record["status"] = "open"
+            # ODA-Trades ohne close = PENDING REDEEM (wartet auf UMA 2h Challenge)
+            age_s = time.time() - open_ev.get("entry_ts", 0)
+            if open_ev.get("order_type") == "oracle_delay_arb" and age_s > 300:
+                trade_record["status"] = "pending_redeem"
+            else:
+                trade_record["status"] = "open"
             trade_record["pnl_usd"] = 0
             trade_record["outcome_correct"] = None
 

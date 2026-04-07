@@ -826,27 +826,9 @@ class OracleDelayArbStrategy(StrategyBase):
                     if fill_status == "FILLED":
                         filled = True
                         trade.pnl_usd = expected_pnl
-                        trade.resolved = True
-                        logger.info(f"SNIPE FILLED: {trade_id} — expected +${expected_pnl:.3f}")
-                        # Sofort close Event schreiben — nicht auf Redeemer warten
-                        # ODA kauft den Winner NACH Ergebnis, Outcome ist bei Fill sicher
-                        self.journal.record_close(TradeRecord(
-                            trade_id=trade_id,
-                            event="close",
-                            exit_ts=time.time(),
-                            asset=asset,
-                            direction=winner,
-                            executed_price=ask_price,
-                            size_usd=self.trade_size_usd,
-                            shares=float(shares),
-                            pnl_usd=expected_pnl,
-                            pnl_pct=net_ev_pct,
-                            outcome_correct=True,
-                            condition_id=condition_id,
-                            order_type="oracle_delay_arb",
-                            live_order_id=res.order_id,
-                            live_order_success=True,
-                        ))
+                        logger.info(f"SNIPE FILLED: {trade_id} — expected +${expected_pnl:.3f} (PENDING REDEEM)")
+                        # KEIN record_close hier! PnL wird erst vom AutoRedeemer
+                        # nach der 2h UMA Challenge Period on-chain bestaetigt.
                     elif fill_status == "UNFILLED":
                         logger.warning(f"SNIPE NOT FILLED: {trade_id} — cancelling")
                         await self._cancel_order(res.order_id)
@@ -871,7 +853,7 @@ class OracleDelayArbStrategy(StrategyBase):
             f"📍 {slug[:35]}{order_ref}"
         ))
 
-        # Journal — ODA kauft den Winner NACH Ergebnis, daher ist PnL bei Fill bekannt
+        # Journal — NUR open Event. PnL=0 bis AutoRedeemer on-chain bestaetigt.
         self.journal.record_open(TradeRecord(
             trade_id=trade_id,
             asset=asset,
@@ -885,9 +867,9 @@ class OracleDelayArbStrategy(StrategyBase):
             fee_pct=fee_pct,
             fee_usd=fee_usd,
             net_ev_pct=net_ev_pct,
-            pnl_usd=expected_pnl if filled else 0.0,
-            pnl_pct=net_ev_pct if filled else 0.0,
-            outcome_correct=filled,  # Bei FILL = Winner gekauft = korrekt
+            pnl_usd=0.0,              # Kein PnL bis Redeem!
+            pnl_pct=0.0,              # Kein PnL bis Redeem!
+            outcome_correct=False,     # Nicht bestaetigt bis Redeem!
             order_type="oracle_delay_arb",
             live_order_id=trade.live_order_id,
             live_order_success=trade.live_success,
