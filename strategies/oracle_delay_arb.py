@@ -110,12 +110,12 @@ class OracleDelayArbStrategy(StrategyBase):
         self.executor = PolymarketExecutor(settings)
         self.journal = TradeJournal()
 
-        # Config — Latency Arbitrage: SCHNELL kaufen bei niedrigem CLOB-Preis
+        # Config — Latency Arbitrage: Sub-100ms Execution
         self.trade_size_usd = 5.0          # $5 pro Trade
-        self.min_entry_price = 0.05        # Min Preis (vermeidet $0.01 Dust)
-        self.max_entry_price = 0.95        # Max 0.95 (darueber = kein Edge mehr)
-        self.delay_after_close_s = 2.0     # 2s nach Close — SOFORT handeln!
-        self.max_delay_s = 30.0            # Max 30s — danach ist das Fenster zu
+        self.min_entry_price = 0.05        # Min Preis (Dust Filter)
+        self.max_entry_price = 0.95        # Max 0.95 (darueber = kein Edge)
+        self.delay_after_close_s = 0.0     # 0ms Delay — rein event-driven!
+        self.max_delay_s = 15.0            # Max 15s nach Close (Fenster ist ~2.7s median)
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
 
         # State
@@ -125,6 +125,10 @@ class OracleDelayArbStrategy(StrategyBase):
         self._trade_count = 0
         self._recent_snipes: deque = deque(maxlen=50)
         self._sniped_windows: set[str] = set()  # Dedup: slug → bereits gesniped
+        self._tick_event = asyncio.Event()        # Binance Tick Trigger
+
+        # CLOB WebSocket — lokales RAM-Orderbuch
+        self._clob_ws = None  # Initialisiert in run()
 
         # Binance price tracking
         self._last_prices: dict[str, float] = {}  # asset → last price
@@ -164,24 +168,43 @@ class OracleDelayArbStrategy(StrategyBase):
         # Trade-Counter aus Journal laden (verhindert ID-Kollisionen nach Restart)
         self._load_trade_counter()
 
-        logger.info(f"Oracle Delay Arb startet — Sharky6999 Style! (Counter: {self._trade_count})")
+        logger.info(f"Oracle Delay Arb v4 startet — Sub-100ms Latency Arb (Counter: {self._trade_count})")
 
         if self.settings.live_trading:
             live_ok = await self.executor.initialize()
             if live_ok:
-                logger.info("Oracle Delay Arb: LIVE MODUS — Echte Orders!")
+                logger.info("ODA: LIVE MODUS — Echte FAK Orders!")
             else:
-                logger.warning("Oracle Delay Arb: Live Init fehlgeschlagen")
+                logger.warning("ODA: Live Init fehlgeschlagen")
 
+        # Persistente HTTP Session — TCP Keep-Alive, kein TLS-Handshake pro Order
+        connector = aiohttp.TCPConnector(
+            keepalive_timeout=300,  # 5min Keep-Alive
+            limit=10,
+            enable_cleanup_closed=True,
+        )
         self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=10),
+            connector=connector,
+            timeout=aiohttp.ClientTimeout(total=5, connect=2),
             headers={"User-Agent": "polymarket-arb/2.0"},
         )
+
+        # CLOB WebSocket — lokales RAM-Orderbuch
+        from core.clob_ws import CLOBWebSocket
+        self._clob_ws = CLOBWebSocket()
+
+        # Subscribe Token-IDs fuer aktuelle + kommende Windows
+        await self._subscribe_clob_tokens()
+        await self._clob_ws.start()
+
+        # Binance Tick-Callback registrieren (Event-Driven Trigger)
+        self._register_binance_callback()
 
         try:
             await asyncio.gather(
                 self._main_loop(),
                 self._status_loop(),
+                self._subscription_refresh_loop(),
                 return_exceptions=True,
             )
         except asyncio.CancelledError:
@@ -189,11 +212,51 @@ class OracleDelayArbStrategy(StrategyBase):
         finally:
             await self.shutdown()
 
+    def _register_binance_callback(self) -> None:
+        """Registriert Callback auf dem Binance Oracle fuer Event-Driven Triggering."""
+        try:
+            from dashboard.web_ui import active_strategies
+            for sn, st in active_strategies.items():
+                if hasattr(st, "oracle"):
+                    st.oracle.set_on_tick(lambda sym, tick: self._tick_event.set())
+                    logger.info("ODA: Binance Tick-Callback registriert (event-driven)")
+                    return
+        except Exception as e:
+            logger.warning(f"ODA: Binance callback registration failed: {e}")
+
+    async def _subscribe_clob_tokens(self) -> None:
+        """Subscribed alle aktuellen + naechsten Window Token-IDs auf dem CLOB WS."""
+        try:
+            from dashboard.web_ui import active_strategies
+            for sn, st in active_strategies.items():
+                if not hasattr(st, "discovery"):
+                    continue
+                token_ids = st.discovery.get_all_token_ids()
+                if token_ids:
+                    self._clob_ws.subscribe(token_ids)
+                    logger.info(f"ODA: {len(token_ids)} Token-IDs auf CLOB WS subscribed")
+                return
+        except Exception as e:
+            logger.warning(f"ODA: Token subscription failed: {e}")
+
+    async def _subscription_refresh_loop(self) -> None:
+        """Aktualisiert CLOB WS Subscriptions alle 60s fuer neue Windows."""
+        while self._running:
+            try:
+                await asyncio.sleep(60)
+                await self._subscribe_clob_tokens()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
     async def shutdown(self) -> None:
         self._running = False
+        if self._clob_ws:
+            await self._clob_ws.stop()
         if self._session and not self._session.closed:
             await self._session.close()
-        logger.info(f"Oracle Delay Arb beendet. {self._trade_count} Snipes ausgeführt.")
+        logger.info(f"Oracle Delay Arb beendet. {self._trade_count} Snipes ausgefuehrt.")
 
     # ═══════════════════════════════════════════════════════════════
     # MAIN LOOP — Window-Close Detection + Sniping
@@ -229,27 +292,33 @@ class OracleDelayArbStrategy(StrategyBase):
         return results
 
     async def _main_loop(self) -> None:
-        """Hauptloop: Erkennt Window-Closes und sniped den Winner.
+        """Event-Driven Hauptloop: Reagiert auf Binance-Ticks, sniped bei Window-Close.
 
-        Berechnet Window-End-Zeiten SELBST (nicht von Discovery abhängig).
-        Alle 5 Minuten gibt es ein neues Window das schliesst.
+        Kein Polling, kein kuenstliches Delay — wacht bei jedem Binance-Tick auf
+        und prueft ob ein Window gerade geschlossen hat.
         """
-        logger.info("Oracle Delay Arb Main-Loop gestartet")
+        logger.info("ODA Main-Loop gestartet (EVENT-DRIVEN, 0ms delay)")
 
         while self._running:
             try:
+                # Block bis Binance-Tick kommt (oder 1s Timeout als Heartbeat)
+                try:
+                    await asyncio.wait_for(self._tick_event.wait(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    pass
+                self._tick_event.clear()
+
                 windows = self._compute_next_window_closes()
-                now = time.time()
 
                 for w in windows:
                     slug = w["slug"]
                     seconds_since_close = w["seconds_since_close"]
 
-                    # Nur Windows die GERADE geschlossen haben (3-60s nach Close)
+                    # Nur Windows die GERADE geschlossen haben
                     if seconds_since_close < self.delay_after_close_s:
-                        continue  # Zu früh
+                        continue  # Zu frueh
                     if seconds_since_close > self.max_delay_s:
-                        continue  # Zu spät
+                        continue  # Zu spaet
 
                     # Dedup
                     if slug in self._sniped_windows:
@@ -317,26 +386,32 @@ class OracleDelayArbStrategy(StrategyBase):
 
                     price_change_pct = (current_price - start_price) / start_price * 100
 
-                    # 3. Hole CLOB-Ask fuer den Winner-Token aus Discovery (lokal, schnell)
+                    # 3. CLOB-Ask aus lokalem RAM-Orderbuch (O(1), kein I/O!)
                     winner_ask = 0.0
-                    try:
-                        from dashboard.web_ui import active_strategies
-                        for sn, st in active_strategies.items():
-                            if not hasattr(st, "discovery"):
-                                continue
-                            for s, wnd in st.discovery.windows.items():
-                                if wnd.condition_id == condition_id:
-                                    if winner == "UP":
-                                        winner_ask = wnd.up_best_ask
-                                    else:
-                                        winner_ask = wnd.down_best_ask
-                                    break
-                            if winner_ask > 0:
-                                break
-                    except Exception:
-                        pass
+                    ask_depth = 0.0
+                    if self._clob_ws:
+                        book = self._clob_ws.get_book(winner_tid)
+                        if book and book.is_fresh:
+                            winner_ask = book.best_ask
+                            ask_depth = book.ask_depth_usd
 
-                    # Fallback: REST fetch wenn Discovery keinen Preis hat
+                    # Fallback 1: Discovery Cache
+                    if winner_ask <= 0:
+                        try:
+                            from dashboard.web_ui import active_strategies
+                            for sn, st in active_strategies.items():
+                                if not hasattr(st, "discovery"):
+                                    continue
+                                for s, wnd in st.discovery.windows.items():
+                                    if wnd.condition_id == condition_id:
+                                        winner_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
+                                        break
+                                if winner_ask > 0:
+                                    break
+                        except Exception:
+                            pass
+
+                    # Fallback 2: REST (langsam, nur als letzter Ausweg)
                     if winner_ask <= 0:
                         winner_ask = await self._fetch_ask(winner_tid)
 
@@ -355,7 +430,7 @@ class OracleDelayArbStrategy(StrategyBase):
                     logger.info(
                         f"ODA SNIPE: {asset} {winner} @ {winner_ask:.3f} | "
                         f"Binance {start_price:.2f}→{current_price:.2f} ({price_change_pct:+.4f}%) | "
-                        f"Edge {edge_pct:.1f}% | age={seconds_since_close:.0f}s"
+                        f"Edge {edge_pct:.1f}% | depth ${ask_depth:.0f} | age={seconds_since_close:.1f}s"
                     )
 
                     # 3. SNIPE! Kaufe den Winner
@@ -373,7 +448,7 @@ class OracleDelayArbStrategy(StrategyBase):
             except Exception as e:
                 logger.error(f"ODA Loop Error: {e}")
 
-            await asyncio.sleep(2.0)  # Check every 2 seconds
+            # Kein sleep — Loop wartet oben auf naechsten Binance-Tick via Event
 
     # ═══════════════════════════════════════════════════════════════
     # WINDOW DISCOVERY
@@ -778,6 +853,7 @@ class OracleDelayArbStrategy(StrategyBase):
                 "delay_after_close_s": self.delay_after_close_s,
                 "max_concurrent": self.max_concurrent,
             },
+            "clob_ws": self._clob_ws.status() if self._clob_ws else {"connected": False},
         }
 
 
