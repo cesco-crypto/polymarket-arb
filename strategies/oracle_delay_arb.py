@@ -226,6 +226,7 @@ class OracleDelayArbStrategy(StrategyBase):
                 self._main_loop(),
                 self._status_loop(),
                 self._subscription_refresh_loop(),
+                self._session_warmer(),
                 return_exceptions=True,
             )
         except asyncio.CancelledError:
@@ -283,6 +284,29 @@ class OracleDelayArbStrategy(StrategyBase):
                 break
             except Exception:
                 pass
+
+    async def _session_warmer(self) -> None:
+        """Haelt die CLOB aiohttp Session warm — kein TLS-Penalty bei echten Orders.
+
+        Sendet alle 45s einen leichtgewichtigen GET /time an den CLOB.
+        Erster Call waermt die Session auf, folgende halten TCP Keep-Alive aktiv.
+        """
+        from core.executor import PolymarketExecutor
+        await asyncio.sleep(5)  # Warte auf Executor-Init
+
+        while self._running:
+            try:
+                session = await PolymarketExecutor._get_async_session()
+                t0 = time.perf_counter()
+                async with session.get("https://clob.polymarket.com/time") as resp:
+                    await resp.text()
+                ms = (time.perf_counter() - t0) * 1000
+                logger.debug(f"ODA Session Warm: CLOB ping {ms:.0f}ms")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+            await asyncio.sleep(45)
 
     async def shutdown(self) -> None:
         self._running = False
