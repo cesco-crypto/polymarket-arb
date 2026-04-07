@@ -110,12 +110,12 @@ class OracleDelayArbStrategy(StrategyBase):
         self.executor = PolymarketExecutor(settings)
         self.journal = TradeJournal()
 
-        # Config
-        self.trade_size_usd = 5.0          # $5 pro Trade (Daten sammeln, später skalieren)
-        self.min_entry_price = 0.90        # Kaufen wenn Preis >= 0.90 (mehr Profit, etwas mehr Risiko)
-        self.max_entry_price = 0.99        # Max 0.99 (CLOB Limit)
-        self.delay_after_close_s = 60.0    # 60s nach Close warten (Gamma API braucht ~60-90s)
-        self.max_delay_s = 180.0           # Max 180s nach Close (einige Windows brauchen laenger)
+        # Config — Latency Arbitrage: SCHNELL kaufen bei niedrigem CLOB-Preis
+        self.trade_size_usd = 5.0          # $5 pro Trade
+        self.min_entry_price = 0.05        # Min Preis (vermeidet $0.01 Dust)
+        self.max_entry_price = 0.95        # Max 0.95 (darueber = kein Edge mehr)
+        self.delay_after_close_s = 2.0     # 2s nach Close — SOFORT handeln!
+        self.max_delay_s = 30.0            # Max 30s — danach ist das Fenster zu
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
 
         # State
@@ -271,58 +271,91 @@ class OracleDelayArbStrategy(StrategyBase):
 
                     up_tid, down_tid, condition_id = token_ids
 
-                    # 2. Bestimme den Winner via LIVE GAMMA API FETCH
-                    # Einzige zuverlaessige Methode: Gamma outcomePrices nach ~60s
-                    # Winner zeigt >0.70, Loser <0.30. Alles andere = unklar.
+                    # 2. Winner via EXAKTEN Binance-Preis-Crossover (deterministisch)
+                    # Vergleiche: Binance-Preis bei window_start_ts vs JETZT
+                    # Preis gestiegen → UP gewinnt. Preis gefallen → DOWN gewinnt.
                     winner = None
                     winner_tid = ""
-                    gamma_up = 0.0
-                    gamma_down = 0.0
+                    start_price = 0.0
+                    current_price = 0.0
 
                     try:
-                        if self._session and not self._session.closed:
-                            url = f"https://gamma-api.polymarket.com/events?slug={slug}"
-                            async with self._session.get(url) as resp:
-                                if resp.status == 200:
-                                    gdata = await resp.json()
-                                    if gdata:
-                                        gm = gdata[0].get("markets", [{}])[0]
-                                        gprices = gm.get("outcomePrices", "[]")
-                                        if isinstance(gprices, str):
-                                            gprices = json.loads(gprices)
-                                        if len(gprices) >= 2:
-                                            gamma_up = float(gprices[0])
-                                            gamma_down = float(gprices[1])
-                    except Exception as e:
-                        logger.debug(f"ODA Gamma fetch error: {e}")
+                        from dashboard.web_ui import active_strategies
+                        oracle = None
+                        for sn, st in active_strategies.items():
+                            if hasattr(st, "oracle"):
+                                oracle = st.oracle
+                                break
 
-                    if gamma_up > 0.65 and gamma_down < 0.35:
-                        winner = "UP"
-                        winner_tid = up_tid
-                    elif gamma_down > 0.65 and gamma_up < 0.35:
-                        winner = "DOWN"
-                        winner_tid = down_tid
-                    else:
-                        logger.info(
-                            f"ODA Wait: {asset} {slug[-15:]} — gamma not clear yet "
-                            f"(up={gamma_up:.3f}, dn={gamma_down:.3f}, age={seconds_since_close:.0f}s)"
-                        )
+                        if oracle:
+                            symbol = f"{asset}/USDT"
+                            latest = oracle.get_latest(symbol)
+                            if latest:
+                                current_price = latest.mid
+
+                            # Finde den Preis bei window_start_ts aus der Tick-History
+                            window_start = w["window_start_ts"]
+                            pw = oracle._windows.get(symbol)
+                            if pw and pw._ticks:
+                                for tick in pw._ticks:
+                                    if tick.timestamp >= window_start:
+                                        start_price = tick.mid
+                                        break
+                    except Exception as e:
+                        logger.warning(f"ODA Binance lookup: {e}")
+
+                    if start_price <= 0 or current_price <= 0:
+                        logger.info(f"ODA Skip: {asset} {slug[-15:]} — no Binance price data")
                         continue
 
-                    # Hole CLOB-Ask fuer den Winner-Token (fuer Order-Preis)
-                    winner_ask = await self._fetch_ask(winner_tid) if winner_tid else 0
+                    if current_price > start_price:
+                        winner = "UP"
+                        winner_tid = up_tid
+                    else:
+                        winner = "DOWN"
+                        winner_tid = down_tid
+
+                    price_change_pct = (current_price - start_price) / start_price * 100
+
+                    # 3. Hole CLOB-Ask fuer den Winner-Token aus Discovery (lokal, schnell)
+                    winner_ask = 0.0
+                    try:
+                        from dashboard.web_ui import active_strategies
+                        for sn, st in active_strategies.items():
+                            if not hasattr(st, "discovery"):
+                                continue
+                            for s, wnd in st.discovery.windows.items():
+                                if wnd.condition_id == condition_id:
+                                    if winner == "UP":
+                                        winner_ask = wnd.up_best_ask
+                                    else:
+                                        winner_ask = wnd.down_best_ask
+                                    break
+                            if winner_ask > 0:
+                                break
+                    except Exception:
+                        pass
+
+                    # Fallback: REST fetch wenn Discovery keinen Preis hat
+                    if winner_ask <= 0:
+                        winner_ask = await self._fetch_ask(winner_tid)
+
                     if winner_ask <= 0 or winner_ask > self.max_entry_price:
-                        logger.info(f"ODA Skip: {asset} {winner} CLOB ask={winner_ask:.3f}")
+                        logger.info(
+                            f"ODA Skip: {asset} {winner} ask={winner_ask:.3f} "
+                            f"(change={price_change_pct:+.4f}%, age={seconds_since_close:.0f}s)"
+                        )
                         self._sniped_windows.add(slug)
                         continue
 
                     if winner_ask < self.min_entry_price:
-                        logger.info(f"ODA Wait: {asset} {winner} ask={winner_ask:.3f} < {self.min_entry_price}")
-                        continue
+                        continue  # Dust, skip silently
 
+                    edge_pct = (1.0 / winner_ask - 1.0) * 100
                     logger.info(
-                        f"ODA Winner: {asset} {winner} — gamma={gamma_up:.3f}/{gamma_down:.3f}, "
-                        f"CLOB ask={winner_ask:.3f}, age={seconds_since_close:.0f}s"
+                        f"ODA SNIPE: {asset} {winner} @ {winner_ask:.3f} | "
+                        f"Binance {start_price:.2f}→{current_price:.2f} ({price_change_pct:+.4f}%) | "
+                        f"Edge {edge_pct:.1f}% | age={seconds_since_close:.0f}s"
                     )
 
                     # 3. SNIPE! Kaufe den Winner
