@@ -413,29 +413,32 @@ class OracleDelayArbStrategy(StrategyBase):
             if start_price <= 0:
                 start_price = self._price_at_window_start.get(slug, 0)
 
-            # ── PHASE 2: Praezisions-Sleep bis EXAKT window_end_ts ──
+            # ── PHASE 2: Sleep bis T-15ms, dann BURST-FIRE ──
+            # Aufwachen 15ms VOR Close — Netzwerk-Laufzeit kompensieren
             now = time.time()
-            sleep_s = end_ts - now
+            wake_at = end_ts - 0.015  # T-15ms
+            sleep_s = wake_at - now
             if sleep_s > 0:
                 await asyncio.sleep(sleep_s)
 
             if not self._running:
                 return
 
-            # ═══ T+0ms: EXECUTION — Zero CPU, nur RAM-Reads + Network I/O ═══
+            # ═══ BURST-FIRE: Schrotflinten-Muster (5 Schuesse, 5ms Abstand) ═══
+            # Eines der Pakete trifft bei T+0ms auf die Matching-Engine
             t0 = time.perf_counter()
 
-            # 1. Binance-Preis direkt vom Oracle lesen (<1µs, kein I/O)
+            # 1. Winner bestimmen (einmalig, <1µs)
             current_price = 0.0
             if self._oracle:
                 tick = self._oracle.get_latest(symbol)
                 if tick:
                     current_price = tick.mid
+
             if current_price <= 0 or start_price <= 0:
-                logger.info(f"ODA Skip: {asset} — no price data (cur={current_price}, start={start_price})")
+                logger.info(f"ODA Skip: {asset} — no price data")
                 return
 
-            # 2. Winner bestimmen (<1µs)
             if current_price > start_price:
                 winner = "UP"
                 winner_tid = up_tid
@@ -445,56 +448,7 @@ class OracleDelayArbStrategy(StrategyBase):
 
             price_change_pct = (current_price - start_price) / start_price * 100
 
-            # 3. CLOB-Ask aus RAM-Orderbuch lesen (<1µs)
-            winner_ask = 0.0
-            ask_depth = 0.0
-            if self._clob_ws:
-                book = self._clob_ws.get_book(winner_tid)
-                if book and book.is_fresh:
-                    winner_ask = book.best_ask
-                    ask_depth = book.ask_depth_usd
-
-            # Fallback: Discovery Cache
-            if winner_ask <= 0:
-                try:
-                    from dashboard.web_ui import active_strategies
-                    for sn, st in active_strategies.items():
-                        if not hasattr(st, "discovery"):
-                            continue
-                        for s, wnd in st.discovery.windows.items():
-                            if wnd.condition_id == condition_id:
-                                winner_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
-                                break
-                        if winner_ask > 0:
-                            break
-                except Exception:
-                    pass
-
-            # Fallback: REST (langsam, letzter Ausweg)
-            if winner_ask <= 0:
-                winner_ask = await self._fetch_ask(winner_tid)
-
-            decision_us = (time.perf_counter() - t0) * 1_000_000  # Microseconds
-
-            if winner_ask <= 0 or winner_ask > self.max_entry_price:
-                logger.info(
-                    f"ODA Skip: {asset} {winner} ask=${winner_ask:.3f} "
-                    f"(change={price_change_pct:+.4f}%, decision={decision_us:.0f}µs)"
-                )
-                return
-
-            if winner_ask < self.min_entry_price:
-                return
-
-            edge_pct = (1.0 / winner_ask - 1.0) * 100
-            logger.info(
-                f"ODA FIRE: {asset} {winner} @ ${winner_ask:.3f} | "
-                f"Binance {start_price:.2f}→{current_price:.2f} ({price_change_pct:+.4f}%) | "
-                f"Edge {edge_pct:.1f}% | depth ${ask_depth:.0f} | "
-                f"decision={decision_us:.0f}µs"
-            )
-
-            # 4. Dedup check
+            # Dedup
             if slug in self._sniped_windows:
                 return
             active = sum(1 for t in self._trades if not t.resolved)
@@ -502,7 +456,16 @@ class OracleDelayArbStrategy(StrategyBase):
                 return
             self._sniped_windows.add(slug)
 
-            # 5. FIRE! Pre-Signed Order pushen (nur Network I/O, keine CPU)
+            decision_us = (time.perf_counter() - t0) * 1_000_000
+
+            logger.info(
+                f"ODA BURST: {asset} {winner} | "
+                f"Binance {start_price:.2f}->{current_price:.2f} ({price_change_pct:+.4f}%) | "
+                f"decision={decision_us:.0f}us | firing 5 FAK shots..."
+            )
+
+            # 2. BURST-FIRE: 5 FAK Orders, Fire-and-Forget, 5ms Abstand
+            #    Die Matching-Engine lehnt zu fruehe ab, der "goldene Schuss" trifft
             window_data = {
                 "slug": slug,
                 "asset": asset,
@@ -511,10 +474,69 @@ class OracleDelayArbStrategy(StrategyBase):
                 "up_token_id": up_tid,
                 "down_token_id": down_tid,
             }
-            await self._execute_snipe(window_data, winner, winner_tid, winner_ask)
 
-            exec_ms = (time.perf_counter() - t0) * 1000
-            logger.info(f"ODA EXEC: {slug[-15:]} total={exec_ms:.1f}ms (decision={decision_us:.0f}µs)")
+            filled = False
+            for shot in range(5):
+                try:
+                    # Fire-and-Forget: nicht auf Ergebnis warten zwischen Shots
+                    # Lese aktuellen Ask aus RAM (kann sich zwischen Shots aendern)
+                    shot_ask = 0.0
+                    if self._clob_ws:
+                        book = self._clob_ws.get_book(winner_tid)
+                        if book:
+                            shot_ask = book.best_ask
+
+                    # Fallback Discovery
+                    if shot_ask <= 0:
+                        try:
+                            from dashboard.web_ui import active_strategies
+                            for sn, st in active_strategies.items():
+                                if not hasattr(st, "discovery"):
+                                    continue
+                                for s, wnd in st.discovery.windows.items():
+                                    if wnd.condition_id == condition_id:
+                                        shot_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
+                                        break
+                                if shot_ask > 0:
+                                    break
+                        except Exception:
+                            pass
+
+                    if shot_ask <= 0 or shot_ask > self.max_entry_price:
+                        if shot == 0:
+                            logger.info(f"ODA Shot#{shot}: ask=${shot_ask:.3f} > max — skipping burst")
+                        break
+
+                    if shot_ask < self.min_entry_price:
+                        break
+
+                    edge_pct = (1.0 / shot_ask - 1.0) * 100
+                    shot_t = (time.perf_counter() - t0) * 1000
+
+                    # FIRE!
+                    await self._execute_snipe(window_data, winner, winner_tid, shot_ask)
+                    filled = True
+
+                    logger.info(
+                        f"ODA Shot#{shot}: {asset} {winner} @ ${shot_ask:.3f} | "
+                        f"edge={edge_pct:.1f}% | t={shot_t:.1f}ms"
+                    )
+                    break  # Erster erfolgreicher Shot genuegt
+
+                except Exception as e:
+                    err_str = str(e)
+                    if "no orders found to match" in err_str.lower():
+                        # FAK rejected — kein Match. Naechster Shot.
+                        if shot < 4:
+                            await asyncio.sleep(0.005)  # 5ms Pause
+                            continue
+                    else:
+                        logger.warning(f"ODA Shot#{shot} Error: {err_str[:80]}")
+                        break
+
+            total_ms = (time.perf_counter() - t0) * 1000
+            status = "FILLED" if filled else "NO_FILL"
+            logger.info(f"ODA BURST DONE: {slug[-15:]} | {status} | total={total_ms:.1f}ms")
 
         except asyncio.CancelledError:
             pass
