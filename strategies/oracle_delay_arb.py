@@ -130,9 +130,8 @@ class OracleDelayArbStrategy(StrategyBase):
         # CLOB WebSocket — lokales RAM-Orderbuch
         self._clob_ws = None  # Initialisiert in run()
 
-        # Binance RAM-Preise: Werden von jedem Tick ueberschrieben (kein Event, kein Lock)
-        # Der Execution-Task liest diese Variable direkt — O(1), <1µs
-        self._latest_price: dict[str, float] = {}  # "BTC/USDT" → mid price
+        # Binance Oracle Referenz — direkter RAM-Read bei Execution
+        self._oracle = None  # Gesetzt in _register_binance_callback()
         self._price_at_window_start: dict[str, float] = {}  # slug → price at start
 
     # ═══════════════════════════════════════════════════════════════
@@ -232,21 +231,21 @@ class OracleDelayArbStrategy(StrategyBase):
             await self.shutdown()
 
     def _register_binance_callback(self) -> None:
-        """Binance Tick → schreibt nur RAM-Variable. Kein Event, kein Lock.
+        """Speichert Referenz zum Binance Oracle fuer direkten RAM-Read bei T+0ms.
 
-        Der Praezisions-Timer liest self._latest_price direkt bei T+0ms.
+        KEIN Callback — liest direkt oracle.get_latest() bei Execution.
+        Vermeidet Callback-Kollision mit HMSF.
         """
         try:
             from dashboard.web_ui import active_strategies
             for sn, st in active_strategies.items():
                 if hasattr(st, "oracle"):
-                    def on_tick(symbol, tick):
-                        self._latest_price[symbol] = tick.mid
-                    st.oracle.set_on_tick(on_tick)
-                    logger.info("ODA: Binance RAM-Preis-Feed registriert (kein Event, nur RAM)")
+                    self._oracle = st.oracle
+                    logger.info("ODA: Binance Oracle Referenz gespeichert (direkter RAM-Read)")
                     return
         except Exception as e:
-            logger.warning(f"ODA: Binance callback registration failed: {e}")
+            logger.warning(f"ODA: Binance oracle reference failed: {e}")
+        self._oracle = None
 
     async def _subscribe_clob_tokens(self) -> None:
         """Subscribed alle aktuellen + naechsten Window Token-IDs auf dem CLOB WS."""
@@ -354,9 +353,10 @@ class OracleDelayArbStrategy(StrategyBase):
 
                     # Snapshot: Binance-Preis JETZT speichern (= Window-Start Referenz)
                     symbol = f"{w['asset']}/USDT"
-                    current_px = self._latest_price.get(symbol, 0)
-                    if current_px > 0:
-                        self._price_at_window_start[slug] = current_px
+                    if self._oracle:
+                        tick = self._oracle.get_latest(symbol)
+                        if tick and tick.mid > 0:
+                            self._price_at_window_start[slug] = tick.mid
 
                     # PLANEN: Dedizierter Timer-Task fuer dieses Window
                     self._scheduled_windows.add(slug)
@@ -404,8 +404,12 @@ class OracleDelayArbStrategy(StrategyBase):
                 self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
                 logger.info(f"ODA PRE-SIGN: {asset} {w['timeframe']} UP+DOWN @ ${pre_price}")
 
-            # Speichere Start-Preis fuer Crossover-Vergleich
-            start_price = self._latest_price.get(symbol, 0)
+            # Speichere Start-Preis fuer Crossover-Vergleich (direkt vom Oracle)
+            start_price = 0.0
+            if self._oracle:
+                tick = self._oracle.get_latest(symbol)
+                if tick:
+                    start_price = tick.mid
             if start_price <= 0:
                 start_price = self._price_at_window_start.get(slug, 0)
 
@@ -421,10 +425,14 @@ class OracleDelayArbStrategy(StrategyBase):
             # ═══ T+0ms: EXECUTION — Zero CPU, nur RAM-Reads + Network I/O ═══
             t0 = time.perf_counter()
 
-            # 1. Binance-Preis aus RAM lesen (<1µs)
-            current_price = self._latest_price.get(symbol, 0)
+            # 1. Binance-Preis direkt vom Oracle lesen (<1µs, kein I/O)
+            current_price = 0.0
+            if self._oracle:
+                tick = self._oracle.get_latest(symbol)
+                if tick:
+                    current_price = tick.mid
             if current_price <= 0 or start_price <= 0:
-                logger.info(f"ODA Skip: {asset} — no price data")
+                logger.info(f"ODA Skip: {asset} — no price data (cur={current_price}, start={start_price})")
                 return
 
             # 2. Winner bestimmen (<1µs)
