@@ -61,6 +61,9 @@ class AutoRedeemer:
         self._ctf = None
         self._last_redeem_time = 0
         self._total_redeemed = 0
+        # Cooldown-Cache: condition_id -> Zeitpunkt ab dem erneuter Versuch erlaubt
+        # Verhindert Gas-Verschwendung durch wiederholte Reverts waehrend UMA Challenge
+        self._cooldown_cache: dict[str, float] = {}
         self._total_redeemed_usd = 0.0
         self._total_merged = 0
         self._total_merged_usd = 0.0
@@ -129,6 +132,8 @@ class AutoRedeemer:
         except Exception as e:
             return {"redeemed": 0, "failed": 0, "error": f"nonce error: {e}"}
 
+        now = time.time()
+
         for pos in positions:
             cid_hex = pos.get("conditionId", "")
             value = pos.get("currentValue", 0)
@@ -137,14 +142,30 @@ class AutoRedeemer:
             if not cid_hex:
                 continue
 
+            # ── COOLDOWN CHECK: Skip wenn in 2h Blacklist ──
+            cooldown_until = self._cooldown_cache.get(cid_hex, 0)
+            if now < cooldown_until:
+                continue  # Leise skippen — bereits geloggt beim Blacklisting
+
+            # ── PAYOUT DENOMINATOR CHECK (isoliertes try/except) ──
+            payout = 0
             try:
                 cid_bytes = bytes.fromhex(cid_hex[2:] if cid_hex.startswith("0x") else cid_hex)
-
-                # Check if resolved
                 payout = self._ctf.functions.payoutDenominator(cid_bytes).call()
-                if payout == 0:
-                    continue
+            except Exception as e:
+                # RPC Fehler → Blacklist fuer 2h (UMA Challenge Period)
+                self._cooldown_cache[cid_hex] = now + 7200
+                logger.warning(f"AutoRedeemer: RPC error for {title} — 2h cooldown. Error: {e}")
+                continue
 
+            if payout == 0:
+                # Markt noch nicht resolved → Blacklist fuer 2h
+                self._cooldown_cache[cid_hex] = now + 7200
+                logger.warning(f"AutoRedeemer: Not resolved ({title}) — 2h cooldown added")
+                continue
+
+            # ── AB HIER: payout > 0 bestätigt → Redeem sicher ──
+            try:
                 gas_price = int(self._w3.eth.gas_price * 1.2)
 
                 tx = self._ctf.functions.redeemPositions(
@@ -169,8 +190,9 @@ class AutoRedeemer:
                     total_value += value
                     tx_hash_hex = tx_hash.hex() if hasattr(tx_hash, 'hex') else str(tx_hash)
                     logger.info(f"AutoRedeemer: ✅ Redeemed ${value:.2f} from {title}")
+                    # Aus Cooldown entfernen bei Erfolg
+                    self._cooldown_cache.pop(cid_hex, None)
 
-                    # JOURNAL CLOSE: Verknüpfe Redemption mit Original-Trade
                     self._log_redemption_to_journal(
                         condition_id=cid_hex,
                         title=pos.get("title", "")[:60],
@@ -181,15 +203,20 @@ class AutoRedeemer:
                     )
                 else:
                     failed += 1
-                    logger.warning(f"AutoRedeemer: ❌ Reverted for {title}")
+                    # TX Reverted trotz payout > 0 → Blacklist 2h
+                    self._cooldown_cache[cid_hex] = now + 7200
+                    logger.warning(f"AutoRedeemer: ❌ Reverted {title} — 2h cooldown")
 
                 current_nonce += 1
                 time.sleep(2)
 
             except Exception as e:
-                logger.error(f"AutoRedeemer: Error redeeming {title}: {e}")
+                error_str = str(e).lower()
+                # Blacklist bei Revert oder unbekanntem Fehler
+                self._cooldown_cache[cid_hex] = now + 7200
+                logger.error(f"AutoRedeemer: Error {title} — 2h cooldown. {str(e)[:100]}")
                 failed += 1
-                if "nonce" in str(e).lower():
+                if "nonce" in error_str:
                     current_nonce += 1
 
         self._total_redeemed += redeemed
