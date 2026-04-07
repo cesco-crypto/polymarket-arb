@@ -32,6 +32,7 @@ from loguru import logger
 
 from config import Settings
 from core.executor import PolymarketExecutor
+from core.market_discovery import MarketDiscovery
 from core.trade_journal import TradeJournal, TradeRecord
 from strategies.base import StrategyBase
 from strategies.registry import register as register_strategy
@@ -110,6 +111,12 @@ class OracleDelayArbStrategy(StrategyBase):
         self.executor = PolymarketExecutor(settings)
         self.journal = TradeJournal()
 
+        # EIGENE MarketDiscovery — autark, keine Abhaengigkeit von anderen Strategien
+        self.discovery = MarketDiscovery(
+            assets=["btc", "eth"],
+            timeframes=["5m", "15m"],
+        )
+
         # Config — Latency Arbitrage: Sub-100ms Execution
         self.trade_size_usd = 5.0          # $5 pro Trade
         self.min_entry_price = 0.05        # Min Preis (Dust Filter)
@@ -169,7 +176,11 @@ class OracleDelayArbStrategy(StrategyBase):
         # Trade-Counter aus Journal laden (verhindert ID-Kollisionen nach Restart)
         self._load_trade_counter()
 
-        logger.info(f"Oracle Delay Arb v4 startet — Sub-100ms Latency Arb (Counter: {self._trade_count})")
+        logger.info(f"ODA v8 startet — Autarke Discovery + Async Execution (Counter: {self._trade_count})")
+
+        # Eigene MarketDiscovery starten (autark, kein momentum_latency_v2 noetig)
+        await self.discovery.start()
+        logger.info(f"ODA: Eigene MarketDiscovery gestartet (BTC+ETH, 5m+15m)")
 
         if self.settings.live_trading:
             live_ok = await self.executor.initialize()
@@ -194,16 +205,8 @@ class OracleDelayArbStrategy(StrategyBase):
         from core.clob_ws import CLOBWebSocket
         self._clob_ws = CLOBWebSocket()
 
-        # Token-IDs SOFORT laden: Discovery + alle kommenden Windows
-        initial_tokens = []
-        try:
-            from dashboard.web_ui import active_strategies
-            for sn, st in active_strategies.items():
-                if hasattr(st, "discovery"):
-                    initial_tokens = st.discovery.get_all_token_ids()
-                    break
-        except Exception:
-            pass
+        # Token-IDs aus eigener Discovery laden
+        initial_tokens = self.discovery.get_all_token_ids()
         # Zusaetzlich: Gamma API fuer kommende Windows
         for w in self._compute_next_window_closes():
             if w["seconds_to_close"] > 0:
@@ -212,7 +215,7 @@ class OracleDelayArbStrategy(StrategyBase):
                     initial_tokens.extend([tids[0], tids[1]])
         if initial_tokens:
             self._clob_ws.subscribe(initial_tokens)
-            logger.info(f"ODA: {len(initial_tokens)} Token-IDs SOFORT subscribed (kein 60s Warten)")
+            logger.info(f"ODA: {len(initial_tokens)} Token-IDs subscribed (eigene Discovery)")
         await self._clob_ws.start()
 
         # Binance Tick-Callback registrieren (Event-Driven Trigger)
@@ -231,34 +234,42 @@ class OracleDelayArbStrategy(StrategyBase):
             await self.shutdown()
 
     def _register_binance_callback(self) -> None:
-        """Speichert Referenz zum Binance Oracle fuer direkten RAM-Read bei T+0ms.
+        """Startet eigenen Binance Oracle oder nutzt einen existierenden.
 
-        KEIN Callback — liest direkt oracle.get_latest() bei Execution.
-        Vermeidet Callback-Kollision mit HMSF.
+        Versucht zuerst eine existierende Referenz zu finden (spart Connections).
+        Falls keine vorhanden: startet eigenen Oracle.
         """
+        # Versuche existierenden Oracle zu finden (spart eine WS Connection)
         try:
             from dashboard.web_ui import active_strategies
             for sn, st in active_strategies.items():
-                if hasattr(st, "oracle"):
+                if hasattr(st, "oracle") and st.oracle:
                     self._oracle = st.oracle
-                    logger.info("ODA: Binance Oracle Referenz gespeichert (direkter RAM-Read)")
+                    logger.info(f"ODA: Binance Oracle shared von {sn}")
                     return
+        except Exception:
+            pass
+
+        # Eigenen Oracle starten (autark)
+        try:
+            from core.binance_ws import BinanceWebSocketOracle
+            self._oracle = BinanceWebSocketOracle(
+                symbols=["BTC/USDT", "ETH/USDT"],
+                window_size_s=600,  # 10min History fuer 5m Window-Start Lookup
+            )
+            asyncio.create_task(self._oracle.start())
+            logger.info("ODA: Eigener Binance Oracle gestartet (BTC+ETH)")
         except Exception as e:
-            logger.warning(f"ODA: Binance oracle reference failed: {e}")
-        self._oracle = None
+            logger.error(f"ODA: Binance Oracle start failed: {e}")
+            self._oracle = None
 
     async def _subscribe_clob_tokens(self) -> None:
-        """Subscribed alle aktuellen + naechsten Window Token-IDs auf dem CLOB WS."""
+        """Subscribed Token-IDs aus eigener Discovery auf dem CLOB WS."""
         try:
-            from dashboard.web_ui import active_strategies
-            for sn, st in active_strategies.items():
-                if not hasattr(st, "discovery"):
-                    continue
-                token_ids = st.discovery.get_all_token_ids()
-                if token_ids:
-                    self._clob_ws.subscribe(token_ids)
-                    logger.info(f"ODA: {len(token_ids)} Token-IDs auf CLOB WS subscribed")
-                return
+            token_ids = self.discovery.get_all_token_ids()
+            if token_ids and self._clob_ws:
+                self._clob_ws.subscribe(token_ids)
+                logger.info(f"ODA: {len(token_ids)} Token-IDs auf CLOB WS subscribed (eigene Discovery)")
         except Exception as e:
             logger.warning(f"ODA: Token subscription failed: {e}")
 
@@ -275,6 +286,10 @@ class OracleDelayArbStrategy(StrategyBase):
 
     async def shutdown(self) -> None:
         self._running = False
+        try:
+            await self.discovery.stop()
+        except Exception:
+            pass
         if self._clob_ws:
             await self._clob_ws.stop()
         if self._session and not self._session.closed:
@@ -494,18 +509,12 @@ class OracleDelayArbStrategy(StrategyBase):
                         if book and book.best_ask > 0:
                             shot_ask = book.best_ask
 
-                    # Tier 2: Discovery Cache
+                    # Tier 2: Eigene Discovery Cache
                     if shot_ask <= 0:
                         try:
-                            from dashboard.web_ui import active_strategies
-                            for sn, st in active_strategies.items():
-                                if not hasattr(st, "discovery"):
-                                    continue
-                                for s, wnd in st.discovery.windows.items():
-                                    if wnd.condition_id == condition_id:
-                                        shot_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
-                                        break
-                                if shot_ask > 0:
+                            for s, wnd in self.discovery.windows.items():
+                                if wnd.condition_id == condition_id:
+                                    shot_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
                                     break
                         except Exception:
                             pass
@@ -562,29 +571,21 @@ class OracleDelayArbStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     async def _get_token_ids(self, slug: str, asset: str) -> tuple | None:
-        """Holt Token-IDs von jeder laufenden Strategie mit MarketDiscovery.
+        """Holt Token-IDs aus der EIGENEN MarketDiscovery (autark).
 
-        Prueft hmsf_decision_engine, momentum_latency_v2, und alle anderen
-        Strategien die ein .discovery Attribut haben. Fallback: Gamma API.
+        Kein Zugriff auf active_strategies — ODA ist self-sufficient.
+        Fallback: Gamma API direkt.
         """
         start_ts = int(slug.split("-")[-1])
 
-        # 1. Versuche von JEDER laufenden Strategie mit Discovery
+        # 1. EIGENE Discovery (self.discovery)
         try:
-            from dashboard.web_ui import active_strategies
-            for strat_name, strat in active_strategies.items():
-                if not hasattr(strat, "discovery"):
-                    continue
-                discovery = strat.discovery
-                if not hasattr(discovery, "windows"):
-                    continue
-                for s, w in discovery.windows.items():
-                    if w.asset.upper() == asset and w.up_token_id and w.down_token_id:
-                        if abs(w.window_start_ts - start_ts) < 30:
-                            logger.debug(f"ODA Token-IDs via {strat_name}: {asset} {slug[-15:]}")
-                            return (w.up_token_id, w.down_token_id, w.condition_id)
+            for s, w in self.discovery.windows.items():
+                if w.asset.upper() == asset and w.up_token_id and w.down_token_id:
+                    if abs(w.window_start_ts - start_ts) < 30:
+                        return (w.up_token_id, w.down_token_id, w.condition_id)
         except Exception as e:
-            logger.warning(f"ODA Discovery lookup error: {e}")
+            logger.warning(f"ODA own Discovery error: {e}")
 
         # 2. Fallback: Gamma API (korrekte Quelle fuer Crypto Markets)
         if not self._session or self._session.closed:
@@ -632,34 +633,25 @@ class OracleDelayArbStrategy(StrategyBase):
         return None
 
     async def _fetch_active_windows(self) -> list[dict]:
-        """Holt aktive 5-Min Windows von jeder Strategie mit MarketDiscovery."""
+        """Holt aktive Windows aus eigener Discovery."""
         try:
-            from dashboard.web_ui import active_strategies
-            for strat_name, strat in active_strategies.items():
-                if not hasattr(strat, "discovery"):
-                    continue
-                discovery = strat.discovery
-                if not hasattr(discovery, "windows") or not discovery.windows:
-                    continue
-                windows = []
-                for slug, w in discovery.windows.items():
-                    windows.append({
-                        "slug": slug,
-                        "asset": w.asset,
-                        "window_end_ts": w.window_end_ts,
-                        "up_token_id": w.up_token_id,
-                        "down_token_id": w.down_token_id,
-                        "condition_id": w.condition_id,
-                        "question": w.question,
-                        "up_best_ask": w.up_best_ask,
-                        "down_best_ask": w.down_best_ask,
-                    })
-                if windows:
-                    return windows
+            windows = []
+            for slug, w in self.discovery.windows.items():
+                windows.append({
+                    "slug": slug,
+                    "asset": w.asset,
+                    "window_end_ts": w.window_end_ts,
+                    "up_token_id": w.up_token_id,
+                    "down_token_id": w.down_token_id,
+                    "condition_id": w.condition_id,
+                    "question": w.question,
+                    "up_best_ask": w.up_best_ask,
+                    "down_best_ask": w.down_best_ask,
+                })
+            if windows:
+                return windows
         except Exception:
             pass
-
-        # Fallback: Fetch direkt von Polymarket
         return await self._fetch_windows_from_api()
 
     async def _fetch_windows_from_api(self) -> list[dict]:
