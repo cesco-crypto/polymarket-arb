@@ -1119,12 +1119,18 @@ class CopyTradingStrategy(StrategyBase):
                 logger.warning(f"Copy Skip (max {self.max_concurrent} Markets erreicht): {name}")
                 continue
 
-            # ── GUARD 6: Balance-Check (nicht ordern wenn Wallet zu leer) ──
+            # ── GUARD 6: Balance-Check mit ODA Capital Reserve ──
+            # ODA hat Prioritaet — 100 USDC sind fuer ODA reserviert
+            ODA_RESERVE_USD = 100.0
             if self.executor.is_live:
                 try:
                     balance = await self.executor.get_balance()
-                    if balance < self.max_copy_size_usd * 1.5:
-                        logger.warning(f"Copy Skip (Balance ${balance:.2f} < ${self.max_copy_size_usd*1.5:.2f}): {name}")
+                    min_required = ODA_RESERVE_USD + self.max_copy_size_usd
+                    if balance < min_required:
+                        logger.warning(
+                            f"Copy Skip (Balance ${balance:.2f} < ${min_required:.2f} "
+                            f"[ODA Reserve ${ODA_RESERVE_USD} + Trade ${self.max_copy_size_usd}]): {name}"
+                        )
                         continue
                 except Exception:
                     pass  # Balance-Check optional, CLOB blockt auch
