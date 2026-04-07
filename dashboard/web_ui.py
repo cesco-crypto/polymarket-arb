@@ -292,19 +292,30 @@ async def shutdown() -> None:
 _last_collect_result: dict = {}
 
 
+# Globaler AutoRedeemer — unabhaengig von aktiven Strategien
+_global_redeemer = None
+
+def _get_global_redeemer():
+    """Lazy-Init: Erstellt den globalen Redeemer einmalig beim ersten Aufruf."""
+    global _global_redeemer
+    if _global_redeemer is None:
+        pk = settings.polymarket_private_key
+        wallet = settings.polymarket_funder
+        if pk and wallet:
+            from core.redeemer import AutoRedeemer
+            _global_redeemer = AutoRedeemer(private_key=pk, wallet_address=wallet)
+            logger.info("Global AutoRedeemer initialisiert (unabhaengig von Strategien)")
+    return _global_redeemer
+
+
 async def _auto_collect_loop() -> None:
-    """Alle 60 Sekunden: Redeem gewonnene Positionen + Merge beide-Seiten-Positionen."""
+    """Alle 60 Sekunden: Redeem gewonnene Positionen — global, strategie-unabhaengig."""
     global _last_collect_result
-    await asyncio.sleep(15)  # Warte auf Strategy-Start
+    await asyncio.sleep(15)  # Warte auf System-Start
 
     while True:
         try:
-            # Finde einen Redeemer in den aktiven Strategien
-            redeemer = None
-            for name, strat in active_strategies.items():
-                if hasattr(strat, "redeemer"):
-                    redeemer = strat.redeemer
-                    break
+            redeemer = _get_global_redeemer()
 
             if redeemer:
                 loop = asyncio.get_event_loop()
