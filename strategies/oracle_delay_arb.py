@@ -193,8 +193,14 @@ class OracleDelayArbStrategy(StrategyBase):
         from core.clob_ws import CLOBWebSocket
         self._clob_ws = CLOBWebSocket()
 
-        # Subscribe Token-IDs fuer aktuelle + kommende Windows
+        # Subscribe Token-IDs SOFORT beim Start (kein 60s Warten)
         await self._subscribe_clob_tokens()
+        # Fallback: Auch direkt aus _compute fuer sofortige Abdeckung
+        for w in self._compute_next_window_closes():
+            if w["seconds_to_close"] > 0:
+                tids = await self._get_token_ids(w["slug"], w["asset"])
+                if tids:
+                    self._clob_ws.subscribe([tids[0], tids[1]])
         await self._clob_ws.start()
 
         # Binance Tick-Callback registrieren (Event-Driven Trigger)
@@ -263,45 +269,45 @@ class OracleDelayArbStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     def _compute_next_window_closes(self) -> list[dict]:
-        """Berechnet die nächsten Window-Close-Zeiten (5-Min Intervall).
-
-        Polymarket 5-Min Windows starten alle 5 Minuten (aligned to epoch).
-        Window start = floor(time / 300) * 300
-        Window end = start + 300
-        """
+        """Berechnet Window-Close-Zeiten fuer 5m UND 15m Intervalle."""
         now = time.time()
-        interval = 300  # 5 Minuten
         results = []
 
-        # Letzte 3 abgelaufene Windows + nächste 2 kommende
-        base_ts = int(now // interval) * interval
-        for offset in range(-3, 2):
-            start_ts = base_ts + offset * interval
-            end_ts = start_ts + interval
-            seconds_since_close = now - end_ts
+        for interval in [300, 900]:  # 5m + 15m
+            tf = "5m" if interval == 300 else "15m"
+            base_ts = int(now // interval) * interval
+            for offset in range(-2, 2):
+                start_ts = base_ts + offset * interval
+                end_ts = start_ts + interval
+                seconds_since_close = now - end_ts
+                seconds_to_close = end_ts - now
 
-            for asset in ["btc", "eth"]:
-                slug = f"{asset}-updown-5m-{start_ts}"
-                results.append({
-                    "slug": slug,
-                    "asset": asset.upper(),
-                    "window_start_ts": start_ts,
-                    "window_end_ts": end_ts,
-                    "seconds_since_close": seconds_since_close,
-                })
+                for asset in ["btc", "eth"]:
+                    slug = f"{asset}-updown-{tf}-{start_ts}"
+                    results.append({
+                        "slug": slug,
+                        "asset": asset.upper(),
+                        "timeframe": tf,
+                        "interval": interval,
+                        "window_start_ts": start_ts,
+                        "window_end_ts": end_ts,
+                        "seconds_since_close": seconds_since_close,
+                        "seconds_to_close": seconds_to_close,
+                    })
         return results
 
     async def _main_loop(self) -> None:
-        """Event-Driven Hauptloop: Reagiert auf Binance-Ticks, sniped bei Window-Close.
+        """Event-Driven Hauptloop mit Pre-Sign Phase.
 
-        Kein Polling, kein kuenstliches Delay — wacht bei jedem Binance-Tick auf
-        und prueft ob ein Window gerade geschlossen hat.
+        Phase 1 (10-15s vor Close): Pre-sign 2 Orders (UP + DOWN)
+        Phase 2 (0ms nach Close): Binance Crossover → push Pre-Signed Order
         """
-        logger.info("ODA Main-Loop gestartet (EVENT-DRIVEN, 0ms delay)")
+        logger.info("ODA Main-Loop gestartet (EVENT-DRIVEN + PRE-SIGN)")
+        self._pre_signed_for: set[str] = set()  # Slugs mit Pre-Signed Orders
 
         while self._running:
             try:
-                # Block bis Binance-Tick kommt (oder 1s Timeout als Heartbeat)
+                # Block bis Binance-Tick (oder 1s Heartbeat)
                 try:
                     await asyncio.wait_for(self._tick_event.wait(), timeout=1.0)
                 except asyncio.TimeoutError:
@@ -309,6 +315,34 @@ class OracleDelayArbStrategy(StrategyBase):
                 self._tick_event.clear()
 
                 windows = self._compute_next_window_closes()
+
+                # ── PRE-SIGN PHASE: 10-15s vor Close beide Orders vorbereiten ──
+                for w in windows:
+                    slug = w["slug"]
+                    secs_to = w["seconds_to_close"]
+                    if not (5 < secs_to < 15):
+                        continue  # Nur 5-15s vor Close
+                    if slug in self._pre_signed_for:
+                        continue  # Schon pre-signed
+
+                    asset = w["asset"]
+                    token_ids = await self._get_token_ids(slug, asset)
+                    if not token_ids:
+                        continue
+                    up_tid, down_tid, _ = token_ids
+
+                    # Pre-Sign BEIDE Seiten bei max_entry_price
+                    pre_price = 0.75  # Aggressiver Preis — hoher Edge
+                    if self.executor.is_live:
+                        self.executor.pre_sign_order(up_tid, pre_price, self.trade_size_usd)
+                        self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
+                        self._pre_signed_for.add(slug)
+                        logger.info(
+                            f"ODA PRE-SIGN: {asset} {w['timeframe']} | "
+                            f"UP+DOWN @ ${pre_price} | close in {secs_to:.0f}s"
+                        )
+
+                # ── EXECUTION PHASE: Window gerade geschlossen ──
 
                 for w in windows:
                     slug = w["slug"]
