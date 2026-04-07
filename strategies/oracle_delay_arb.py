@@ -796,9 +796,7 @@ class OracleDelayArbStrategy(StrategyBase):
         net_ev_pct = (1.0 / ask_price - 1.0) * 100 - fee_pct
         filled = False
 
-        # LIVE Order — FIRE AND FORGET (kein Sleep, kein Fill-Check)
-        # FAK Order wird sofort gefuellt oder gekillt. Kein Warten noetig.
-        # PnL-Verifikation passiert spaeter durch AutoRedeemer (on-chain).
+        # LIVE Order — Async mit ehrlicher Response-Validierung
         if self.executor.is_live and token_id:
             try:
                 res = await self.executor.place_order_async(
@@ -809,15 +807,19 @@ class OracleDelayArbStrategy(StrategyBase):
                     asset=asset,
                     direction=winner,
                 )
-                if res.success:
+                if res.success and res.order_id and res.order_id != "unknown":
                     trade.live_order_id = res.order_id
                     trade.live_success = True
                     filled = True
-                    logger.info(f"SNIPE FIRED: {trade_id} — {res.order_id} (FAK fire-and-forget)")
+                    logger.info(
+                        f"SNIPE CONFIRMED: {trade_id} — {res.order_id} | "
+                        f"{res.latency_ms:.0f}ms | BLOCKCHAIN-VERIFIZIERT"
+                    )
                 else:
-                    logger.error(f"SNIPE FAILED: {trade_id} — {res.error}")
+                    error = res.error or "unknown error"
+                    logger.error(f"SNIPE REJECTED: {trade_id} — {error} ({res.latency_ms:.0f}ms)")
             except Exception as e:
-                logger.error(f"SNIPE EXCEPTION: {trade_id} — {e}")
+                logger.error(f"SNIPE EXCEPTION: {trade_id} — {type(e).__name__}: {e}")
 
         # Telegram Alert
         status_emoji = "✅" if filled else "📋"

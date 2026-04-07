@@ -351,12 +351,13 @@ class PolymarketExecutor:
         asset: str = "",
         direction: str = "",
     ) -> "ExecutionResult":
-        """Asynchrone Order-Execution via aiohttp — kein sync requests, kein Sleep.
+        """Asynchrone Order-Execution via aiohttp — mit ehrlichem Error-Logging.
 
-        Baut die Order mit py-clob-client (Signing), sendet sie aber
-        ueber die persistente aiohttp Session statt sync requests.post().
+        Baut die Order mit py-clob-client (Signing), sendet sie ueber
+        die persistente aiohttp Session. Wartet auf API-Response und
+        validiert das Ergebnis BEVOR 'success' gemeldet wird.
         """
-        if not self.is_live:
+        if not self.is_live or not self._client:
             return ExecutionResult(success=False, error="Executor nicht initialisiert")
 
         import math
@@ -370,34 +371,23 @@ class PolymarketExecutor:
         safe_size = math.floor(size_shares)
 
         if safe_size < self.MIN_SHARES:
-            return ExecutionResult(success=False, error=f"Size too small: {safe_size}")
+            return ExecutionResult(success=False, error=f"Size too small: {safe_size} < {self.MIN_SHARES}")
 
         t0 = time.perf_counter()
 
         try:
-            # 1. Pre-Signed Order nutzen oder neu signieren
-            pre_signed_data = self._pre_signed_orders.pop(token_id, None)
-            if pre_signed_data:
-                signed_price = pre_signed_data["signed_price"]
-                price_drift = abs(signed_price - price) / price if price > 0 else 1.0
-                if price_drift <= self.MAX_PRE_SIGN_PRICE_DRIFT:
-                    order = pre_signed_data["order"]
-                else:
-                    pre_signed_data = None
+            # 1. IMMER frisch signieren (Pre-Sign hat Kompatibilitaetsprobleme)
+            order_args = OrderArgs(
+                token_id=token_id, price=safe_price, size=safe_size, side=order_side,
+            )
+            signed_order = self._client.create_order(order_args)
 
-            if not pre_signed_data:
-                order_args = OrderArgs(
-                    token_id=token_id, price=safe_price, size=safe_size, side=order_side,
-                )
-                order = self._client.create_order(order_args)
-
-            # 2. Build HTTP Request (gleiche Logik wie py-clob-client)
+            # 2. Build HTTP Request (exakte py-clob-client Logik)
             from py_clob_client.order_builder.helpers import order_to_json
             from py_clob_client.headers.headers import create_level_2_headers
-            from py_clob_client.signer import Signer
             from py_clob_client.clob_types import RequestArgs
 
-            body = order_to_json(order, self._creds.api_key, OrderType.FAK, False)
+            body = order_to_json(signed_order, self._creds.api_key, OrderType.FAK, False)
             serialized = _json.dumps(body, separators=(",", ":"), ensure_ascii=False)
             request_args = RequestArgs(
                 method="POST",
@@ -408,38 +398,54 @@ class PolymarketExecutor:
             headers = create_level_2_headers(self._client.signer, self._creds, request_args)
             headers["Content-Type"] = "application/json"
 
-            # 3. ASYNC POST via persistente aiohttp Session
+            sign_ms = (time.perf_counter() - t0) * 1000
+
+            # 3. ASYNC POST — await Response und validiere
             session = await self._get_async_session()
+            t1 = time.perf_counter()
             async with session.post(
                 "https://clob.polymarket.com/order",
                 headers=headers,
                 data=serialized,
             ) as resp:
-                resp_data = await resp.json()
+                status_code = resp.status
+                resp_text = await resp.text()
+                try:
+                    resp_data = _json.loads(resp_text)
+                except Exception:
+                    resp_data = {"error": resp_text[:200]}
 
-            latency_ms = (time.perf_counter() - t0) * 1000
-            self._last_exec_latency_ms = latency_ms
+            network_ms = (time.perf_counter() - t1) * 1000
+            total_ms = (time.perf_counter() - t0) * 1000
+            self._last_exec_latency_ms = total_ms
 
-            if resp.status == 200:
+            # 4. Ehrliche Validierung
+            if status_code == 200 and "orderID" in resp_data:
                 order_id = resp_data.get("orderID", resp_data.get("id", "unknown"))
                 self._orders_placed += 1
                 self._total_volume_usd += size_usd
                 logger.info(
-                    f"ASYNC ORDER: {asset} {direction} @ {price:.3f} | "
-                    f"${size_usd:.2f} | {latency_ms:.0f}ms | {order_id}"
+                    f"ASYNC ORDER OK: {asset} {direction} @ {price:.3f} | "
+                    f"${size_usd:.2f} | sign={sign_ms:.0f}ms net={network_ms:.0f}ms total={total_ms:.0f}ms | {order_id}"
                 )
                 return ExecutionResult(
                     success=True, order_id=str(order_id),
                     filled_price=price, filled_size=size_usd,
-                    latency_ms=round(latency_ms, 1),
+                    latency_ms=round(total_ms, 1),
                 )
             else:
-                error = str(resp_data.get("error", resp_data))[:200]
-                return ExecutionResult(success=False, error=error, latency_ms=round(latency_ms, 1))
+                error = str(resp_data.get("error", resp_data))[:300]
+                logger.error(
+                    f"ASYNC ORDER REJECTED [{status_code}]: {asset} {direction} @ {price:.3f} | "
+                    f"sign={sign_ms:.0f}ms net={network_ms:.0f}ms | ERROR: {error}"
+                )
+                return ExecutionResult(success=False, error=error, latency_ms=round(total_ms, 1))
 
         except Exception as e:
-            latency_ms = (time.perf_counter() - t0) * 1000
-            return ExecutionResult(success=False, error=str(e)[:200], latency_ms=round(latency_ms, 1))
+            total_ms = (time.perf_counter() - t0) * 1000
+            error_msg = f"{type(e).__name__}: {str(e)[:200]}"
+            logger.error(f"ASYNC ORDER EXCEPTION: {asset} {direction} @ {price:.3f} | {total_ms:.0f}ms | {error_msg}")
+            return ExecutionResult(success=False, error=error_msg, latency_ms=round(total_ms, 1))
 
     # Polygon RPCs mit Fallback (getestet 02.04.2026)
     POLYGON_RPCS = [
