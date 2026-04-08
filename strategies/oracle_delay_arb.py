@@ -120,7 +120,7 @@ class OracleDelayArbStrategy(StrategyBase):
         # Config — Latency Arbitrage: Sub-100ms Execution
         self.trade_size_usd = 5.0          # $5 pro Trade
         self.min_entry_price = 0.05        # Min Preis (Dust Filter)
-        self.max_entry_price = 0.95        # Max 0.95 (darueber = kein Edge)
+        self.max_entry_price = 0.93        # Max 0.93 (Latenz-Filter: nur fruehe Fills mit fettem Edge)
         self.delay_after_close_s = 0.0     # 0ms Delay — rein event-driven!
         self.max_delay_s = 15.0            # Max 15s nach Close (Fenster ist ~2.7s median)
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
@@ -493,6 +493,15 @@ class OracleDelayArbStrategy(StrategyBase):
                 winner_tid = down_tid
 
             price_change_pct = (current_price - start_price) / start_price * 100
+
+            # ═══ ANTI-NOISE GUARD (Deadzone) ═══
+            # Bei < 0.01% Delta ist Winner-Bestimmung Rauschen → UMA Oracle unberechenbar
+            if abs(price_change_pct) < 0.01:
+                logger.info(
+                    f"ODA CANCEL: {asset} | Price movement too small "
+                    f"({price_change_pct:+.4f}%) -> UMA Oracle Trap avoided"
+                )
+                return
 
             # Dedup
             if slug in self._sniped_windows:
