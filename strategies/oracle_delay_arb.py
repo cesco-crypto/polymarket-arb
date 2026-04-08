@@ -497,8 +497,20 @@ class OracleDelayArbStrategy(StrategyBase):
             # Dedup
             if slug in self._sniped_windows:
                 return
+
+            # Auto-Resolve: Trades aelter als 10 Min → resolved (Sicherheitsnetz)
+            now_gc = time.time()
+            for t in self._trades:
+                if not t.resolved and (now_gc - t.timestamp) > 600:
+                    t.resolved = True
+                    logger.debug(f"ODA GC: {t.trade_id} auto-resolved (>10min)")
+
             active = sum(1 for t in self._trades if not t.resolved)
             if active >= self.max_concurrent:
+                logger.warning(
+                    f"ODA BLOCKED: max concurrent ({self.max_concurrent}) erreicht "
+                    f"({active} active). Ueberspringe {asset} {slug[-15:]}"
+                )
                 return
             self._sniped_windows.add(slug)
 
@@ -834,6 +846,7 @@ class OracleDelayArbStrategy(StrategyBase):
                 if res.success and res.order_id and res.order_id != "unknown":
                     trade.live_order_id = res.order_id
                     trade.live_success = True
+                    trade.resolved = True  # Sofort resolved — PnL kommt vom Redeemer
                     filled = True
                     logger.info(
                         f"SNIPE CONFIRMED: {trade_id} — {res.order_id} | "
@@ -841,9 +854,15 @@ class OracleDelayArbStrategy(StrategyBase):
                     )
                 else:
                     error = res.error or "unknown error"
+                    trade.resolved = True  # Auch bei Reject resolved (Slot freigeben)
                     logger.error(f"SNIPE REJECTED: {trade_id} — {error} ({res.latency_ms:.0f}ms)")
             except Exception as e:
-                logger.error(f"SNIPE EXCEPTION: {trade_id} — {type(e).__name__}: {e}")
+                trade.resolved = True  # Bei Exception resolved (Slot freigeben)
+                import traceback
+                logger.error(
+                    f"SNIPE EXCEPTION: {trade_id} — {type(e).__name__}: {e}\n"
+                    f"{traceback.format_exc()}"
+                )
 
         # Telegram Alert
         status_emoji = "✅" if filled else "📋"
