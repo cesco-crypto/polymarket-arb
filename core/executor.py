@@ -14,6 +14,8 @@ Architektur:
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import os
 import time
 from dataclasses import dataclass
@@ -380,7 +382,10 @@ class PolymarketExecutor:
             order_args = OrderArgs(
                 token_id=token_id, price=safe_price, size=safe_size, side=order_side,
             )
-            signed_order = self._client.create_order(order_args)
+            loop = asyncio.get_running_loop()
+            signed_order = await loop.run_in_executor(
+                None, functools.partial(self._client.create_order, order_args)
+            )
 
             # 2. Build HTTP Request (exakte py-clob-client Logik)
             from py_clob_client.utilities import order_to_json

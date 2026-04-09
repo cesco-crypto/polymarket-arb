@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
+try:
+    import orjson
+    _json_loads = orjson.loads
+except ImportError:
+    import json
+    _json_loads = json.loads
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -176,9 +181,9 @@ class BinanceWebSocketOracle:
                         if not self._running:
                             break
                         try:
-                            msg = json.loads(raw)
+                            msg = _json_loads(raw)
                             self._handle_message(symbol, msg)
-                        except (json.JSONDecodeError, KeyError) as e:
+                        except (ValueError, KeyError) as e:
                             logger.debug(f"Parse-Fehler {symbol}: {e}")
 
             except asyncio.CancelledError:

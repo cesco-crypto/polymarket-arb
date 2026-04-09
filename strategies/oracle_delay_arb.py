@@ -308,6 +308,32 @@ class OracleDelayArbStrategy(StrategyBase):
                 pass
             await asyncio.sleep(45)
 
+    async def _track_markout(self, trade_id: str, asset: str,
+                             entry_binance_price: float) -> None:
+        """Fire-and-forget: Misst BINANCE-Preisentwicklung nach Fill.
+
+        Vergleicht Binance-Preis bei Entry mit Binance-Preis nach 1s, 5s, 10s.
+        NICHT Polymarket-Token vs Binance (verschiedene Preis-Domaenen!).
+        """
+        try:
+            symbol = f"{asset}/USDT"
+            markouts = {}
+            # DELTAS: sleep(1)=1s total, sleep(4)=5s total, sleep(5)=10s total
+            for sleep_delta, label in [(1, "1s"), (4, "5s"), (5, "10s")]:
+                await asyncio.sleep(sleep_delta)
+                if not self._running or not self._oracle:
+                    break
+                tick = self._oracle.get_latest(symbol)
+                if tick and entry_binance_price > 0:
+                    pct = (tick.mid - entry_binance_price) / entry_binance_price * 100
+                    markouts[label] = round(pct, 4)
+            if markouts:
+                logger.info(f"ODA MARKOUT {trade_id}: {markouts}")
+        except asyncio.CancelledError:
+            return  # Sauberer Shutdown — Task wird vom Event-Loop abgebrochen
+        except Exception as e:
+            logger.debug(f"ODA MARKOUT {trade_id} error: {e}")
+
     async def shutdown(self) -> None:
         self._running = False
         try:
@@ -476,10 +502,14 @@ class OracleDelayArbStrategy(StrategyBase):
 
             # 1. Winner bestimmen (einmalig, <1µs)
             current_price = 0.0
+            tick_age_ms = 0.0
+            entry_binance_price = 0.0
             if self._oracle:
                 tick = self._oracle.get_latest(symbol)
                 if tick:
                     current_price = tick.mid
+                    entry_binance_price = tick.mid
+                    tick_age_ms = (time.time() - tick.timestamp) * 1000
 
             if current_price <= 0 or start_price <= 0:
                 logger.info(f"ODA Skip: {asset} — no price data")
@@ -528,7 +558,7 @@ class OracleDelayArbStrategy(StrategyBase):
             logger.info(
                 f"ODA BURST: {asset} {winner} | "
                 f"Binance {start_price:.2f}->{current_price:.2f} ({price_change_pct:+.4f}%) | "
-                f"decision={decision_us:.0f}us | firing 5 FAK shots..."
+                f"tick_age={tick_age_ms:.1f}ms | decision={decision_us:.0f}us | firing 5 FAK shots..."
             )
 
             # 2. BURST-FIRE: 5 FAK Orders, Fire-and-Forget, 5ms Abstand
@@ -580,7 +610,9 @@ class OracleDelayArbStrategy(StrategyBase):
                     shot_t = (time.perf_counter() - t0) * 1000
 
                     # FIRE!
-                    await self._execute_snipe(window_data, winner, winner_tid, shot_ask)
+                    await self._execute_snipe(window_data, winner, winner_tid, shot_ask,
+                                              entry_binance_price=entry_binance_price,
+                                              tick_age_ms=tick_age_ms)
                     filled = True
 
                     logger.info(
@@ -794,7 +826,8 @@ class OracleDelayArbStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     async def _execute_snipe(
-        self, window: dict, winner: str, token_id: str, ask_price: float
+        self, window: dict, winner: str, token_id: str, ask_price: float,
+        entry_binance_price: float = 0.0, tick_age_ms: float = 0.0,
     ) -> None:
         """Führt den Oracle Delay Snipe aus."""
         self._trade_count += 1
@@ -861,6 +894,11 @@ class OracleDelayArbStrategy(StrategyBase):
                         f"SNIPE CONFIRMED: {trade_id} — {res.order_id} | "
                         f"{res.latency_ms:.0f}ms | BLOCKCHAIN-VERIFIZIERT"
                     )
+                    # Markout Tracking — Fire-and-Forget (blockiert NICHT den Trading-Loop)
+                    if entry_binance_price > 0:
+                        asyncio.create_task(
+                            self._track_markout(trade_id, asset, entry_binance_price)
+                        )
                 else:
                     error = res.error or "unknown error"
                     trade.resolved = True  # Auch bei Reject resolved (Slot freigeben)
@@ -903,6 +941,7 @@ class OracleDelayArbStrategy(StrategyBase):
             pnl_usd=0.0,              # Kein PnL bis Redeem!
             pnl_pct=0.0,              # Kein PnL bis Redeem!
             outcome_correct=False,     # Nicht bestaetigt bis Redeem!
+            signal_to_order_ms=tick_age_ms,  # Alter des Binance-Ticks bei Decision
             order_type="oracle_delay_arb",
             live_order_id=trade.live_order_id,
             live_order_success=trade.live_success,
