@@ -126,6 +126,9 @@ class OracleDelayArbStrategy(StrategyBase):
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
         self.deadzone_pct = 0.05           # Deadzone: < 0.05% Binance-Move = Noise (war 0.01%)
 
+        # Volatility Tracking (fuer Regime-Detection)
+        self._recent_deltas: deque = deque(maxlen=20)
+
         # State
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
@@ -538,6 +541,34 @@ class OracleDelayArbStrategy(StrategyBase):
                 )
                 return
 
+            # ═══ SIGNAL-TIER + REGIME (Measurement Layer) ═══
+            abs_delta = abs(price_change_pct)
+            self._recent_deltas.append(abs_delta)
+            median_delta = sorted(self._recent_deltas)[len(self._recent_deltas) // 2] if len(self._recent_deltas) >= 3 else 0.05
+
+            if abs_delta >= 0.20 and tick_age_ms < 150:
+                signal_tier = "STRONG"
+            elif abs_delta >= 0.10 and tick_age_ms < 300:
+                signal_tier = "MID"
+            else:
+                signal_tier = "LOW"
+
+            if abs_delta > 0.15 and abs_delta > median_delta * 2:
+                regime_tag = "HIGH_VOL"
+            elif abs_delta > median_delta:
+                regime_tag = "MID_VOL"
+            else:
+                regime_tag = "LOW_VOL"
+
+            # Spread aus CLOB Book (wenn verfügbar)
+            spread_pct = 0.0
+            best_bid_at_event = 0.0
+            if self._clob_ws:
+                book = self._clob_ws.get_book(winner_tid)
+                if book and book.best_bid > 0 and book.best_ask > 0:
+                    best_bid_at_event = book.best_bid
+                    spread_pct = (book.best_ask - book.best_bid) / book.best_ask * 100
+
             # Dedup
             if slug in self._sniped_windows:
                 return
@@ -560,10 +591,12 @@ class OracleDelayArbStrategy(StrategyBase):
 
             decision_us = (time.perf_counter() - t0) * 1_000_000
 
+            event_progress_ms = (time.perf_counter() - t0) * 1000  # Approx, ±10-50ms drift
             logger.info(
                 f"ODA BURST: {asset} {winner} | "
                 f"Binance {start_price:.2f}->{current_price:.2f} ({price_change_pct:+.4f}%) | "
-                f"tick_age={tick_age_ms:.1f}ms | decision={decision_us:.0f}us | firing 5 FAK shots..."
+                f"tick_age={tick_age_ms:.1f}ms | signal={signal_tier} | progress={event_progress_ms:.0f}ms | "
+                f"spread={spread_pct:.1f}% | {regime_tag} | firing 5 FAK shots..."
             )
 
             # 2. BURST-FIRE: 5 FAK Orders, Fire-and-Forget, 5ms Abstand
@@ -621,21 +654,25 @@ class OracleDelayArbStrategy(StrategyBase):
                     await self._execute_snipe(window_data, winner, winner_tid, shot_ask,
                                               entry_binance_price=entry_binance_price,
                                               tick_age_ms=tick_age_ms,
-                                              price_change_pct=price_change_pct)
+                                              price_change_pct=price_change_pct,
+                                              signal_tier=signal_tier,
+                                              regime_tag=regime_tag,
+                                              spread_pct=spread_pct)
                     filled = True
 
                     logger.info(
                         f"ODA Shot#{shot}: {asset} {winner} @ ${shot_ask:.3f} | "
                         f"edge={edge_pct:.1f}% | t={shot_t:.1f}ms"
                     )
-                    logger.info(f"ODA FILL: ask=${shot_ask:.3f} cap=${self.max_entry_price} edge={edge_pct:.1f}% | FILLED")
+                    logger.info(f"ODA FILL: ask=${shot_ask:.3f} cap=${self.max_entry_price} edge={edge_pct:.1f}% signal={signal_tier} spread={spread_pct:.1f}% | FILLED")
                     break  # Erster erfolgreicher Shot genuegt
 
                 except Exception as e:
                     err_str = str(e)
                     if "no orders found to match" in err_str.lower():
                         # FAK rejected — kein Match. Naechster Shot.
-                        logger.info(f"ODA REJECT: Shot#{shot} ask=${shot_ask:.3f} cap=${self.max_entry_price} | FAK_REJECT")
+                        reject_ms = (time.perf_counter() - t0) * 1000
+                        logger.info(f"ODA EXECUTION_FAIL: Shot#{shot} ask=${shot_ask:.3f} | liq=True | signal={signal_tier} | total={reject_ms:.0f}ms")
                         if shot < 4:
                             await asyncio.sleep(0.005)  # 5ms Pause
                             continue
@@ -839,7 +876,8 @@ class OracleDelayArbStrategy(StrategyBase):
     async def _execute_snipe(
         self, window: dict, winner: str, token_id: str, ask_price: float,
         entry_binance_price: float = 0.0, tick_age_ms: float = 0.0,
-        price_change_pct: float = 0.0,
+        price_change_pct: float = 0.0, signal_tier: str = "LOW",
+        regime_tag: str = "", spread_pct: float = 0.0,
     ) -> None:
         """Führt den Oracle Delay Snipe aus."""
         self._trade_count += 1
@@ -932,7 +970,7 @@ class OracleDelayArbStrategy(StrategyBase):
         asyncio.create_task(telegram.send_alert(
             f"🎯 <b>SNIPE #{self._trade_count} {fill_icon}</b>\n"
             f"{asset} {winner} @ ${ask_price:.3f} | ${self.trade_size_usd:.2f}\n"
-            f"Edge: {net_ev_pct:.1f}% | Fee: {fee_pct:.2f}%\n"
+            f"Edge: {net_ev_pct:.1f}% | Fee: {fee_pct:.2f}% | {signal_tier}\n"
             f"⚡ {latency:.0f}ms | tick: {tick_age_ms:.0f}ms | Δ{price_change_pct:+.3f}%\n"
             f"{mode}"
         ))
@@ -960,11 +998,16 @@ class OracleDelayArbStrategy(StrategyBase):
             live_order_id=trade.live_order_id,
             live_order_success=trade.live_success,
             condition_id=condition_id,
-            # Forensik-Metriken (neu: fuer PnL-Attribution)
+            # Forensik-Metriken (fuer PnL-Attribution + Signal-Tier Analyse)
             raw_edge_pct=raw_edge,
             tick_age_ms=tick_age_ms,
             momentum_pct=price_change_pct,
             oracle_price_entry=entry_binance_price,
+            confidence_score={"STRONG": 3, "MID": 2, "LOW": 1}.get(signal_tier, 0),
+            regime_tag=regime_tag,
+            spread_pct=spread_pct,
+            fill_type="FILLED" if filled else "",
+            transit_latency_ms=order_latency_ms,
         ))
 
     async def _check_fill(self, order_id: str) -> str:
