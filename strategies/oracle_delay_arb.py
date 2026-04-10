@@ -475,7 +475,7 @@ class OracleDelayArbStrategy(StrategyBase):
                 return
 
             # Pre-Sign BEIDE Seiten
-            pre_price = 0.75
+            pre_price = 0.85  # Optimiert fuer profitable Zone $0.81-$0.89 (war 0.75)
             if self.executor.is_live:
                 self.executor.pre_sign_order(up_tid, pre_price, self.trade_size_usd)
                 self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
