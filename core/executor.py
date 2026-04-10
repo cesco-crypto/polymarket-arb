@@ -114,6 +114,18 @@ class PolymarketExecutor:
             self._ready = True
             logger.info("Executor: LIVE MODE AKTIV — echte Orders werden platziert!")
 
+            # Balance-Check: Safe + EOA beim Start
+            try:
+                from web3 import Web3
+                w3 = Web3(Web3.HTTPProvider("https://polygon.gateway.tenderly.co", request_kwargs={"timeout": 5}))
+                usdc_abi = [{"constant":True,"inputs":[{"name":"a","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"type":"function"}]
+                usdc = w3.eth.contract(address=Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"), abi=usdc_abi)
+                funder_bal = usdc.functions.balanceOf(Web3.to_checksum_address(effective_funder)).call() / 1e6
+                max_trades = int(funder_bal / self.settings.max_live_position_usd)
+                logger.info(f"Executor: Balance ${funder_bal:.2f} ({max_trades} trades à ${self.settings.max_live_position_usd})")
+            except Exception:
+                pass  # Balance-Check ist optional
+
             return True
 
         except Exception as e:

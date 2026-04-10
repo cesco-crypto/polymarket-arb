@@ -233,10 +233,15 @@ class AutoRedeemer:
         oldest = min((p.get("_checked_at", now) for p in self._pending_batch), default=now)
         batch_age = now - oldest
 
-        should_flush = (
-            len(self._pending_batch) > 0
-            and (batch_value >= self.BATCH_MIN_USD or batch_age >= self.BATCH_TTL_S)
-        )
+        if self._use_relayer:
+            # Gasless: sofort flushen, kein Batching noetig
+            should_flush = len(self._pending_batch) > 0
+        else:
+            # EOA: Gas-optimiert batchen
+            should_flush = (
+                len(self._pending_batch) > 0
+                and (batch_value >= self.BATCH_MIN_USD or batch_age >= self.BATCH_TTL_S)
+            )
 
         if not should_flush:
             pending_count = len(self._pending_batch)
@@ -248,6 +253,10 @@ class AutoRedeemer:
             return {"redeemed": 0, "failed": 0, "pending": pending_count, "pending_usd": round(batch_value, 2)}
 
         # ── FLUSH: Sende einzelne TXs (kein atomic MultiSend) ──
+        if self._use_relayer and not self._relay_client:
+            logger.error("AutoRedeemer: Relayer aktiv aber nicht initialisiert — Redeem blockiert")
+            return {"redeemed": 0, "failed": 0, "error": "relayer not initialized"}
+
         logger.info(f"AutoRedeemer: FLUSH {len(self._pending_batch)} positions (${batch_value:.1f})")
 
         wallet = Web3.to_checksum_address(self._wallet)
