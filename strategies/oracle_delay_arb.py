@@ -885,6 +885,7 @@ class OracleDelayArbStrategy(StrategyBase):
         expected_pnl = shares * (1.0 - ask_price) - fee_usd
         net_ev_pct = (1.0 / ask_price - 1.0) * 100 - fee_pct
         filled = False
+        order_latency_ms = 0.0
 
         # LIVE Order — Async mit ehrlicher Response-Validierung
         if self.executor.is_live and token_id:
@@ -902,6 +903,7 @@ class OracleDelayArbStrategy(StrategyBase):
                     trade.live_success = True
                     trade.resolved = True  # Sofort resolved — PnL kommt vom Redeemer
                     filled = True
+                    order_latency_ms = res.latency_ms
                     logger.info(
                         f"SNIPE CONFIRMED: {trade_id} — {res.order_id} | "
                         f"{res.latency_ms:.0f}ms | BLOCKCHAIN-VERIFIZIERT"
@@ -923,17 +925,16 @@ class OracleDelayArbStrategy(StrategyBase):
                     f"{traceback.format_exc()}"
                 )
 
-        # Telegram Alert
-        status_emoji = "✅" if filled else "📋"
-        order_ref = f"\n🔗 Order: {trade.live_order_id[:20]}..." if trade.live_order_id else ""
+        # Telegram Alert — nur echte Daten, keine Annahmen
+        fill_icon = "✅ FILLED" if filled else "❌ REJECTED"
+        mode = "LIVE" if trade.live_order_id else "PAPER"
+        latency = order_latency_ms
         asyncio.create_task(telegram.send_alert(
-            f"🎯 <b>{status_emoji} ORACLE SNIPE #{self._trade_count}</b>\n"
-            f"{'─'*26}\n"
-            f"📊 {asset} {winner} @ {ask_price:.3f}\n"
-            f"💰 Size: ${self.trade_size_usd:.2f} ({shares} shares)\n"
-            f"📈 Expected: ${expected_pnl:.3f} ({net_ev_pct:.2f}%)\n"
-            f"💸 Fee: {fee_pct:.2f}% (${fee_usd:.3f})\n"
-            f"📍 {slug[:35]}{order_ref}"
+            f"🎯 <b>SNIPE #{self._trade_count} {fill_icon}</b>\n"
+            f"{asset} {winner} @ ${ask_price:.3f} | ${self.trade_size_usd:.2f}\n"
+            f"Edge: {net_ev_pct:.1f}% | Fee: {fee_pct:.2f}%\n"
+            f"⚡ {latency:.0f}ms | tick: {tick_age_ms:.0f}ms | Δ{price_change_pct:+.3f}%\n"
+            f"{mode}"
         ))
 
         # Journal — NUR open Event. PnL=0 bis AutoRedeemer on-chain bestaetigt.

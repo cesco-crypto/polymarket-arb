@@ -214,9 +214,11 @@ class TradeJournal:
         rec.event = "open"
         self._records.append(rec)
         self._append_to_file(rec)
-        asyncio.create_task(self._safe_async(self._send_telegram_open(rec), "telegram_open"))
+        # ODA sendet eigene SNIPE-Telegram — kein doppeltes JOURNAL OPEN noetig
+        if rec.order_type != "oracle_delay_arb":
+            asyncio.create_task(self._safe_async(self._send_telegram_open(rec), "telegram_open"))
         asyncio.create_task(self._safe_async(db.insert_trade(asdict(rec)), "supabase_open"))
-        logger.info(f"JOURNAL OPEN: {rec.trade_id} | RAM + JSONL + Telegram + Supabase")
+        logger.info(f"JOURNAL OPEN: {rec.trade_id} | RAM + JSONL + Supabase")
 
     def update_live_result(
         self, trade_id: str, success: bool, order_id: str, error: str,

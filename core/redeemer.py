@@ -11,12 +11,14 @@ Architektur:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
 from urllib.request import urlopen, Request
 
 from loguru import logger
+from utils import telegram
 
 # Working Polygon RPCs (tested 02.04.2026, tenderly first — publicnode often 403)
 POLYGON_RPCS = [
@@ -409,6 +411,21 @@ class AutoRedeemer:
                 f"${payout_usd:.2f} payout, ${pnl_usd:+.2f} PnL | "
                 f"{matched_order_type} | {title[:30]}"
             )
+
+            # Telegram — WIN/LOSS Benachrichtigung (on-chain verifiziert)
+            try:
+                is_win = payout_usd > 0.001
+                icon = "✅ WIN" if is_win else "❌ LOSS"
+                payout_str = f"${payout_usd:.2f}" if is_win else "$0.00"
+                loop = asyncio.get_event_loop()
+                loop.create_task(telegram.send_alert(
+                    f"{'💰' if is_win else '💸'} <b>{matched_trade_id} {icon} {pnl_usd:+.2f}</b>\n"
+                    f"{outcome} | Entry ${matched_entry_price:.3f} → Payout {payout_str}\n"
+                    f"{title[:50]}"
+                ))
+            except Exception:
+                pass  # Telegram darf nie den Redeemer blockieren
+
         except Exception as e:
             logger.error(f"Journal redeem write error: {e}")
 
