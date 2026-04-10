@@ -79,10 +79,19 @@ def _get_global_redeemer():
     if _global_redeemer is None:
         pk = settings.polymarket_private_key
         wallet = settings.polymarket_funder
+        safe = getattr(settings, 'polymarket_safe_address', '')
         if pk and wallet:
             from core.redeemer import AutoRedeemer
-            _global_redeemer = AutoRedeemer(private_key=pk, wallet_address=wallet)
-            logger.info("Global AutoRedeemer initialisiert (headless)")
+            _global_redeemer = AutoRedeemer(
+                private_key=pk,
+                wallet_address=safe or wallet,  # Safe hat Vorrang
+                safe_address=safe,
+                builder_api_key=os.environ.get('POLY_BUILDER_API_KEY', ''),
+                builder_secret=os.environ.get('POLY_BUILDER_SECRET', ''),
+                builder_passphrase=os.environ.get('POLY_BUILDER_PASSPHRASE', ''),
+            )
+            mode = "GASLESS (Safe Relayer)" if safe else "EOA (Gas)"
+            logger.info(f"Global AutoRedeemer initialisiert ({mode})")
     return _global_redeemer
 
 

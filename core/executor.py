@@ -62,10 +62,16 @@ class PolymarketExecutor:
         """Initialisiert CLOB Client mit L1 Auth und leitet L2 Credentials ab."""
         pk = self.settings.polymarket_private_key
         funder = self.settings.polymarket_funder
+        safe_address = self.settings.polymarket_safe_address
 
         if not pk or not self.settings.live_trading:
             logger.info("Executor: PAPER MODE (kein Private Key oder live_trading=False)")
             return False
+
+        # Safe Wallet hat Vorrang: gasless via Builder Relayer
+        effective_funder = safe_address or funder or None
+        if safe_address:
+            logger.info(f"Executor: Safe Wallet aktiv — funder={safe_address}")
 
         try:
             from py_clob_client.client import ClobClient
@@ -74,8 +80,8 @@ class PolymarketExecutor:
                 host="https://clob.polymarket.com",
                 key=pk,
                 chain_id=137,  # Polygon
-                signature_type=0,  # Standard EOA
-                funder=funder if funder else None,
+                signature_type=0,  # EOA signiert L1/L2 Auth, Safe haelt Tokens
+                funder=effective_funder,
             )
 
             # L2 Credentials ableiten (einmalig)

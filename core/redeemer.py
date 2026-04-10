@@ -56,18 +56,27 @@ CTF_ABI = [
 class AutoRedeemer:
     """Periodisch gewonnene Positionen redeemen."""
 
-    # Gas Pacing: Max baseFee in Gwei bevor Redeemer pausiert
+    # Gas Pacing: Max baseFee in Gwei bevor Redeemer pausiert (nur EOA-Modus)
     MAX_BASE_FEE_GWEI = 100
-    # Batch Thresholds
-    BATCH_MIN_USD = 15.0    # Minimum $15 bevor Flush
-    BATCH_TTL_S = 4 * 3600  # Max 4h bevor Force-Flush
+    # Batch Thresholds — niedrig weil Safe=gasless
+    BATCH_MIN_USD = 3.0     # Minimum $3 bevor Flush (gasless: kein Grund zu warten)
+    BATCH_TTL_S = 10 * 60   # Max 10min bevor Force-Flush (war 4h)
     # Cooldown Eskalation
-    COOLDOWN_BASE_S = 2 * 3600   # 2h Basis
-    COOLDOWN_MAX_S = 48 * 3600   # 48h Cap
+    COOLDOWN_BASE_S = 5 * 60     # 5min Basis (war 2h)
+    COOLDOWN_MAX_S = 2 * 3600    # 2h Cap (war 48h)
 
-    def __init__(self, private_key: str, wallet_address: str):
+    def __init__(self, private_key: str, wallet_address: str,
+                 safe_address: str = "", builder_api_key: str = "",
+                 builder_secret: str = "", builder_passphrase: str = ""):
         self._key = private_key
         self._wallet = wallet_address
+        # Safe/Relayer config
+        self._safe_address = safe_address
+        self._builder_api_key = builder_api_key
+        self._builder_secret = builder_secret
+        self._builder_passphrase = builder_passphrase
+        self._relay_client = None
+        self._use_relayer = bool(safe_address and builder_api_key)
         self._w3 = None
         self._ctf = None
         self._last_redeem_time = 0
@@ -82,7 +91,7 @@ class AutoRedeemer:
         self._last_check_time = 0
 
     def _connect(self):
-        """Lazy Web3 Connection mit Fallback RPCs."""
+        """Lazy Web3 Connection mit Fallback RPCs + Relayer Init."""
         if self._w3 is not None:
             return True
 
@@ -98,6 +107,28 @@ class AutoRedeemer:
                             abi=CTF_ABI,
                         )
                         logger.info(f"AutoRedeemer: Connected to {rpc}")
+
+                        # Relayer-Client initialisieren (gasless via Safe)
+                        if self._use_relayer and not self._relay_client:
+                            try:
+                                from py_builder_relayer_client.client import RelayClient
+                                from py_builder_signing_sdk.config import BuilderConfig, BuilderApiKeyCreds
+                                builder_config = BuilderConfig(
+                                    local_builder_creds=BuilderApiKeyCreds(
+                                        key=self._builder_api_key,
+                                        secret=self._builder_secret,
+                                        passphrase=self._builder_passphrase,
+                                    )
+                                )
+                                self._relay_client = RelayClient(
+                                    "https://relayer-v2.polymarket.com/",
+                                    137, self._key, builder_config,
+                                )
+                                logger.info(f"AutoRedeemer: Relayer aktiv — gasless redeems via Safe {self._safe_address}")
+                            except Exception as re:
+                                logger.warning(f"AutoRedeemer: Relayer init failed, fallback auf EOA: {re}")
+                                self._use_relayer = False
+
                         return True
                 except Exception:
                     continue
@@ -145,16 +176,17 @@ class AutoRedeemer:
         if not self._connect():
             return {"redeemed": 0, "failed": 0, "error": "no web3 connection"}
 
-        # ── EIP-1559 GAS PACING: Pausiere bei Netzwerk-Ueberlast ──
-        try:
-            latest = self._w3.eth.get_block("latest")
-            base_fee = latest.get("baseFeePerGas", 0)
-            if base_fee > self.MAX_BASE_FEE_GWEI * 1e9:
-                gwei = base_fee / 1e9
-                logger.info(f"AutoRedeemer: Gas too high ({gwei:.0f} gwei > {self.MAX_BASE_FEE_GWEI}) — snoozing")
-                return {"redeemed": 0, "failed": 0, "snoozed": True, "gas_gwei": round(gwei)}
-        except Exception:
-            pass  # Gas-Check ist optional, nicht blockierend
+        # ── EIP-1559 GAS PACING: Nur im EOA-Modus (Safe = gasless) ──
+        if not self._use_relayer:
+            try:
+                latest = self._w3.eth.get_block("latest")
+                base_fee = latest.get("baseFeePerGas", 0)
+                if base_fee > self.MAX_BASE_FEE_GWEI * 1e9:
+                    gwei = base_fee / 1e9
+                    logger.info(f"AutoRedeemer: Gas too high ({gwei:.0f} gwei > {self.MAX_BASE_FEE_GWEI}) — snoozing")
+                    return {"redeemed": 0, "failed": 0, "snoozed": True, "gas_gwei": round(gwei)}
+            except Exception:
+                pass  # Gas-Check ist optional, nicht blockierend
 
         positions = self.get_redeemable_positions()
         if not positions:
@@ -240,46 +272,85 @@ class AutoRedeemer:
                 continue
 
             try:
-                gas_price = int(self._w3.eth.gas_price * 1.2)
+                tx_hash_hex = ""
 
-                tx = self._ctf.functions.redeemPositions(
-                    Web3.to_checksum_address(USDC_E),
-                    b"\x00" * 32,
-                    cid_bytes,
-                    [1, 2],
-                ).build_transaction({
-                    "from": wallet,
-                    "nonce": current_nonce,
-                    "gas": 300000,
-                    "gasPrice": gas_price,
-                    "chainId": 137,
-                })
+                if self._use_relayer and self._relay_client:
+                    # ── GASLESS REDEEM via Builder Relayer ──
+                    from eth_abi import encode
+                    from eth_utils import function_signature_to_4byte_selector
 
-                signed = self._w3.eth.account.sign_transaction(tx, self._key)
-                tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
-                receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+                    # Encode redeemPositions(address, bytes32, bytes32, uint256[])
+                    selector = function_signature_to_4byte_selector("redeemPositions(address,bytes32,bytes32,uint256[])")
+                    encoded_args = encode(
+                        ["address", "bytes32", "bytes32", "uint256[]"],
+                        [Web3.to_checksum_address(USDC_E), b"\x00" * 32, cid_bytes, [1, 2]]
+                    )
+                    calldata = selector + encoded_args
 
-                if receipt.status == 1:
+                    from py_builder_relayer_client.client import SafeTransaction
+                    safe_tx = SafeTransaction(
+                        to=Web3.to_checksum_address(CTF_ADDRESS),
+                        value=0,
+                        data="0x" + calldata.hex(),
+                    )
+
+                    resp = self._relay_client.execute([safe_tx], f"redeem {title}")
+                    result = resp.wait()
+                    tx_hash_hex = getattr(result, "transactionHash", "") or getattr(result, "hash", "") or str(result)
+
                     redeemed += 1
                     total_value += value
-                    tx_hash_hex = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
-                    logger.info(f"AutoRedeemer: ✅ Redeemed ${value:.2f} from {title}")
+                    logger.info(f"AutoRedeemer: ✅ Redeemed ${value:.2f} from {title} (GASLESS)")
                     self._cooldown_cache.pop(cid_hex, None)
 
-                    self._log_redemption_to_journal(
-                        condition_id=cid_hex,
-                        title=pos.get("title", "")[:60],
-                        outcome=pos.get("outcome", ""),
-                        payout_usd=value,
-                        initial_value=pos.get("initialValue", 0),
-                        tx_hash_hex=tx_hash_hex,
-                    )
                 else:
-                    failed += 1
-                    self._set_cooldown(cid_hex, title, "TX reverted")
+                    # ── EOA REDEEM (Legacy, zahlt Gas) ──
+                    gas_price = int(self._w3.eth.gas_price * 1.2)
+
+                    tx = self._ctf.functions.redeemPositions(
+                        Web3.to_checksum_address(USDC_E),
+                        b"\x00" * 32,
+                        cid_bytes,
+                        [1, 2],
+                    ).build_transaction({
+                        "from": wallet,
+                        "nonce": current_nonce,
+                        "gas": 300000,
+                        "gasPrice": gas_price,
+                        "chainId": 137,
+                    })
+
+                    signed = self._w3.eth.account.sign_transaction(tx, self._key)
+                    tx_hash = self._w3.eth.send_raw_transaction(signed.raw_transaction)
+                    receipt = self._w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
+
+                    if receipt.status == 1:
+                        redeemed += 1
+                        total_value += value
+                        tx_hash_hex = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+                        logger.info(f"AutoRedeemer: ✅ Redeemed ${value:.2f} from {title}")
+                        self._cooldown_cache.pop(cid_hex, None)
+                    else:
+                        failed += 1
+                        self._set_cooldown(cid_hex, title, "TX reverted")
+                        flushed.append(pos)
+                        current_nonce += 1
+                        time.sleep(2)
+                        continue
+
+                    current_nonce += 1
+
+                # Journal + Telegram (beide Pfade)
+                self._log_redemption_to_journal(
+                    condition_id=cid_hex,
+                    title=pos.get("title", "")[:60],
+                    outcome=pos.get("outcome", ""),
+                    payout_usd=value,
+                    initial_value=pos.get("initialValue", 0),
+                    tx_hash_hex=tx_hash_hex,
+                )
 
                 flushed.append(pos)
-                current_nonce += 1
                 time.sleep(2)
 
             except Exception as e:

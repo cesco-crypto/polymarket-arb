@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     # --- Polymarket Live Trading ---
     polymarket_private_key: str = Field(default="", description="Polygon Wallet Private Key (NIE committen!)")
     polymarket_funder: str = Field(default="", description="Funder Address (deine Wallet-Adresse)")
+    polymarket_safe_address: str = Field(default="", description="Gnosis Safe Wallet Address (gasless via Builder Relayer)")
     live_trading: bool = Field(default=False, description="True = echte Orders, False = Paper Only")
     max_live_position_usd: float = Field(default=5.0, description="Max $5 pro Trade für $100 Account")
     order_type: str = Field(default="taker", description="taker = Market Order (1.80% Fee, ab 30.03.2026) | maker = Limit Order (Rebate)")
