@@ -601,6 +601,7 @@ class OracleDelayArbStrategy(StrategyBase):
                     if shot_ask <= 0 or shot_ask > self.max_entry_price:
                         if shot == 0:
                             logger.info(f"ODA Shot#{shot}: {asset} ask=${shot_ask:.3f} — no fill available")
+                            logger.info(f"ODA SKIP: ask=${shot_ask:.3f} cap=${self.max_entry_price} | CAP_EXCEEDED")
                         break
 
                     if shot_ask < self.min_entry_price:
@@ -619,12 +620,14 @@ class OracleDelayArbStrategy(StrategyBase):
                         f"ODA Shot#{shot}: {asset} {winner} @ ${shot_ask:.3f} | "
                         f"edge={edge_pct:.1f}% | t={shot_t:.1f}ms"
                     )
+                    logger.info(f"ODA FILL: ask=${shot_ask:.3f} cap=${self.max_entry_price} edge={edge_pct:.1f}% | FILLED")
                     break  # Erster erfolgreicher Shot genuegt
 
                 except Exception as e:
                     err_str = str(e)
                     if "no orders found to match" in err_str.lower():
                         # FAK rejected — kein Match. Naechster Shot.
+                        logger.info(f"ODA REJECT: Shot#{shot} ask=${shot_ask:.3f} cap=${self.max_entry_price} | FAK_REJECT")
                         if shot < 4:
                             await asyncio.sleep(0.005)  # 5ms Pause
                             continue
