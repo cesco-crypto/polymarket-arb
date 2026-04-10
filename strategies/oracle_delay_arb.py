@@ -967,12 +967,31 @@ class OracleDelayArbStrategy(StrategyBase):
         fill_icon = "✅ FILLED" if filled else "❌ REJECTED"
         mode = "LIVE" if trade.live_order_id else "PAPER"
         latency = order_latency_ms
+
+        # Window-Zeiten aus Slug extrahieren (z.B. btc-updown-5m-1775838000)
+        import datetime
+        timeframe = "5m"
+        window_str = ""
+        try:
+            slug_parts = slug.split("-")
+            timeframe = slug_parts[2] if len(slug_parts) >= 3 else "5m"
+            window_start_ts = int(slug_parts[-1])
+            interval = 300 if timeframe == "5m" else 900
+            dt_start = datetime.datetime.fromtimestamp(window_start_ts, tz=datetime.timezone(datetime.timedelta(hours=-4)))
+            dt_end = datetime.datetime.fromtimestamp(window_start_ts + interval, tz=datetime.timezone(datetime.timedelta(hours=-4)))
+            window_str = f"{dt_start.strftime('%I:%M')}-{dt_end.strftime('%I:%M%p')} ET"
+        except Exception:
+            window_str = timeframe
+
+        pm_link = f"https://polymarket.com/markets/crypto/{asset.lower()}"
+
         asyncio.create_task(telegram.send_alert(
             f"🎯 <b>SNIPE #{self._trade_count} {fill_icon}</b>\n"
             f"{asset} {winner} @ ${ask_price:.3f} | ${self.trade_size_usd:.2f}\n"
+            f"⏱ {timeframe} | {window_str}\n"
             f"Edge: {net_ev_pct:.1f}% | Fee: {fee_pct:.2f}% | {signal_tier}\n"
             f"⚡ {latency:.0f}ms | tick: {tick_age_ms:.0f}ms | Δ{price_change_pct:+.3f}%\n"
-            f"{mode}"
+            f"{mode} | <a href=\"{pm_link}\">Polymarket</a>"
         ))
 
         # Journal — NUR open Event. PnL=0 bis AutoRedeemer on-chain bestaetigt.
