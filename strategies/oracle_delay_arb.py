@@ -119,11 +119,12 @@ class OracleDelayArbStrategy(StrategyBase):
 
         # Config — Latency Arbitrage: Sub-100ms Execution
         self.trade_size_usd = 5.0          # $5 pro Trade
-        self.min_entry_price = 0.05        # Min Preis (Dust Filter)
+        self.min_entry_price = 0.60        # Min Preis (Floor: nur Asks >= 60c — eliminiert Fake-Edge-Zone)
         self.max_entry_price = 0.93        # Max 0.93 (Latenz-Filter: nur fruehe Fills mit fettem Edge)
         self.delay_after_close_s = 0.0     # 0ms Delay — rein event-driven!
         self.max_delay_s = 15.0            # Max 15s nach Close (Fenster ist ~2.7s median)
         self.max_concurrent = 5            # Max 5 gleichzeitige Snipes
+        self.deadzone_pct = 0.05           # Deadzone: < 0.05% Binance-Move = Noise (war 0.01%)
 
         # State
         self._running = False
@@ -177,6 +178,10 @@ class OracleDelayArbStrategy(StrategyBase):
         self._load_trade_counter()
 
         logger.info(f"ODA v8 startet — Autarke Discovery + Async Execution (Counter: {self._trade_count})")
+        logger.info(
+            f"ODA CONFIG | size=${self.trade_size_usd} | range={self.min_entry_price}-{self.max_entry_price} | "
+            f"deadzone={self.deadzone_pct}% | max_concurrent={self.max_concurrent}"
+        )
 
         # Eigene MarketDiscovery starten (autark, kein momentum_latency_v2 noetig)
         await self.discovery.start()
@@ -526,10 +531,10 @@ class OracleDelayArbStrategy(StrategyBase):
 
             # ═══ ANTI-NOISE GUARD (Deadzone) ═══
             # Bei < 0.01% Delta ist Winner-Bestimmung Rauschen → UMA Oracle unberechenbar
-            if abs(price_change_pct) < 0.01:
+            if abs(price_change_pct) < self.deadzone_pct:
                 logger.info(
                     f"ODA CANCEL: {asset} | Price movement too small "
-                    f"({price_change_pct:+.4f}%) -> UMA Oracle Trap avoided"
+                    f"({price_change_pct:+.4f}% < {self.deadzone_pct}%) -> UMA Oracle Trap avoided"
                 )
                 return
 
@@ -605,6 +610,8 @@ class OracleDelayArbStrategy(StrategyBase):
                         break
 
                     if shot_ask < self.min_entry_price:
+                        if shot == 0:
+                            logger.info(f"ODA SKIP: ask=${shot_ask:.3f} floor=${self.min_entry_price} | FLOOR_EXCEEDED")
                         break
 
                     edge_pct = (1.0 / shot_ask - 1.0) * 100
@@ -613,7 +620,8 @@ class OracleDelayArbStrategy(StrategyBase):
                     # FIRE!
                     await self._execute_snipe(window_data, winner, winner_tid, shot_ask,
                                               entry_binance_price=entry_binance_price,
-                                              tick_age_ms=tick_age_ms)
+                                              tick_age_ms=tick_age_ms,
+                                              price_change_pct=price_change_pct)
                     filled = True
 
                     logger.info(
@@ -831,6 +839,7 @@ class OracleDelayArbStrategy(StrategyBase):
     async def _execute_snipe(
         self, window: dict, winner: str, token_id: str, ask_price: float,
         entry_binance_price: float = 0.0, tick_age_ms: float = 0.0,
+        price_change_pct: float = 0.0,
     ) -> None:
         """Führt den Oracle Delay Snipe aus."""
         self._trade_count += 1
@@ -928,6 +937,7 @@ class OracleDelayArbStrategy(StrategyBase):
         ))
 
         # Journal — NUR open Event. PnL=0 bis AutoRedeemer on-chain bestaetigt.
+        raw_edge = (1.0 / ask_price - 1.0) * 100 if ask_price > 0 else 0.0
         self.journal.record_open(TradeRecord(
             trade_id=trade_id,
             asset=asset,
@@ -949,6 +959,11 @@ class OracleDelayArbStrategy(StrategyBase):
             live_order_id=trade.live_order_id,
             live_order_success=trade.live_success,
             condition_id=condition_id,
+            # Forensik-Metriken (neu: fuer PnL-Attribution)
+            raw_edge_pct=raw_edge,
+            tick_age_ms=tick_age_ms,
+            momentum_pct=price_change_pct,
+            oracle_price_entry=entry_binance_price,
         ))
 
     async def _check_fill(self, order_id: str) -> str:
@@ -997,7 +1012,8 @@ class OracleDelayArbStrategy(StrategyBase):
             active = sum(1 for t in self._trades if not t.resolved)
             logger.info(
                 f"ODA STATUS | Snipes: {self._trade_count} | Active: {active} | "
-                f"Size: ${self.trade_size_usd} | Range: {self.min_entry_price}-{self.max_entry_price}"
+                f"Size: ${self.trade_size_usd} | Range: {self.min_entry_price}-{self.max_entry_price} | "
+                f"Deadzone: {self.deadzone_pct}%"
             )
             await asyncio.sleep(60)
 
