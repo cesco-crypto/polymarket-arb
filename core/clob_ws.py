@@ -101,6 +101,30 @@ class CLOBWebSocket:
         if new_added:
             self._resub_needed = True
 
+    def set_active_tokens(self, token_ids: list[str]) -> None:
+        """ERSETZT die Token-Liste (statt nur hinzufuegen). Entfernt alte Tokens.
+
+        Polymarket WS Limit: max ~10 Instrumente. Alte abgelaufene Tokens
+        muessen entfernt werden damit aktuelle Tokens Updates bekommen.
+        """
+        new_set = set(tid for tid in token_ids if tid)
+        old_set = self._token_ids
+
+        # Entferne alte Tokens + ihre Books
+        removed = old_set - new_set
+        for tid in removed:
+            self._books.pop(tid, None)
+
+        # Fuege neue hinzu
+        for tid in new_set:
+            if tid not in self._books:
+                self._books[tid] = OrderbookSnapshot()
+
+        if new_set != old_set:
+            self._token_ids = new_set
+            self._resub_needed = True
+            logger.info(f"CLOB WS: Active tokens set to {len(new_set)} (removed {len(removed)}, added {len(new_set - old_set)})")
+
     async def start(self) -> None:
         if self._running:
             return

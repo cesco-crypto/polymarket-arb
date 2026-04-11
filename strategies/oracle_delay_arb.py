@@ -273,12 +273,30 @@ class OracleDelayArbStrategy(StrategyBase):
             self._oracle = None
 
     async def _subscribe_clob_tokens(self) -> None:
-        """Subscribed Token-IDs aus eigener Discovery auf dem CLOB WS."""
+        """Subscribed NUR aktive Window-Tokens auf dem CLOB WS.
+
+        Polymarket WS Limit: ~10 Instrumente. Wir subscriben nur die
+        naechsten 2 Windows (5m) × 2 Assets (BTC+ETH) × 2 Tokens (UP+DOWN) = 8 Tokens.
+        Alte abgelaufene Tokens werden entfernt.
+        """
         try:
-            token_ids = self.discovery.get_all_token_ids()
-            if token_ids and self._clob_ws:
-                self._clob_ws.subscribe(token_ids)
-                logger.info(f"ODA: {len(token_ids)} Token-IDs auf CLOB WS subscribed (eigene Discovery)")
+            # Nur Tokens fuer Windows die in den naechsten 310s schliessen
+            active_tokens = []
+            now = time.time()
+            for w in self._compute_next_window_closes():
+                secs = w["seconds_to_close"]
+                if 0 < secs <= 310:  # Nur aktive Windows
+                    tids = await self._get_token_ids(w["slug"], w["asset"])
+                    if tids:
+                        active_tokens.extend([tids[0], tids[1]])
+
+            # Deduplizieren
+            active_tokens = list(set(active_tokens))
+
+            if self._clob_ws:
+                if active_tokens:
+                    self._clob_ws.set_active_tokens(active_tokens)
+                logger.info(f"ODA: {len(active_tokens)} aktive Token-IDs auf CLOB WS (max 8)")
         except Exception as e:
             logger.warning(f"ODA: Token subscription failed: {e}")
 
