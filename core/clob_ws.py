@@ -230,45 +230,75 @@ class CLOBWebSocket:
         self._connected = False
 
     def _process_message(self, msg: dict | list) -> None:
-        """Verarbeitet WS-Deltas und updated RAM-Orderbuch — SCHNELL."""
+        """Verarbeitet WS-Deltas und updated RAM-Orderbuch — SCHNELL.
+
+        Zwei Event-Typen:
+        1. "book": Initialer Snapshot mit vollen asks[]/bids[] Arrays
+        2. "price_change": Delta-Updates mit price_changes[] die best_bid/best_ask enthalten
+        """
         events = msg if isinstance(msg, list) else [msg]
         now = time.time()
 
         for event in events:
             event_type = event.get("event_type", "")
-            token_id = event.get("asset_id", "")
 
-            if not token_id or event_type not in ("book", "price_change"):
-                continue
+            # ── BOOK SNAPSHOT: Volles Orderbuch (kommt bei Subscribe) ──
+            if event_type == "book":
+                token_id = event.get("asset_id", "")
+                if not token_id:
+                    continue
+                book = self._books.get(token_id)
+                if not book:
+                    continue
 
-            book = self._books.get(token_id)
-            if not book:
-                continue
+                asks = event.get("asks", [])
+                bids = event.get("bids", [])
 
-            # Update best ask/bid + depth
-            asks = event.get("asks", [])
-            bids = event.get("bids", [])
+                if asks:
+                    prices = [float(a["price"]) for a in asks]
+                    sizes = [float(a.get("size", 0)) for a in asks]
+                    book.best_ask = min(prices)
+                    book.ask_depth_usd = sum(
+                        p * s for p, s in zip(prices[:5], sizes[:5])
+                    )
+                    book.ask_levels = len(asks)
 
-            if asks:
-                prices = [float(a["price"]) for a in asks]
-                sizes = [float(a.get("size", 0)) for a in asks]
-                book.best_ask = min(prices)
-                book.ask_depth_usd = sum(
-                    p * s for p, s in zip(prices[:5], sizes[:5])
-                )
-                book.ask_levels = len(asks)
+                if bids:
+                    prices = [float(b["price"]) for b in bids]
+                    sizes = [float(b.get("size", 0)) for b in bids]
+                    book.best_bid = max(prices)
+                    book.bid_depth_usd = sum(
+                        p * s for p, s in zip(prices[:5], sizes[:5])
+                    )
 
-            if bids:
-                prices = [float(b["price"]) for b in bids]
-                sizes = [float(b.get("size", 0)) for b in bids]
-                book.best_bid = max(prices)
-                book.bid_depth_usd = sum(
-                    p * s for p, s in zip(prices[:5], sizes[:5])
-                )
+                book.updated_at = now
+                self._events_processed += 1
+                self._last_event_ts = now
 
-            book.updated_at = now
-            self._events_processed += 1
-            self._last_event_ts = now
+            # ── PRICE_CHANGE: Echtzeit-Updates mit best_bid/best_ask ──
+            elif event_type == "price_change":
+                price_changes = event.get("price_changes", [])
+                for pc in price_changes:
+                    token_id = pc.get("asset_id", "")
+                    if not token_id:
+                        continue
+                    book = self._books.get(token_id)
+                    if not book:
+                        continue
+
+                    # best_bid/best_ask aus dem price_change Event
+                    best_ask_str = pc.get("best_ask", "")
+                    best_bid_str = pc.get("best_bid", "")
+
+                    if best_ask_str:
+                        book.best_ask = float(best_ask_str)
+                    if best_bid_str:
+                        book.best_bid = float(best_bid_str)
+
+                    book.updated_at = now
+
+                self._events_processed += 1
+                self._last_event_ts = now
 
             # Optional Callback (fuer Event-Trigger)
             if self._on_update:
