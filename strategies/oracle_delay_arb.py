@@ -129,6 +129,10 @@ class OracleDelayArbStrategy(StrategyBase):
         # Volatility Tracking (fuer Regime-Detection)
         self._recent_deltas: deque = deque(maxlen=20)
 
+        # Gamma Validation Cache: slug -> (up_tid, down_tid, cid) oder "INVALID"
+        # Einmal pro Slug validiert, danach nur noch RAM-Read
+        self._gamma_validated: dict[str, tuple | str] = {}
+
         # State
         self._running = False
         self._session: Optional[aiohttp.ClientSession] = None
@@ -735,11 +739,12 @@ class OracleDelayArbStrategy(StrategyBase):
 
         Architektur:
         1. Discovery Cache: O(1) dict.get(slug) — kein Iterieren, kein Toleranz-Match
-        2. Gamma API: GET /events?slug={slug} — exakt 1 Event oder Skip
-        3. Cross-Validation: Cache CID == Gamma CID (fuer erste 50 Trades)
+        2. Gamma Validation: Einmal pro Slug bei erster Entdeckung, dann gecached
+        3. Cross-Validation: Cache CID == Gamma CID
         4. Outcome-Mapping: Explizite Validierung (Up/Down/Yes/No)
 
         Prinzip: Lieber kein Trade als falscher Trade.
+        Hot-Path: Nur RAM-Reads nach der ersten Validierung.
         """
         # ── SCHRITT 1: Discovery Cache — exakter Slug-Key ──
         cache_result = None
@@ -753,63 +758,16 @@ class OracleDelayArbStrategy(StrategyBase):
         except Exception as e:
             logger.warning(f"ODA Discovery lookup error: {e}")
 
-        # ── SCHRITT 2: Gamma API — exakter Slug-Query ──
-        gamma_result = None
-        if self._session and not self._session.closed:
-            try:
-                url = f"https://gamma-api.polymarket.com/events?slug={slug}"
-                async with self._session.get(url) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_http_{resp.status}")
-                    else:
-                        data = await resp.json()
+        # ── SCHRITT 2: Gamma Validation — einmal pro Slug, dann gecached ──
+        gamma_result = self._gamma_validated.get(slug)
 
-                        # Validierung: exakt 1 Event
-                        if not data:
-                            logger.info(f"ODA TOKEN-SKIP: {slug} | reason=gamma_empty")
-                        elif len(data) > 1:
-                            logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_ambiguous (N={len(data)})")
-                        else:
-                            event = data[0]
-                            markets = event.get("markets", [])
-                            if not markets:
-                                logger.info(f"ODA TOKEN-SKIP: {slug} | reason=gamma_no_markets")
-                            else:
-                                market = markets[0]
-                                cid = market.get("conditionId", "")
-                                tokens_raw = market.get("clobTokenIds", "[]")
-                                outcomes_raw = market.get("outcomes", "[]")
-                                tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
-                                outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
-
-                                # Outcome-Mapping Validierung
-                                if len(tokens) != 2:
-                                    logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=invalid_tokens (N={len(tokens)})")
-                                elif len(outcomes) != 2:
-                                    logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=invalid_outcomes (N={len(outcomes)})")
-                                else:
-                                    up_tid = ""
-                                    down_tid = ""
-                                    for i, outcome in enumerate(outcomes):
-                                        ol = outcome.lower() if isinstance(outcome, str) else ""
-                                        if ol in ("up", "yes"):
-                                            up_tid = tokens[i]
-                                        elif ol in ("down", "no"):
-                                            down_tid = tokens[i]
-
-                                    if not up_tid or not down_tid:
-                                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=outcome_mapping_failed ({outcomes})")
-                                    elif up_tid == down_tid:
-                                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=duplicate_token_ids")
-                                    elif not cid:
-                                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=no_condition_id")
-                                    else:
-                                        gamma_result = (up_tid, down_tid, cid)
-
-            except asyncio.TimeoutError:
-                logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_timeout")
-            except Exception as e:
-                logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_error ({str(e)[:60]})")
+        if gamma_result is None:
+            # Noch nie validiert → Gamma API abfragen (einmalig)
+            gamma_result = await self._validate_slug_via_gamma(slug)
+            # Ergebnis cachen (tuple oder "INVALID")
+            self._gamma_validated[slug] = gamma_result if gamma_result else "INVALID"
+        elif gamma_result == "INVALID":
+            gamma_result = None
 
         # ── SCHRITT 3: Entscheidung mit Cross-Validation ──
         if cache_result and gamma_result:
@@ -826,18 +784,83 @@ class OracleDelayArbStrategy(StrategyBase):
                 return None
 
         if cache_result and not gamma_result:
-            # Gamma war nicht erreichbar — Cache vertrauen
             logger.info(f"ODA TOKEN-MATCH: {slug} | source=discovery (gamma unavailable) | cid={cache_result[2][:20]}...")
             return cache_result
 
         if not cache_result and gamma_result:
-            # Cache leer — Gamma als Fallback
             logger.info(f"ODA TOKEN-MATCH: {slug} | source=gamma (cache empty) | cid={gamma_result[2][:20]}...")
             return gamma_result
 
-        # Beide leer — kein Trade
         logger.info(f"ODA TOKEN-SKIP: {slug} | reason=no_source")
         return None
+
+    async def _validate_slug_via_gamma(self, slug: str) -> tuple | None:
+        """Einmalige Gamma API Validierung fuer einen Slug. Ergebnis wird gecached."""
+        if not self._session or self._session.closed:
+            return None
+        try:
+            url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status != 200:
+                    logger.warning(f"ODA GAMMA-VALIDATE: {slug} | http_{resp.status}")
+                    return None
+                data = await resp.json()
+
+            if not data:
+                logger.info(f"ODA GAMMA-VALIDATE: {slug} | empty")
+                return None
+            if len(data) > 1:
+                logger.warning(f"ODA GAMMA-VALIDATE: {slug} | ambiguous (N={len(data)})")
+                return None
+
+            event = data[0]
+            markets = event.get("markets", [])
+            if not markets:
+                logger.info(f"ODA GAMMA-VALIDATE: {slug} | no_markets")
+                return None
+
+            market = markets[0]
+            cid = market.get("conditionId", "")
+            tokens_raw = market.get("clobTokenIds", "[]")
+            outcomes_raw = market.get("outcomes", "[]")
+            tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
+            outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
+
+            if len(tokens) != 2:
+                logger.warning(f"ODA GAMMA-VALIDATE: {slug} | invalid_tokens (N={len(tokens)})")
+                return None
+            if len(outcomes) != 2:
+                logger.warning(f"ODA GAMMA-VALIDATE: {slug} | invalid_outcomes (N={len(outcomes)})")
+                return None
+
+            up_tid = ""
+            down_tid = ""
+            for i, outcome in enumerate(outcomes):
+                ol = outcome.lower() if isinstance(outcome, str) else ""
+                if ol in ("up", "yes"):
+                    up_tid = tokens[i]
+                elif ol in ("down", "no"):
+                    down_tid = tokens[i]
+
+            if not up_tid or not down_tid:
+                logger.warning(f"ODA GAMMA-VALIDATE: {slug} | outcome_mapping_failed ({outcomes})")
+                return None
+            if up_tid == down_tid:
+                logger.warning(f"ODA GAMMA-VALIDATE: {slug} | duplicate_token_ids")
+                return None
+            if not cid:
+                logger.warning(f"ODA GAMMA-VALIDATE: {slug} | no_condition_id")
+                return None
+
+            logger.info(f"ODA GAMMA-VALIDATE: {slug} | OK | cid={cid[:20]}...")
+            return (up_tid, down_tid, cid)
+
+        except asyncio.TimeoutError:
+            logger.warning(f"ODA GAMMA-VALIDATE: {slug} | timeout")
+            return None
+        except Exception as e:
+            logger.warning(f"ODA GAMMA-VALIDATE: {slug} | error ({str(e)[:60]})")
+            return None
 
     async def _fetch_active_windows(self) -> list[dict]:
         """Holt aktive Windows aus eigener Discovery."""
