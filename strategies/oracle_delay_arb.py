@@ -411,8 +411,8 @@ class OracleDelayArbStrategy(StrategyBase):
                         continue
                     if slug in self._sniped_windows:
                         continue
-                    if secs_to > 120:
-                        continue  # Zu weit in der Zukunft
+                    if secs_to > 310:
+                        continue  # 5min + 10s Puffer (war 120s — zu kurz fuer volle Kerze)
 
                     # Token-IDs holen + auf CLOB WS subscriben
                     token_ids = await self._get_token_ids(slug, w["asset"])
@@ -484,15 +484,31 @@ class OracleDelayArbStrategy(StrategyBase):
                 self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
                 logger.info(f"ODA PRE-SIGN: {asset} {w['timeframe']} UP+DOWN @ ${pre_price}")
 
-            # Start-Preis: Window-Start Snapshot (gespeichert bei Schedule, ~2min vor Close)
-            # NICHT den T-12s Preis nehmen — der misst nur 12s statt volle 5min
+            # ═══ PRICE CHANGE: Volle 5min (oder 15min) Messung ═══
+            # Primaer: Oracle momentum() — misst exakt ueber interval_s Sekunden
+            # Fallback: Snapshot aus Schedule-Time (~T-300s)
+            interval_s = 300 if "5m" in slug else 900
+            momentum = self._oracle.get_momentum(symbol, interval_s) if self._oracle else None
+
             start_price = self._price_at_window_start.get(slug, 0)
-            if start_price <= 0:
-                # Fallback: aktueller Preis (nur wenn kein Snapshot vorhanden)
-                if self._oracle:
-                    tick = self._oracle.get_latest(symbol)
-                    if tick:
-                        start_price = tick.mid
+            if momentum is not None:
+                price_change_pct_full = momentum
+                # start_price fuer BURST-Log + Winner-Determination rekonstruieren
+                if current_price > 0 and abs(momentum) > 0.0001:
+                    start_price = current_price / (1 + momentum / 100)
+                elif start_price <= 0:
+                    start_price = current_price  # Identisch → Deadzone faengt es
+            else:
+                # Fallback: Delta aus Snapshot (nach Bot-Restart, Buffer noch nicht voll)
+                if start_price <= 0:
+                    if self._oracle:
+                        tick = self._oracle.get_latest(symbol)
+                        if tick:
+                            start_price = tick.mid
+                if start_price <= 0:
+                    logger.info(f"ODA Skip: {asset} — no price history")
+                    return
+                price_change_pct_full = (current_price - start_price) / start_price * 100
 
             # ── PHASE 2: Sleep bis T-15ms, dann BURST-FIRE ──
             # Aufwachen 15ms VOR Close — Netzwerk-Laufzeit kompensieren
@@ -531,10 +547,10 @@ class OracleDelayArbStrategy(StrategyBase):
                 winner = "DOWN"
                 winner_tid = down_tid
 
-            price_change_pct = (current_price - start_price) / start_price * 100
+            price_change_pct = price_change_pct_full  # Volle 5min/15min Messung (nicht T-12s)
 
             # ═══ ANTI-NOISE GUARD (Deadzone) ═══
-            # Bei < 0.01% Delta ist Winner-Bestimmung Rauschen → UMA Oracle unberechenbar
+            # Bei < 0.05% Delta ist Winner-Bestimmung Rauschen → UMA Oracle unberechenbar
             if abs(price_change_pct) < self.deadzone_pct:
                 logger.info(
                     f"ODA CANCEL: {asset} | Price movement too small "
