@@ -76,11 +76,13 @@ class PolymarketExecutor:
         try:
             from py_clob_client.client import ClobClient
 
+            # signature_type: 0=EOA, 2=POLY_GNOSIS_SAFE
+            sig_type = 2 if safe_address else 0
             self._client = ClobClient(
                 host="https://clob.polymarket.com",
                 key=pk,
                 chain_id=137,  # Polygon
-                signature_type=0,  # EOA signiert L1/L2 Auth, Safe haelt Tokens
+                signature_type=sig_type,
                 funder=effective_funder,
             )
 
