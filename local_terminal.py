@@ -68,8 +68,11 @@ class RemoteReader:
             return f"SSH_ERROR: {e}"
 
     def fetch_journal(self) -> list[dict]:
-        """Liest trade_journal.jsonl vom Server."""
-        raw = self._ssh(f"cat {BOT_DIR}/data/trade_journal.jsonl 2>/dev/null", timeout=15)
+        """Liest nur ODA/CT/LT Trades vom Server (filtert serverseitig)."""
+        raw = self._ssh(
+            f"grep -E '\"trade_id\": \"(ODA|CT-|LT-)' {BOT_DIR}/data/trade_journal.jsonl 2>/dev/null",
+            timeout=20,
+        )
         if raw.startswith("SSH_ERROR"):
             return []
         records = []
@@ -102,8 +105,12 @@ class RemoteReader:
 
     def fetch_process(self) -> str:
         """Prueft ob Bot-Prozess laeuft."""
-        raw = self._ssh("pgrep -fa 'python.*main.py' 2>/dev/null || echo 'NOT_RUNNING'")
-        return raw.strip()
+        raw = self._ssh("pgrep -c -f 'python3 main.py' 2>/dev/null || echo '0'")
+        try:
+            count = int(raw.strip())
+            return "RUNNING" if count > 0 else "NOT_RUNNING"
+        except ValueError:
+            return raw.strip()
 
     def fetch_uptime(self) -> str:
         """Server-Uptime."""
@@ -120,7 +127,7 @@ def compute_stats(records: list[dict]) -> dict:
     by_trade: dict[str, list] = defaultdict(list)
     for r in records:
         tid = r.get("trade_id", "")
-        if tid:
+        if tid and not tid.startswith("REDEEM-CLEANUP"):
             by_trade[tid].append(r)
 
     strat_stats: dict[str, dict] = defaultdict(lambda: {
@@ -131,11 +138,15 @@ def compute_stats(records: list[dict]) -> dict:
 
     for tid, events in by_trade.items():
         open_ev = next((e for e in events if e.get("event") == "open"), None)
-        close_ev = next((e for e in events if e.get("event") in ("redeemed", "resolved_loss", "close")), None)
+        close_ev = next((e for e in events if e.get("event") in ("redeemed", "resolved_loss", "close") and e.get("trade_id") == tid), None)
         live_upd = next((e for e in events if e.get("event") == "live_update"), None)
 
+        # Wenn kein open_ev: nutze close oder skip
         if not open_ev:
-            continue
+            if close_ev:
+                open_ev = close_ev  # standalone redeemed = nutze als Basis
+            else:
+                continue
 
         # Merge live_update
         if live_upd and open_ev:
@@ -169,14 +180,15 @@ def compute_stats(records: list[dict]) -> dict:
             "live": bool(open_ev.get("live_order_success")),
         }
 
-        if close_ev:
+        if close_ev and close_ev is not open_ev:
             pnl = close_ev.get("pnl_usd", 0)
             event_type = close_ev.get("event", "")
-            if event_type == "redeemed":
+            is_win = close_ev.get("outcome_correct", False) or pnl > 0
+            if event_type == "redeemed" and is_win:
                 strat_stats[strat]["wins"] += 1
                 trade_info["status"] = "WIN"
                 trade_info["pnl"] = pnl
-            elif event_type == "resolved_loss":
+            elif event_type in ("redeemed", "resolved_loss") and not is_win:
                 strat_stats[strat]["losses"] += 1
                 trade_info["status"] = "LOSS"
                 trade_info["pnl"] = pnl
@@ -243,7 +255,7 @@ def build_display(stats: dict, log_lines: list[str], deadzone_cancels: int,
     )
 
     # Header
-    is_running = "NOT_RUNNING" not in process_info
+    is_running = "RUNNING" in process_info and "NOT_RUNNING" not in process_info
     status = "[bold green]LIVE[/]" if is_running else "[bold red]STOPPED[/]"
     now = datetime.now().strftime("%H:%M:%S")
     layout["header"].update(

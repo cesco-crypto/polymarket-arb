@@ -1,0 +1,2 @@
+- [Monday Plan](project_monday_plan.md) — Konkreter Aktionsplan für Montag 30. März: Daten auswerten, Entscheidung nach Win Rate
+- [Top 10 Optimierungen](project_top10_improvements.md) — Brutale HFT-Analyse: Polymarket WS, Maker Pivot, Logistic Calibration, Event-driven
