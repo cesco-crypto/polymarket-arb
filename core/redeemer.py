@@ -297,10 +297,14 @@ class AutoRedeemer:
                     calldata = selector + encoded_args
 
                     from py_builder_relayer_client.client import SafeTransaction
+                    from py_builder_relayer_client.models import OperationType
+                    calldata_hex = "0x" + calldata.hex()
+                    logger.debug(f"AutoRedeemer: Redeem calldata len={len(calldata_hex)} to={CTF_ADDRESS}")
                     safe_tx = SafeTransaction(
                         to=Web3.to_checksum_address(CTF_ADDRESS),
-                        value=0,
-                        data="0x" + calldata.hex(),
+                        operation=OperationType.Call,
+                        data=calldata_hex,
+                        value="0",
                     )
 
                     resp = self._relay_client.execute([safe_tx], f"redeem {title}")
