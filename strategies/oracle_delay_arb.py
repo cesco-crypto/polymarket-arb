@@ -731,65 +731,112 @@ class OracleDelayArbStrategy(StrategyBase):
     # ═══════════════════════════════════════════════════════════════
 
     async def _get_token_ids(self, slug: str, asset: str) -> tuple | None:
-        """Holt Token-IDs aus der EIGENEN MarketDiscovery (autark).
+        """Holt Token-IDs per EXAKTEM Slug-Match. Idiotensicher.
 
-        Kein Zugriff auf active_strategies — ODA ist self-sufficient.
-        Fallback: Gamma API direkt.
+        Architektur:
+        1. Discovery Cache: O(1) dict.get(slug) — kein Iterieren, kein Toleranz-Match
+        2. Gamma API: GET /events?slug={slug} — exakt 1 Event oder Skip
+        3. Cross-Validation: Cache CID == Gamma CID (fuer erste 50 Trades)
+        4. Outcome-Mapping: Explizite Validierung (Up/Down/Yes/No)
+
+        Prinzip: Lieber kein Trade als falscher Trade.
         """
-        start_ts = int(slug.split("-")[-1])
-
-        # 1. EIGENE Discovery (self.discovery)
+        # ── SCHRITT 1: Discovery Cache — exakter Slug-Key ──
+        cache_result = None
         try:
-            for s, w in self.discovery.windows.items():
-                if w.asset.upper() == asset and w.up_token_id and w.down_token_id:
-                    if abs(w.window_start_ts - start_ts) < 30:
-                        return (w.up_token_id, w.down_token_id, w.condition_id)
+            w = self.discovery.windows.get(slug)
+            if w and w.asset.upper() == asset:
+                if w.up_token_id and w.down_token_id and w.condition_id:
+                    cache_result = (w.up_token_id, w.down_token_id, w.condition_id)
+                else:
+                    logger.info(f"ODA TOKEN-INCOMPLETE: {slug} | cache hat Slug aber fehlende IDs")
         except Exception as e:
-            logger.warning(f"ODA own Discovery error: {e}")
+            logger.warning(f"ODA Discovery lookup error: {e}")
 
-        # 2. Fallback: Gamma API (korrekte Quelle fuer Crypto Markets)
-        if not self._session or self._session.closed:
-            logger.warning(f"ODA: No session for fallback — {slug}")
-            return None
-        try:
-            asset_lower = asset.lower()
-            asset_name = "bitcoin" if asset_lower == "btc" else "ethereum"
-            url = f"https://gamma-api.polymarket.com/markets?closed=false&limit=50"
-            async with self._session.get(url) as resp:
-                if resp.status != 200:
-                    logger.warning(f"ODA Gamma API error: status {resp.status}")
-                    return None
-                markets = await resp.json()
+        # ── SCHRITT 2: Gamma API — exakter Slug-Query ──
+        gamma_result = None
+        if self._session and not self._session.closed:
+            try:
+                url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+                async with self._session.get(url) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_http_{resp.status}")
+                    else:
+                        data = await resp.json()
 
-            for m in markets if isinstance(markets, list) else []:
-                q = m.get("question", "").lower()
-                if asset_name not in q or "up or down" not in q:
-                    continue
+                        # Validierung: exakt 1 Event
+                        if not data:
+                            logger.info(f"ODA TOKEN-SKIP: {slug} | reason=gamma_empty")
+                        elif len(data) > 1:
+                            logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_ambiguous (N={len(data)})")
+                        else:
+                            event = data[0]
+                            markets = event.get("markets", [])
+                            if not markets:
+                                logger.info(f"ODA TOKEN-SKIP: {slug} | reason=gamma_no_markets")
+                            else:
+                                market = markets[0]
+                                cid = market.get("conditionId", "")
+                                tokens_raw = market.get("clobTokenIds", "[]")
+                                outcomes_raw = market.get("outcomes", "[]")
+                                tokens = json.loads(tokens_raw) if isinstance(tokens_raw, str) else tokens_raw
+                                outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else outcomes_raw
 
-                cid = m.get("conditionId", "")
-                tokens = m.get("clobTokenIds", [])
-                outcomes = m.get("outcomes", [])
+                                # Outcome-Mapping Validierung
+                                if len(tokens) != 2:
+                                    logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=invalid_tokens (N={len(tokens)})")
+                                elif len(outcomes) != 2:
+                                    logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=invalid_outcomes (N={len(outcomes)})")
+                                else:
+                                    up_tid = ""
+                                    down_tid = ""
+                                    for i, outcome in enumerate(outcomes):
+                                        ol = outcome.lower() if isinstance(outcome, str) else ""
+                                        if ol in ("up", "yes"):
+                                            up_tid = tokens[i]
+                                        elif ol in ("down", "no"):
+                                            down_tid = tokens[i]
 
-                if len(tokens) < 2 or len(outcomes) < 2:
-                    continue
+                                    if not up_tid or not down_tid:
+                                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=outcome_mapping_failed ({outcomes})")
+                                    elif up_tid == down_tid:
+                                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=duplicate_token_ids")
+                                    elif not cid:
+                                        logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=no_condition_id")
+                                    else:
+                                        gamma_result = (up_tid, down_tid, cid)
 
-                up_tid = ""
-                down_tid = ""
-                for i, outcome in enumerate(outcomes):
-                    ol = outcome.lower() if isinstance(outcome, str) else ""
-                    if ol in ("up", "yes") and i < len(tokens):
-                        up_tid = tokens[i]
-                    elif ol in ("down", "no") and i < len(tokens):
-                        down_tid = tokens[i]
+            except asyncio.TimeoutError:
+                logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_timeout")
+            except Exception as e:
+                logger.warning(f"ODA TOKEN-SKIP: {slug} | reason=gamma_error ({str(e)[:60]})")
 
-                if up_tid and down_tid:
-                    logger.info(f"ODA Token-IDs via Gamma API: {asset} up={up_tid[:16]}... dn={down_tid[:16]}...")
-                    return (up_tid, down_tid, cid)
+        # ── SCHRITT 3: Entscheidung mit Cross-Validation ──
+        if cache_result and gamma_result:
+            cache_cid = cache_result[2]
+            gamma_cid = gamma_result[2]
+            if cache_cid == gamma_cid:
+                logger.info(f"ODA TOKEN-MATCH: {slug} | source=discovery+gamma | cid={cache_cid[:20]}...")
+                return cache_result
+            else:
+                logger.error(
+                    f"ODA TOKEN-CONFLICT: {slug} | cache_cid={cache_cid[:20]}... | "
+                    f"gamma_cid={gamma_cid[:20]}... | SKIPPED"
+                )
+                return None
 
-            logger.info(f"ODA: No matching market in Gamma API for {asset} {slug[-15:]}")
-        except Exception as e:
-            logger.warning(f"ODA Gamma API token fetch error: {e}")
+        if cache_result and not gamma_result:
+            # Gamma war nicht erreichbar — Cache vertrauen
+            logger.info(f"ODA TOKEN-MATCH: {slug} | source=discovery (gamma unavailable) | cid={cache_result[2][:20]}...")
+            return cache_result
 
+        if not cache_result and gamma_result:
+            # Cache leer — Gamma als Fallback
+            logger.info(f"ODA TOKEN-MATCH: {slug} | source=gamma (cache empty) | cid={gamma_result[2][:20]}...")
+            return gamma_result
+
+        # Beide leer — kein Trade
+        logger.info(f"ODA TOKEN-SKIP: {slug} | reason=no_source")
         return None
 
     async def _fetch_active_windows(self) -> list[dict]:
