@@ -143,7 +143,7 @@ class OracleDelayArbStrategy(StrategyBase):
 
         # Binance Oracle Referenz — direkter RAM-Read bei Execution
         self._oracle = None  # Gesetzt in _register_binance_callback()
-        self._price_at_window_start: dict[str, float] = {}  # slug → price at start
+        self._price_at_window_start: dict[str, tuple] = {}  # slug → (price, timestamp)
 
     # ═══════════════════════════════════════════════════════════════
     # LIFECYCLE
@@ -432,11 +432,12 @@ class OracleDelayArbStrategy(StrategyBase):
                             logger.debug(f"ODA: Orderbuch leer fuer {w['asset']} — WS re-subscribe triggered")
 
                     # Snapshot: Binance-Preis JETZT speichern (= Window-Start Referenz)
+                    # Timestamp mitspeichern fuer measured_s Validation
                     symbol = f"{w['asset']}/USDT"
                     if self._oracle:
                         tick = self._oracle.get_latest(symbol)
                         if tick and tick.mid > 0:
-                            self._price_at_window_start[slug] = tick.mid
+                            self._price_at_window_start[slug] = (tick.mid, time.time())
 
                     # PLANEN: Dedizierter Timer-Task fuer dieses Window
                     self._scheduled_windows.add(slug)
@@ -516,24 +517,30 @@ class OracleDelayArbStrategy(StrategyBase):
                 logger.info(f"ODA Skip: {asset} — no price data")
                 return
 
-            # ═══ PRICE CHANGE: Volle 5min (oder 15min) Messung ═══
-            interval_s = 300 if "5m" in slug else 900
-            momentum = self._oracle.get_momentum(symbol, interval_s) if self._oracle else None
-
-            start_price = self._price_at_window_start.get(slug, 0)
-            if momentum is not None:
-                price_change_pct = momentum
-                # start_price fuer BURST-Log rekonstruieren
-                if abs(momentum) > 0.0001:
-                    start_price = current_price / (1 + momentum / 100)
-                else:
-                    start_price = current_price
-            elif start_price > 0:
-                # Fallback: Snapshot aus Schedule-Time (~T-300s)
-                price_change_pct = (current_price - start_price) / start_price * 100
-            else:
-                logger.info(f"ODA Skip: {asset} — no price history")
+            # ═══ PRICE CHANGE: Snapshot-basiert (T-310s → T+0s) ═══
+            # NICHT get_momentum() verwenden — Tick-Buffer (maxlen=500) ist zu klein
+            # fuer 300s bei ~50-200 Ticks/s. Stattdessen: zuverlaessiger Snapshot
+            # aus Schedule-Time (~T-310s), gespeichert in _price_at_window_start.
+            snapshot = self._price_at_window_start.get(slug)
+            if snapshot is None:
+                logger.info(f"ODA Skip: {asset} — no start_price snapshot for {slug[-15:]}")
                 return
+
+            start_price, snapshot_ts = snapshot
+            measured_s = time.time() - snapshot_ts
+
+            if start_price <= 0:
+                logger.info(f"ODA Skip: {asset} — start_price invalid")
+                return
+
+            price_change_pct = (current_price - start_price) / start_price * 100
+
+            # Stale-Detection: wenn start_price == current_price exakt → wahrscheinlich Bug
+            if start_price == current_price:
+                logger.warning(
+                    f"ODA STALE: {asset} start_price == current_price (${start_price:.2f}) "
+                    f"after {measured_s:.0f}s — possible stale snapshot"
+                )
 
             if current_price > start_price:
                 winner = "UP"
@@ -605,7 +612,7 @@ class OracleDelayArbStrategy(StrategyBase):
             logger.info(
                 f"ODA BURST: {asset} {winner} | "
                 f"Binance {start_price:.2f}->{current_price:.2f} ({price_change_pct:+.4f}%) | "
-                f"tick_age={tick_age_ms:.1f}ms | signal={signal_tier} | progress={event_progress_ms:.0f}ms | "
+                f"measured={measured_s:.0f}s | tick_age={tick_age_ms:.1f}ms | signal={signal_tier} | "
                 f"spread={spread_pct:.1f}% | {regime_tag} | firing 5 FAK shots..."
             )
 
