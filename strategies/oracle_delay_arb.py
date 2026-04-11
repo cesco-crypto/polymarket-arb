@@ -484,14 +484,15 @@ class OracleDelayArbStrategy(StrategyBase):
                 self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
                 logger.info(f"ODA PRE-SIGN: {asset} {w['timeframe']} UP+DOWN @ ${pre_price}")
 
-            # Speichere Start-Preis fuer Crossover-Vergleich (direkt vom Oracle)
-            start_price = 0.0
-            if self._oracle:
-                tick = self._oracle.get_latest(symbol)
-                if tick:
-                    start_price = tick.mid
+            # Start-Preis: Window-Start Snapshot (gespeichert bei Schedule, ~2min vor Close)
+            # NICHT den T-12s Preis nehmen — der misst nur 12s statt volle 5min
+            start_price = self._price_at_window_start.get(slug, 0)
             if start_price <= 0:
-                start_price = self._price_at_window_start.get(slug, 0)
+                # Fallback: aktueller Preis (nur wenn kein Snapshot vorhanden)
+                if self._oracle:
+                    tick = self._oracle.get_latest(symbol)
+                    if tick:
+                        start_price = tick.mid
 
             # ── PHASE 2: Sleep bis T-15ms, dann BURST-FIRE ──
             # Aufwachen 15ms VOR Close — Netzwerk-Laufzeit kompensieren
