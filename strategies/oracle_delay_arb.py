@@ -436,7 +436,7 @@ class OracleDelayArbStrategy(StrategyBase):
                     symbol = f"{w['asset']}/USDT"
                     if self._oracle:
                         tick = self._oracle.get_latest(symbol)
-                        if tick and tick.mid > 0:
+                        if tick and tick.mid > 0 and (time.time() - tick.timestamp) < 5.0:
                             self._price_at_window_start[slug] = (tick.mid, time.time())
 
                     # PLANEN: Dedizierter Timer-Task fuer dieses Window
