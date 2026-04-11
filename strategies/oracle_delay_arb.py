@@ -110,6 +110,8 @@ class OracleDelayArbStrategy(StrategyBase):
         self.settings = settings
         self.executor = PolymarketExecutor(settings)
         self.journal = TradeJournal()
+        from core.learn_machine import LearnMachine
+        self._learn = LearnMachine()
 
         # EIGENE MarketDiscovery — autark, keine Abhaengigkeit von anderen Strategien
         self.discovery = MarketDiscovery(
@@ -239,6 +241,7 @@ class OracleDelayArbStrategy(StrategyBase):
                 self._status_loop(),
                 self._subscription_refresh_loop(),
                 self._session_warmer(),
+                self._daily_report_loop(),
                 return_exceptions=True,
             )
         except asyncio.CancelledError:
@@ -310,6 +313,17 @@ class OracleDelayArbStrategy(StrategyBase):
             try:
                 await asyncio.sleep(60)
                 await self._subscribe_clob_tokens()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+
+    async def _daily_report_loop(self) -> None:
+        """Sendet Daily Report via Telegram um 22:00 UTC."""
+        while self._running:
+            try:
+                await asyncio.sleep(300)  # Alle 5min pruefen
+                await self._learn.check_daily_report()
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -578,6 +592,8 @@ class OracleDelayArbStrategy(StrategyBase):
                     f"ODA CANCEL: {asset} | Price movement too small "
                     f"({price_change_pct:+.4f}% < {self.deadzone_pct}%) -> UMA Oracle Trap avoided"
                 )
+                self._learn.log_burst(slug, asset, action="SKIP", abs_delta=abs(price_change_pct),
+                                      tick_age_ms=tick_age_ms, skip_reason="deadzone")
                 return
 
             # ═══ SIGNAL-TIER + REGIME (Measurement Layer) ═══
@@ -637,6 +653,15 @@ class OracleDelayArbStrategy(StrategyBase):
                 f"measured={measured_s:.0f}s | tick_age={tick_age_ms:.1f}ms | signal={signal_tier} | "
                 f"spread={spread_pct:.1f}% | {regime_tag} | firing 5 FAK shots..."
             )
+
+            # Guardrail Check
+            should_skip, skip_reason = self._learn.should_skip()
+            if should_skip:
+                logger.warning(f"ODA GUARDRAIL SKIP: {asset} | {skip_reason}")
+                self._learn.log_burst(slug, asset, action="SKIP", abs_delta=abs(price_change_pct),
+                                      tick_age_ms=tick_age_ms, best_ask=0, spread_pct=spread_pct,
+                                      skip_reason=skip_reason)
+                return
 
             # 2. BURST-FIRE: 5 FAK Orders, Fire-and-Forget, 5ms Abstand
             #    Die Matching-Engine lehnt zu fruehe ab, der "goldene Schuss" trifft
@@ -704,6 +729,10 @@ class OracleDelayArbStrategy(StrategyBase):
                         f"edge={edge_pct:.1f}% | t={shot_t:.1f}ms"
                     )
                     logger.info(f"ODA FILL: ask=${shot_ask:.3f} cap=${self.max_entry_price} edge={edge_pct:.1f}% signal={signal_tier} spread={spread_pct:.1f}% | FILLED")
+                    # Learn Machine: FILL loggen (PnL wird beim Redeem aktualisiert)
+                    self._learn.log_burst(slug, asset, action="FIRE", abs_delta=abs(price_change_pct),
+                                          tick_age_ms=tick_age_ms, best_ask=shot_ask, spread_pct=spread_pct,
+                                          outcome="FILLED", fill_price=shot_ask)
                     break  # Erster erfolgreicher Shot genuegt
 
                 except Exception as e:
@@ -722,6 +751,21 @@ class OracleDelayArbStrategy(StrategyBase):
             total_ms = (time.perf_counter() - t0) * 1000
             status = "FILLED" if filled else "NO_FILL"
             logger.info(f"ODA BURST DONE: {slug[-15:]} | {status} | total={total_ms:.1f}ms")
+
+            # Learn Machine: Burst-Outcome loggen
+            if not filled:
+                # Bestimme Outcome-Typ
+                if shot_ask > self.max_entry_price:
+                    burst_outcome = "CAP_EXCEEDED"
+                elif shot_ask < self.min_entry_price and shot_ask > 0:
+                    burst_outcome = "FLOOR_EXCEEDED"
+                elif shot_ask <= 0:
+                    burst_outcome = "NO_LIQUIDITY"
+                else:
+                    burst_outcome = "EXECUTION_FAIL"
+                self._learn.log_burst(slug, asset, action="FIRE", abs_delta=abs(price_change_pct),
+                                      tick_age_ms=tick_age_ms, best_ask=shot_ask, spread_pct=spread_pct,
+                                      outcome=burst_outcome)
 
         except asyncio.CancelledError:
             pass
