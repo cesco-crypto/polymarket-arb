@@ -1031,17 +1031,17 @@ class OracleDelayArbStrategy(StrategyBase):
     _PRECLOSE_LOG = Path("data/preclose_test.jsonl")
     _PRECLOSE_SIZE = 2.0      # $2 Learn-Test Size
     _PRECLOSE_MIN_CLOB_ASK = 0.65  # Markt muss mind. 65% sicher sein
-    _PRECLOSE_MAX_CLOB_ASK = 0.93  # Nicht ueber 93c kaufen (Break-Even ~93% WR)
+    _PRECLOSE_MAX_CLOB_ASK = 0.90  # Nicht ueber 90c kaufen (min 10% Edge)
     _PRECLOSE_MAX_TICK_AGE = 500   # 500ms Binance-Freshness
 
     async def _preclose_test(
         self, slug: str, asset: str, symbol: str, end_ts: float,
         up_tid: str, down_tid: str, condition_id: str, w: dict,
     ) -> bool:
-        """BTC-only Preclose: Entry bei T-2s, CLOB-Signal + Binance-Bestaetigung.
+        """BTC-only Preclose: Entry bei T-5s, CLOB-Signal + Binance-Bestaetigung.
 
         Logik:
-        1. Sleep bis T-2s
+        1. Sleep bis T-5s
         2. Lies CLOB-Ask fuer UP und DOWN
         3. Die teurere Seite = vermuteter Winner (Markt-Konsens)
         4. Binance-Check: zeigt Binance dieselbe Richtung?
@@ -1056,11 +1056,11 @@ class OracleDelayArbStrategy(StrategyBase):
                 return False
             start_price, _ = snapshot
 
-            # ── Sleep bis T-2s ──
+            # ── Sleep bis T-5s ──
             now = time.time()
-            t2_target = end_ts - 2.0
-            if now < t2_target:
-                await asyncio.sleep(t2_target - now)
+            t5_target = end_ts - 5.0
+            if now < t5_target:
+                await asyncio.sleep(t5_target - now)
 
             if not self._running:
                 return False
