@@ -760,13 +760,25 @@ class OracleDelayArbStrategy(StrategyBase):
                             shot_ask = book.best_ask
                             _tier_used = "ws"
 
-                    # Tier 2: Eigene Discovery Cache
+                    # Tier 2: Eigene Discovery Cache (mit Stale-Guard)
+                    _raw_disc_ask = 0.0
                     if shot_ask <= 0:
                         try:
                             for s, wnd in self.discovery.windows.items():
                                 if wnd.condition_id == condition_id:
-                                    shot_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
-                                    _tier_used = "discovery"
+                                    _raw_disc_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
+                                    if _raw_disc_ask > 0.02:
+                                        shot_ask = _raw_disc_ask
+                                        _tier_used = "discovery"
+                                    else:
+                                        # HOTFIX STALE-GUARD: Post-Resolution Loser-Preise
+                                        # ($0.001-$0.01) verwerfen, weiter zu Tier 3
+                                        _tier_used = "discovery_stale"
+                                        logger.info(
+                                            f"ODA STALE-GUARD: {asset} {_tf} "
+                                            f"disc_ask=${_raw_disc_ask:.3f} rejected "
+                                            f"(<=0.02) | {slug}"
+                                        )
                                     break
                         except Exception:
                             pass
@@ -781,6 +793,8 @@ class OracleDelayArbStrategy(StrategyBase):
                     if shot == 0:
                         _diag["tier_used"] = _tier_used
                         _diag["shot_ask"] = round(shot_ask, 3)
+                        _diag["raw_disc_ask"] = round(_raw_disc_ask, 3)
+                        _diag["disc_rejected"] = _tier_used == "discovery_stale"
                         _diag["ts"] = round(time.time(), 3)
                         try:
                             _dbg_path = Path("data/token_path_debug.jsonl")
