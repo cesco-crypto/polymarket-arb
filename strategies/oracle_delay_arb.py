@@ -527,19 +527,31 @@ class OracleDelayArbStrategy(StrategyBase):
                 logger.info(f"ODA PRE-SIGN: {asset} {w['timeframe']} UP+DOWN @ ${pre_price}")
 
             # ── WS-ASK-TIMELINE LOGGER (diagnostisch, T-12s bis T+5s, 100ms Intervall) ──
-            # Liest CLOB WS Books fuer beide Tokens + Binance-Preis → JSONL
-            # Rein diagnostisch: kein Einfluss auf Trading-Logik
-            if "5m" in slug:  # Nur 5m — 15m ignorieren
+            if "5m" in slug:
                 asyncio.create_task(
                     self._log_ws_ask_timeline(slug, asset, end_ts, up_tid, down_tid, symbol)
                 )
 
-            # Momentum wird NACH Phase 2 berechnet (braucht current_price von T+0s)
+            # ═══════════════════════════════════════════════════════════════
+            # PHASE 1.5: BTC-ONLY PRECLOSE TEST (T-12s → T-8s → Entry)
+            # Learn-Test: früher Entry mit Richtungsstabilitäts-Filter
+            # ═══════════════════════════════════════════════════════════════
+            _preclose_fired = False
+            _tf = w.get("timeframe", "5m")
 
-            # ── PHASE 2: Sleep bis T-15ms, dann BURST-FIRE ──
-            # Aufwachen 15ms VOR Close — Netzwerk-Laufzeit kompensieren
+            if asset == "BTC" and _tf == "5m":
+                _preclose_fired = await self._preclose_test(
+                    slug, asset, symbol, end_ts,
+                    up_tid, down_tid, condition_id, w
+                )
+
+            # Falls Preclose gefeuert hat → kein T+0ms Burst mehr
+            if _preclose_fired:
+                return
+
+            # ── PHASE 2: Sleep bis T-15ms, dann BURST-FIRE (Legacy/Fallback) ──
             now = time.time()
-            wake_at = end_ts - 0.015  # T-15ms
+            wake_at = end_ts - 0.015
             sleep_s = wake_at - now
             if sleep_s > 0:
                 await asyncio.sleep(sleep_s)
@@ -1032,6 +1044,330 @@ class OracleDelayArbStrategy(StrategyBase):
             pass
         except Exception as e:
             logger.debug(f"WS-Timeline error ({slug}): {e}")
+
+    # ═══════════════════════════════════════════════════════════════
+    # BTC-ONLY PRECLOSE TEST (T-8s Entry mit Richtungsfilter)
+    # ═══════════════════════════════════════════════════════════════
+
+    _PRECLOSE_LOG = Path("data/preclose_test.jsonl")
+    _PRECLOSE_SIZE = 2.0      # $2 Learn-Test Size
+    _PRECLOSE_CAP = 0.80      # Hartes Ask-Maximum
+    _PRECLOSE_IDEAL = 0.70    # Bevorzugter Zielbereich
+    _PRECLOSE_MIN_ASK = 0.05  # Minimum (Stale-Guard)
+    _PRECLOSE_MIN_DELTA = 0.10  # 0.10% Mindestbewegung
+    _PRECLOSE_MARGINAL_DELTA = 0.15  # 0.15% fuer Ask 0.70-0.80
+    _PRECLOSE_MAX_SPREAD = 15.0  # 15% Spread-Limit
+    _PRECLOSE_MAX_TICK_AGE = 500  # 500ms Tick-Freshness
+
+    async def _preclose_test(
+        self, slug: str, asset: str, symbol: str, end_ts: float,
+        up_tid: str, down_tid: str, condition_id: str, w: dict,
+    ) -> bool:
+        """BTC-only Preclose Learn-Test: Entry bei T-8s mit Dreierfilter.
+
+        Returns True wenn gefeuert wurde (kein T+0ms Burst mehr noetig).
+        Returns False wenn geskippt (Fallback auf Legacy-Burst).
+        """
+        try:
+            # ── Snapshot T-12s: Binance-Preis + Richtung ──
+            snapshot = self._price_at_window_start.get(slug)
+            if not snapshot:
+                self._log_preclose(slug, asset, "SKIP", "no_start_snapshot")
+                return False
+            start_price, _ = snapshot
+
+            tick_t12 = self._oracle.get_latest(symbol) if self._oracle else None
+            if not tick_t12 or tick_t12.mid <= 0:
+                self._log_preclose(slug, asset, "SKIP", "no_binance_t12")
+                return False
+
+            price_t12 = tick_t12.mid
+            delta_t12 = (price_t12 - start_price) / start_price * 100
+            direction_t12 = "UP" if price_t12 > start_price else "DOWN"
+
+            # ── Sleep bis T-10s ──
+            now = time.time()
+            t10_target = end_ts - 10
+            if now < t10_target:
+                await asyncio.sleep(t10_target - now)
+
+            if not self._running:
+                return False
+
+            # ── Snapshot T-10s ──
+            tick_t10 = self._oracle.get_latest(symbol) if self._oracle else None
+            if not tick_t10 or tick_t10.mid <= 0:
+                self._log_preclose(slug, asset, "SKIP", "no_binance_t10")
+                return False
+
+            price_t10 = tick_t10.mid
+            delta_t10 = (price_t10 - start_price) / start_price * 100
+            direction_t10 = "UP" if price_t10 > start_price else "DOWN"
+
+            # ── Nahbereichs-Sampling T-10s → T-8s (100ms Intervall) ──
+            nearfield_directions = []
+            t8_target = end_ts - 8
+            while time.time() < t8_target and self._running:
+                _tick = self._oracle.get_latest(symbol) if self._oracle else None
+                if _tick and _tick.mid > 0:
+                    _dir = "UP" if _tick.mid > start_price else "DOWN"
+                    nearfield_directions.append(_dir)
+                await asyncio.sleep(0.1)
+
+            if not self._running:
+                return False
+
+            # ── Snapshot T-8s: Entry-Decision ──
+            tick_t8 = self._oracle.get_latest(symbol) if self._oracle else None
+            if not tick_t8 or tick_t8.mid <= 0:
+                self._log_preclose(slug, asset, "SKIP", "no_binance_t8")
+                return False
+
+            price_t8 = tick_t8.mid
+            delta_t8 = (price_t8 - start_price) / start_price * 100
+            direction_t8 = "UP" if price_t8 > start_price else "DOWN"
+            tick_age_ms = (time.time() - tick_t8.timestamp) * 1000
+
+            # Winner-Token bestimmen
+            if direction_t8 == "UP":
+                winner_tid = up_tid
+                loser_tid = down_tid
+            else:
+                winner_tid = down_tid
+                loser_tid = up_tid
+
+            # WS-Books lesen
+            ws_winner_ask = 0.0
+            ws_loser_ask = 0.0
+            ws_winner_bid = 0.0
+            if self._clob_ws:
+                wb = self._clob_ws.get_book(winner_tid)
+                lb = self._clob_ws.get_book(loser_tid)
+                if wb:
+                    ws_winner_ask = wb.best_ask
+                    ws_winner_bid = wb.best_bid
+                if lb:
+                    ws_loser_ask = lb.best_ask
+
+            spread_pct = 0.0
+            if ws_winner_ask > 0 and ws_winner_bid > 0:
+                spread_pct = (ws_winner_ask - ws_winner_bid) / ws_winner_ask * 100
+
+            # ═══ FILTER-KETTE ═══
+            abs_delta_t8 = abs(delta_t8)
+            abs_delta_t12 = abs(delta_t12)
+            abs_delta_t10 = abs(delta_t10)
+
+            direction_all_consistent = (direction_t12 == direction_t10 == direction_t8)
+            delta_acc_12_8 = abs_delta_t8 >= abs_delta_t12
+            delta_acc_10_8 = abs_delta_t8 >= abs_delta_t10
+
+            # Nahbereichs-Stabilität: alle Samples T-10 bis T-8 gleiche Richtung
+            stable_count = len(nearfield_directions)
+            all_same_dir = (
+                stable_count >= 5  # Mindestens 5 Samples (~500ms Abdeckung)
+                and len(set(nearfield_directions)) == 1
+                and nearfield_directions[0] == direction_t8
+            )
+
+            # Ask-Zone
+            ask = ws_winner_ask
+            if ask <= self._PRECLOSE_IDEAL:
+                ask_zone = "ideal"
+            elif ask <= self._PRECLOSE_CAP:
+                ask_zone = "marginal"
+            else:
+                ask_zone = "rejected"
+
+            # ── Filter anwenden ──
+            skip_reason = ""
+
+            if abs_delta_t8 < self._PRECLOSE_MIN_DELTA:
+                skip_reason = "delta_too_small"
+            elif not direction_all_consistent:
+                skip_reason = "direction_inconsistent"
+            elif not delta_acc_12_8:
+                skip_reason = "delta_decelerating_12_8"
+            elif not delta_acc_10_8:
+                skip_reason = "delta_decelerating_10_8"
+            elif not all_same_dir:
+                skip_reason = "nearfield_unstable"
+            elif ask < self._PRECLOSE_MIN_ASK:
+                skip_reason = "ask_too_low"
+            elif ask > self._PRECLOSE_CAP:
+                skip_reason = "ask_above_cap"
+            elif ask_zone == "marginal" and abs_delta_t8 < self._PRECLOSE_MARGINAL_DELTA:
+                skip_reason = "marginal_ask_weak_delta"
+            elif spread_pct > self._PRECLOSE_MAX_SPREAD:
+                skip_reason = "spread_too_wide"
+            elif not (self._clob_ws and self._clob_ws.get_book(winner_tid) and self._clob_ws.get_book(loser_tid)):
+                skip_reason = "ws_book_missing"
+            elif tick_age_ms > self._PRECLOSE_MAX_TICK_AGE:
+                skip_reason = "tick_too_stale"
+
+            if skip_reason:
+                self._log_preclose(
+                    slug, asset, "SKIP", skip_reason,
+                    delta_t12=delta_t12, delta_t10=delta_t10, delta_t8=delta_t8,
+                    dir_t12=direction_t12, dir_t10=direction_t10, dir_t8=direction_t8,
+                    dir_consistent=direction_all_consistent,
+                    acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
+                    stable_samples=stable_count, all_same=all_same_dir,
+                    winner_ask=ask, loser_ask=ws_loser_ask,
+                    ask_zone=ask_zone, spread=spread_pct,
+                    winner_tid=winner_tid, binance_mid=price_t8,
+                    binance_start=start_price, tick_age=tick_age_ms,
+                    secs_to_close=end_ts - time.time(),
+                )
+                logger.info(
+                    f"ODA PRECLOSE SKIP: {asset} {direction_t8} | "
+                    f"ask=${ask:.3f} delta={delta_t8:+.3f}% | {skip_reason}"
+                )
+                return False
+
+            # ═══ FIRE: Einzelner FAK-Shot ═══
+            logger.info(
+                f"ODA PRECLOSE FIRE: {asset} {direction_t8} | "
+                f"ask=${ask:.3f} delta={delta_t8:+.3f}% | "
+                f"zone={ask_zone} | {slug[-15:]}"
+            )
+
+            # Dedup
+            if slug in self._sniped_windows:
+                self._log_preclose(
+                    slug, asset, "SKIP", "already_sniped",
+                    delta_t12=delta_t12, delta_t10=delta_t10, delta_t8=delta_t8,
+                    dir_t12=direction_t12, dir_t10=direction_t10, dir_t8=direction_t8,
+                    dir_consistent=direction_all_consistent,
+                    acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
+                    stable_samples=stable_count, all_same=all_same_dir,
+                    winner_ask=ask, loser_ask=ws_loser_ask,
+                    ask_zone=ask_zone, spread=spread_pct,
+                    winner_tid=winner_tid, binance_mid=price_t8,
+                    binance_start=start_price, tick_age=tick_age_ms,
+                    secs_to_close=end_ts - time.time(),
+                )
+                return False
+            self._sniped_windows.add(slug)
+
+            # Order vorbereiten
+            order_price = min(ask, self._PRECLOSE_CAP)
+            window_data = {
+                "slug": slug, "asset": asset,
+                "question": f"{asset} Up or Down {w.get('timeframe', '5m')}",
+                "condition_id": condition_id,
+                "up_token_id": up_tid, "down_token_id": down_tid,
+            }
+
+            fill_price = 0.0
+            live_order_id = ""
+            outcome = "REJECTED"
+
+            try:
+                # Temporaer Size auf $2 fuer Learn-Test
+                _orig_size = self.trade_size_usd
+                self.trade_size_usd = self._PRECLOSE_SIZE
+                await self._execute_snipe(
+                    window_data, direction_t8, winner_tid, order_price,
+                    entry_binance_price=price_t8,
+                    tick_age_ms=tick_age_ms,
+                    price_change_pct=delta_t8,
+                    signal_tier="PRECLOSE",
+                    regime_tag="PRECLOSE_TEST",
+                    spread_pct=spread_pct,
+                )
+                self.trade_size_usd = _orig_size
+                # Check if fill succeeded via last trade
+                if self._trades and self._trades[-1].live_success:
+                    fill_price = order_price
+                    live_order_id = self._trades[-1].live_order_id
+                    outcome = "FILLED"
+                else:
+                    outcome = "REJECTED"
+            except Exception as e:
+                outcome = f"ERROR:{str(e)[:30]}"
+
+            self._log_preclose(
+                slug, asset, "FIRE", "",
+                delta_t12=delta_t12, delta_t10=delta_t10, delta_t8=delta_t8,
+                dir_t12=direction_t12, dir_t10=direction_t10, dir_t8=direction_t8,
+                dir_consistent=direction_all_consistent,
+                acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
+                stable_samples=stable_count, all_same=all_same_dir,
+                winner_ask=ask, loser_ask=ws_loser_ask,
+                ask_zone=ask_zone, spread=spread_pct,
+                winner_tid=winner_tid, binance_mid=price_t8,
+                binance_start=start_price, tick_age=tick_age_ms,
+                secs_to_close=end_ts - time.time(),
+                fill_price=fill_price, live_order_id=live_order_id,
+                outcome=outcome,
+            )
+
+            logger.info(
+                f"ODA PRECLOSE {outcome}: {asset} {direction_t8} @ ${fill_price:.3f} | "
+                f"ask=${ask:.3f} zone={ask_zone} | {slug[-15:]}"
+            )
+            return True  # Preclose hat gefeuert → kein T+0ms Burst
+
+        except asyncio.CancelledError:
+            return False
+        except Exception as e:
+            logger.error(f"ODA Preclose Error ({slug}): {e}")
+            return False
+
+    def _log_preclose(
+        self, slug: str, asset: str, action: str, skip_reason: str,
+        delta_t12: float = 0, delta_t10: float = 0, delta_t8: float = 0,
+        dir_t12: str = "", dir_t10: str = "", dir_t8: str = "",
+        dir_consistent: bool = False,
+        acc_12_8: bool = False, acc_10_8: bool = False,
+        stable_samples: int = 0, all_same: bool = False,
+        winner_ask: float = 0, loser_ask: float = 0,
+        ask_zone: str = "", spread: float = 0,
+        winner_tid: str = "", binance_mid: float = 0,
+        binance_start: float = 0, tick_age: float = 0,
+        secs_to_close: float = 0,
+        fill_price: float = 0, live_order_id: str = "",
+        outcome: str = "",
+    ) -> None:
+        """Schreibt einen Preclose-Test-Eintrag in data/preclose_test.jsonl."""
+        entry = {
+            "ts": round(time.time(), 3),
+            "slug": slug,
+            "asset": asset,
+            "timeframe": "5m",
+            "secs_to_close": round(secs_to_close, 2),
+            "action": action,
+            "skip_reason": skip_reason,
+            "delta_t12": round(delta_t12, 4),
+            "delta_t10": round(delta_t10, 4),
+            "delta_t8": round(delta_t8, 4),
+            "direction_t12": dir_t12,
+            "direction_t10": dir_t10,
+            "direction_t8": dir_t8,
+            "direction_all_consistent": dir_consistent,
+            "delta_accelerating_12_8": acc_12_8,
+            "delta_accelerating_10_8": acc_10_8,
+            "stable_samples_t10_t8": stable_samples,
+            "all_samples_same_direction_t10_t8": all_same,
+            "winner_ask": round(winner_ask, 3),
+            "loser_ask": round(loser_ask, 3),
+            "ask_zone": ask_zone,
+            "spread_pct": round(spread, 2),
+            "winner_tid": winner_tid[:16] if winner_tid else "",
+            "binance_mid": round(binance_mid, 2),
+            "binance_start": round(binance_start, 2),
+            "tick_age_ms": round(tick_age, 1),
+            "fill_price": round(fill_price, 3),
+            "live_order_id": live_order_id[:20] if live_order_id else "",
+            "outcome": outcome,
+        }
+        try:
+            self._PRECLOSE_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._PRECLOSE_LOG, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════════════════════════════
     # WINDOW DISCOVERY
