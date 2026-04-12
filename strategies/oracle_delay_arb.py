@@ -224,17 +224,19 @@ class OracleDelayArbStrategy(StrategyBase):
         from core.clob_ws import CLOBWebSocket
         self._clob_ws = CLOBWebSocket()
 
-        # Token-IDs aus eigener Discovery laden
-        initial_tokens = self.discovery.get_all_token_ids()
-        # Zusaetzlich: Gamma API fuer kommende Windows
+        # Token-IDs: NUR BTC 5m (Learn-Test Isolation)
+        initial_tokens = []
         for w in self._compute_next_window_closes():
+            if w.get("asset", "").upper() != "BTC" or w.get("timeframe", "") != "5m":
+                continue
             if w["seconds_to_close"] > 0:
                 tids = await self._get_token_ids(w["slug"], w["asset"])
                 if tids:
                     initial_tokens.extend([tids[0], tids[1]])
+        initial_tokens = list(set(initial_tokens))
         if initial_tokens:
             self._clob_ws.subscribe(initial_tokens)
-            logger.info(f"ODA: {len(initial_tokens)} Token-IDs subscribed (eigene Discovery)")
+            logger.info(f"ODA: {len(initial_tokens)} BTC-5m Token-IDs initial subscribed")
         await self._clob_ws.start()
 
         # Binance Tick-Callback registrieren (Event-Driven Trigger)
@@ -463,16 +465,9 @@ class OracleDelayArbStrategy(StrategyBase):
                         continue
                     up_tid, down_tid, condition_id = token_ids
 
-                    # CLOB WS subscriben + Re-Subscribe triggern
-                    if self._clob_ws:
-                        self._clob_ws.subscribe([up_tid, down_tid])
-                        # Verifiziere: Haben wir Orderbuch-Daten fuer beide Tokens?
-                        up_book = self._clob_ws.get_book(up_tid)
-                        dn_book = self._clob_ws.get_book(down_tid)
-                        has_up = up_book and up_book.best_ask > 0
-                        has_dn = dn_book and dn_book.best_ask > 0
-                        if not has_up or not has_dn:
-                            logger.debug(f"ODA: Orderbuch leer fuer {w['asset']} — WS re-subscribe triggered")
+                    # CLOB WS: NICHT hier subscriben — das macht _subscribe_clob_tokens()
+                    # Additives subscribe() hier wuerde ETH/15m Tokens reinpushen
+                    # und die BTC-5m-only Isolation brechen.
 
                     # Snapshot: Binance-Preis JETZT speichern (= Window-Start Referenz)
                     # Timestamp mitspeichern fuer measured_s Validation
@@ -944,30 +939,18 @@ class OracleDelayArbStrategy(StrategyBase):
             log_start = end_ts - 12  # Start bei T-12s (= Pre-Sign Zeitpunkt)
             log_end = end_ts + 5     # Ende bei T+5s
 
-            # Explizit subscriben damit WS diese Tokens waehrend des
-            # gesamten Logging-Fensters trackt (additiv, verdraengt nichts)
-            if self._clob_ws:
-                self._clob_ws.subscribe([up_tid, down_tid])
+            # KEIN additives subscribe() hier — das bricht die BTC-5m-only Isolation.
+            # Die Tokens werden bereits durch _subscribe_clob_tokens() gemanagt.
 
             # Warte bis Logging-Fenster beginnt
             now = time.time()
             if now < log_start:
                 await asyncio.sleep(log_start - now)
 
-            # Kurze Pause damit WS nach Subscribe ein erstes Book liefern kann
-            await asyncio.sleep(0.5)
-
             samples = []
-            _resub_counter = 0
             while time.time() < log_end and self._running:
                 now = time.time()
                 secs_to_close = end_ts - now
-
-                # Alle 50 Samples (~5s): Re-Subscribe falls set_active_tokens()
-                # unsere Tokens zwischenzeitlich verdraengt hat
-                _resub_counter += 1
-                if _resub_counter % 50 == 0 and self._clob_ws:
-                    self._clob_ws.subscribe([up_tid, down_tid])
 
                 # WS Books lesen (O(1), <1µs)
                 up_ask = 0.0

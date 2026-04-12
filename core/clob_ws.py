@@ -90,6 +90,7 @@ class CLOBWebSocket:
         self._events_processed = 0
         self._last_event_ts = 0.0
         self._resub_needed = False
+        self._unsub_tokens: list[str] = []  # Tokens die server-seitig unsubscribed werden muessen
         self._ws_ref = None  # Referenz fuer Re-Subscribe + PING
 
     # ── Public API ────────────────────────────────
@@ -123,8 +124,9 @@ class CLOBWebSocket:
         new_set = set(tid for tid in token_ids if tid)
         old_set = self._token_ids
 
-        # Entferne alte Tokens + ihre Books
+        # Entferne alte Tokens + ihre Books + server-seitig unsubscribe
         removed = old_set - new_set
+        added = new_set - old_set
         for tid in removed:
             self._books.pop(tid, None)
 
@@ -135,8 +137,11 @@ class CLOBWebSocket:
 
         if new_set != old_set:
             self._token_ids = new_set
+            # Server-seitig alte Tokens unsubscribe + neue subscribe
+            if removed:
+                self._unsub_tokens.extend(list(removed))
             self._resub_needed = True
-            logger.info(f"CLOB WS: Active tokens set to {len(new_set)} (removed {len(removed)}, added {len(new_set - old_set)})")
+            logger.info(f"CLOB WS: Active tokens set to {len(new_set)} (removed {len(removed)}, added {len(added)})")
 
     async def start(self) -> None:
         if self._running:
@@ -231,6 +236,17 @@ class CLOBWebSocket:
                         # Eigene PONG-Antworten ignorieren
                         if raw == "PONG":
                             continue
+
+                        # ── Server-seitig alte Tokens unsubscribe ──
+                        if self._unsub_tokens:
+                            unsub_tids = list(set(self._unsub_tokens))
+                            self._unsub_tokens.clear()
+                            unsub_msg = json_dumps({
+                                "operation": "unsubscribe",
+                                "assets_ids": unsub_tids,
+                            })
+                            await ws.send(unsub_msg)
+                            logger.info(f"CLOB WS: Unsubscribed (operation=unsubscribe) — {len(unsub_tids)} tokens removed")
 
                         # ── FIX 1: Re-Subscribe mit "operation" Feld ──
                         if self._resub_needed:
