@@ -432,6 +432,8 @@ class AutoRedeemer:
         matched_order_type = "unknown"
         matched_source = ""
         matched_entry_price = 0.0
+        matched_regime_tag = ""
+        matched_direction = ""
 
         # Prioritaet: live_order_success=True UND noch nicht geschlossen
         for entry in reversed(open_entries):  # Neueste zuerst
@@ -446,6 +448,8 @@ class AutoRedeemer:
             matched_order_type = entry.get("order_type", "unknown")
             matched_source = entry.get("source_wallet_name", "")
             matched_entry_price = entry.get("executed_price", 0.0)
+            matched_regime_tag = entry.get("regime_tag", "")
+            matched_direction = entry.get("direction", "")
             break
 
         # Fallback: Auch nicht-live Trades (Paper) matchen wenn noetig
@@ -520,6 +524,39 @@ class AutoRedeemer:
                     self._on_resolve(matched_trade_id, pnl_usd, pnl_usd > 0)
                 except Exception as e:
                     logger.warning(f"Redeemer: on_resolve callback error: {e}")
+
+            # Preclose-Test Resolution-Logging
+            # Append-only Eintrag in preclose_test.jsonl fuer Learn-Test-Auswertung
+            if matched_regime_tag == "PRECLOSE_TEST" and matched_trade_id.startswith("ODA-"):
+                try:
+                    _preclose_path = Path("data/preclose_test.jsonl")
+                    # final_winner: outcome aus Polymarket (Up/Down/Yes/No)
+                    _final_winner = outcome.upper() if outcome else "UNKNOWN"
+                    _entry_dir = matched_direction.upper() if matched_direction else "UNKNOWN"
+                    _winner_correct = _final_winner == _entry_dir
+                    _resolve_entry = {
+                        "ts": time.time(),
+                        "event": "RESOLVE",
+                        "trade_id": matched_trade_id,
+                        "slug": "",  # Nicht direkt verfuegbar im Redeemer
+                        "entry_direction": _entry_dir,
+                        "final_winner": _final_winner,
+                        "winner_correct": _winner_correct,
+                        "flip_occurred": not _winner_correct,
+                        "pnl_usd": round(pnl_usd, 4),
+                        "payout_usd": round(payout_usd, 4),
+                        "entry_price": matched_entry_price,
+                    }
+                    with open(_preclose_path, "a") as _pf:
+                        _pf.write(json.dumps(_resolve_entry) + "\n")
+                    logger.info(
+                        f"PRECLOSE RESOLVE: {matched_trade_id} "
+                        f"{'WIN' if _winner_correct else 'FLIP-LOSS'} "
+                        f"entry={_entry_dir} final={_final_winner} "
+                        f"pnl=${pnl_usd:+.2f}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Preclose resolution log error: {e}")
 
         except Exception as e:
             logger.error(f"Journal redeem write error: {e}")

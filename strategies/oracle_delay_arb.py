@@ -508,6 +508,13 @@ class OracleDelayArbStrategy(StrategyBase):
         asset = w["asset"]
         symbol = f"{asset}/USDT"
         end_ts = w["window_end_ts"]
+        _tf = w.get("timeframe", "5m")
+
+        # ═══ LEARN-TEST ISOLATION: Nur BTC 5m aktiv ═══
+        # Alles andere (ETH, 15m, etc.) wird komplett stillgelegt.
+        # Kein Legacy-Burst, kein Echtgeld, kein Rauschen.
+        if asset != "BTC" or _tf != "5m":
+            return
 
         try:
             # ── PHASE 1: Pre-Sign bei T-12s ──
@@ -536,28 +543,15 @@ class OracleDelayArbStrategy(StrategyBase):
             # PHASE 1.5: BTC-ONLY PRECLOSE TEST (T-12s → T-8s → Entry)
             # Learn-Test: früher Entry mit Richtungsstabilitäts-Filter
             # ═══════════════════════════════════════════════════════════════
-            _preclose_fired = False
-            _tf = w.get("timeframe", "5m")
-
-            if asset == "BTC" and _tf == "5m":
-                _preclose_fired = await self._preclose_test(
-                    slug, asset, symbol, end_ts,
-                    up_tid, down_tid, condition_id, w
-                )
-
-            # Falls Preclose gefeuert hat → kein T+0ms Burst mehr
-            if _preclose_fired:
-                return
-
-            # ── PHASE 2: Sleep bis T-15ms, dann BURST-FIRE (Legacy/Fallback) ──
-            now = time.time()
-            wake_at = end_ts - 0.015
-            sleep_s = wake_at - now
-            if sleep_s > 0:
-                await asyncio.sleep(sleep_s)
-
-            if not self._running:
-                return
+            # ═══ PHASE 1.5: BTC 5m PRECLOSE TEST ═══
+            # Einziger aktiver Pfad. Kein Legacy-Fallback.
+            await self._preclose_test(
+                slug, asset, symbol, end_ts,
+                up_tid, down_tid, condition_id, w
+            )
+            # Nach Preclose (FIRE oder SKIP): immer return.
+            # Kein T+0ms Legacy-Burst.
+            return
 
             # ═══ BURST-FIRE: Schrotflinten-Muster (5 Schuesse, 5ms Abstand) ═══
             # Eines der Pakete trifft bei T+0ms auf die Matching-Engine
@@ -1263,9 +1257,9 @@ class OracleDelayArbStrategy(StrategyBase):
             live_order_id = ""
             outcome = "REJECTED"
 
+            _orig_size = self.trade_size_usd
             try:
                 # Temporaer Size auf $2 fuer Learn-Test
-                _orig_size = self.trade_size_usd
                 self.trade_size_usd = self._PRECLOSE_SIZE
                 await self._execute_snipe(
                     window_data, direction_t8, winner_tid, order_price,
@@ -1276,7 +1270,6 @@ class OracleDelayArbStrategy(StrategyBase):
                     regime_tag="PRECLOSE_TEST",
                     spread_pct=spread_pct,
                 )
-                self.trade_size_usd = _orig_size
                 # Check if fill succeeded via last trade
                 if self._trades and self._trades[-1].live_success:
                     fill_price = order_price
@@ -1286,6 +1279,8 @@ class OracleDelayArbStrategy(StrategyBase):
                     outcome = "REJECTED"
             except Exception as e:
                 outcome = f"ERROR:{str(e)[:30]}"
+            finally:
+                self.trade_size_usd = _orig_size
 
             self._log_preclose(
                 slug, asset, "FIRE", "",
