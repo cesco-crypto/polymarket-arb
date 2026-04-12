@@ -8,6 +8,14 @@ Architektur:
     - Orderbuch: dict[token_id] -> OrderbookSnapshot (best_ask, best_bid, depth)
     - Keine Locks noetig (single-threaded asyncio, kooperatives Scheduling)
     - orjson fuer C-Speed JSON Parsing (kein GIL-Blocking)
+
+Polymarket WS Docs:
+    - Initial Subscribe: {"assets_ids": [...], "type": "market", "initial_dump": true, "level": 2, "custom_feature_enabled": true}
+    - Dynamic Re-Subscribe: {"operation": "subscribe", "assets_ids": [...]}
+    - Dynamic Unsubscribe: {"operation": "unsubscribe", "assets_ids": [...]}
+    - Client muss alle 10s PING senden, Server antwortet PONG
+    - Events: book, price_change, best_bid_ask, last_trade_price, tick_size_change, new_market, market_resolved
+    - Max 500 instruments pro Connection
 """
 
 from __future__ import annotations
@@ -22,9 +30,13 @@ import websockets
 try:
     import orjson
     def json_loads(data): return orjson.loads(data)
+    def json_dumps(data):
+        raw = orjson.dumps(data)
+        return raw.decode() if isinstance(raw, bytes) else raw
 except ImportError:
     import json
     def json_loads(data): return json.loads(data)
+    def json_dumps(data): return json.dumps(data)
 
 from loguru import logger
 
@@ -73,11 +85,12 @@ class CLOBWebSocket:
         self._running = False
         self._connected = False
         self._task: asyncio.Task | None = None
+        self._ping_task: asyncio.Task | None = None
         self._reconnect_count = 0
         self._events_processed = 0
         self._last_event_ts = 0.0
         self._resub_needed = False
-        self._ws_ref = None  # Referenz fuer Re-Subscribe
+        self._ws_ref = None  # Referenz fuer Re-Subscribe + PING
 
     # ── Public API ────────────────────────────────
 
@@ -104,8 +117,8 @@ class CLOBWebSocket:
     def set_active_tokens(self, token_ids: list[str]) -> None:
         """ERSETZT die Token-Liste (statt nur hinzufuegen). Entfernt alte Tokens.
 
-        Polymarket WS Limit: max ~10 Instrumente. Alte abgelaufene Tokens
-        muessen entfernt werden damit aktuelle Tokens Updates bekommen.
+        Polymarket WS: max 500 Instrumente pro Connection.
+        Alte abgelaufene Tokens werden entfernt damit aktuelle Tokens Updates bekommen.
         """
         new_set = set(tid for tid in token_ids if tid)
         old_set = self._token_ids
@@ -135,6 +148,8 @@ class CLOBWebSocket:
     async def stop(self) -> None:
         self._running = False
         self._connected = False
+        if self._ping_task:
+            self._ping_task.cancel()
         if self._task:
             self._task.cancel()
             try:
@@ -153,6 +168,20 @@ class CLOBWebSocket:
             if self._last_event_ts else 0,
         }
 
+    # ── Aktiver Client-PING (Fix 3) ──────────────
+
+    async def _ping_loop(self, ws) -> None:
+        """Sendet alle 10s PING an den Server. Pflicht laut Polymarket-Docs."""
+        try:
+            while self._running and self._connected:
+                await asyncio.sleep(10)
+                try:
+                    await ws.send("PING")
+                except Exception:
+                    break
+        except asyncio.CancelledError:
+            pass
+
     # ── WebSocket Loop ────────────────────────────
 
     async def _ws_loop(self) -> None:
@@ -167,49 +196,54 @@ class CLOBWebSocket:
             try:
                 async with websockets.connect(
                     WS_URL,
-                    ping_interval=10,
-                    ping_timeout=10,
+                    ping_interval=None,   # Wir machen eigenes PING
+                    ping_timeout=None,
                     close_timeout=3,
                     max_size=2**20,  # 1MB max message
                 ) as ws:
                     self._connected = True
+                    self._ws_ref = ws
                     delay = 1.0
 
-                    # Subscribe
-                    sub_msg = orjson.dumps({
+                    # ── FIX 2: Initial Subscribe mit allen Feldern ──
+                    sub_msg = json_dumps({
                         "assets_ids": tids,
                         "type": "market",
-                    }) if "orjson" in dir() else __import__("json").dumps({
-                        "assets_ids": tids,
-                        "type": "market",
+                        "initial_dump": True,
+                        "level": 2,
+                        "custom_feature_enabled": True,
                     })
-                    await ws.send(sub_msg if isinstance(sub_msg, str) else sub_msg.decode())
-                    self._ws_ref = ws
+                    await ws.send(sub_msg)
                     self._resub_needed = False
-                    logger.info(f"CLOB WS: Verbunden — {len(tids)} tokens subscribed")
+                    logger.info(f"CLOB WS: Verbunden — {len(tids)} tokens subscribed (initial_dump=true, custom_features=true)")
+
+                    # ── FIX 3: Aktiver Client-PING Task starten ──
+                    self._ping_task = asyncio.create_task(self._ping_loop(ws))
 
                     async for raw in ws:
                         if not self._running:
                             break
+
+                        # Server-PING beantworten (falls Server auch PINGs sendet)
                         if raw == "PING":
-                            await ws.send("pong")
+                            await ws.send("PONG")
+                            continue
+                        # Eigene PONG-Antworten ignorieren
+                        if raw == "PONG":
                             continue
 
-                        # Re-Subscribe wenn neue Tokens hinzugefuegt wurden
+                        # ── FIX 1: Re-Subscribe mit "operation" Feld ──
                         if self._resub_needed:
                             new_tids = list(self._token_ids)
-                            resub = orjson.dumps({
+                            resub = json_dumps({
+                                "operation": "subscribe",
                                 "assets_ids": new_tids,
-                                "type": "market",
-                            }) if "orjson" in dir() else __import__("json").dumps({
-                                "assets_ids": new_tids,
-                                "type": "market",
                             })
-                            await ws.send(resub if isinstance(resub, str) else resub.decode())
+                            await ws.send(resub)
                             self._resub_needed = False
-                            logger.info(f"CLOB WS: Re-Subscribed — {len(new_tids)} tokens")
+                            logger.info(f"CLOB WS: Re-Subscribed (operation=subscribe) — {len(new_tids)} tokens")
 
-                        # orjson Parse: C-Speed, kein GIL-Blocking
+                        # Parse + Process
                         try:
                             self._process_message(
                                 json_loads(raw) if isinstance(raw, (str, bytes)) else raw
@@ -217,10 +251,16 @@ class CLOBWebSocket:
                         except Exception:
                             pass
 
+                    # PING-Task aufräumen wenn WS-Loop endet
+                    if self._ping_task:
+                        self._ping_task.cancel()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 self._connected = False
+                if self._ping_task:
+                    self._ping_task.cancel()
                 if self._running:
                     self._reconnect_count += 1
                     logger.warning(f"CLOB WS: {e} — reconnect in {delay:.0f}s")
@@ -230,17 +270,19 @@ class CLOBWebSocket:
         self._connected = False
 
     def _process_message(self, msg: dict | list) -> None:
-        """Verarbeitet WS-Deltas und updated RAM-Orderbuch — SCHNELL.
+        """Verarbeitet WS-Events und updated RAM-Orderbuch — SCHNELL.
 
-        Zwei Event-Typen:
+        Event-Typen:
         1. "book": Initialer Snapshot mit vollen asks[]/bids[] Arrays
-        2. "price_change": Delta-Updates mit price_changes[] die best_bid/best_ask enthalten
+        2. "price_change": Delta-Updates mit price_changes[] (best_bid/best_ask)
+        3. "best_bid_ask": Kompaktes Event mit nur best_bid, best_ask, spread (Fix 5)
         """
         events = msg if isinstance(msg, list) else [msg]
         now = time.time()
 
         for event in events:
             event_type = event.get("event_type", "")
+            token_id = ""
 
             # ── BOOK SNAPSHOT: Volles Orderbuch (kommt bei Subscribe) ──
             if event_type == "book":
@@ -300,8 +342,29 @@ class CLOBWebSocket:
                 self._events_processed += 1
                 self._last_event_ts = now
 
+            # ── FIX 5: BEST_BID_ASK Event (mit custom_feature_enabled) ──
+            elif event_type == "best_bid_ask":
+                token_id = event.get("asset_id", "")
+                if not token_id:
+                    continue
+                book = self._books.get(token_id)
+                if not book:
+                    continue
+
+                best_ask_str = event.get("best_ask", "")
+                best_bid_str = event.get("best_bid", "")
+
+                if best_ask_str:
+                    book.best_ask = float(best_ask_str)
+                if best_bid_str:
+                    book.best_bid = float(best_bid_str)
+
+                book.updated_at = now
+                self._events_processed += 1
+                self._last_event_ts = now
+
             # Optional Callback (fuer Event-Trigger)
-            if self._on_update:
+            if token_id and self._on_update:
                 try:
                     self._on_update(token_id)
                 except Exception:

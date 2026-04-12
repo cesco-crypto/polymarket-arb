@@ -1644,17 +1644,24 @@ class OracleDelayArbStrategy(StrategyBase):
         return None  # Kann Winner nicht bestimmen
 
     async def _fetch_ask(self, token_id: str) -> float:
-        """Holt den aktuellen Best-Ask vom CLOB."""
+        """Holt den aktuellen Best-Ask via /price?side=BUY.
+
+        /price?side=BUY gibt den Preis zurueck den ein Kaeufer zahlt (= effektiver Ask).
+        Live-verifiziert: /price liefert echte Preise ($0.63) waehrend /book stale
+        Daten liefert ($0.99). Siehe GitHub Issue #180.
+        Rate Limit: 1,500 req/10s — kein Engpass.
+        """
         if not self._session or self._session.closed or not token_id:
             return 0.0
         try:
-            url = f"https://clob.polymarket.com/book?token_id={token_id}"
-            async with self._session.get(url) as resp:
+            url = f"https://clob.polymarket.com/price?token_id={token_id}&side=BUY"
+            async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                 if resp.status == 200:
-                    book = await resp.json()
-                    asks = book.get("asks", [])
-                    if asks:
-                        return float(asks[0].get("price", 0))
+                    data = await resp.json()
+                    price = data.get("price", 0)
+                    return float(price) if price else 0.0
+                elif resp.status == 404:
+                    return 0.0  # Kein Orderbook fuer diesen Token
             return 0.0
         except Exception:
             return 0.0
