@@ -526,6 +526,14 @@ class OracleDelayArbStrategy(StrategyBase):
                 self.executor.pre_sign_order(down_tid, pre_price, self.trade_size_usd)
                 logger.info(f"ODA PRE-SIGN: {asset} {w['timeframe']} UP+DOWN @ ${pre_price}")
 
+            # ── WS-ASK-TIMELINE LOGGER (diagnostisch, T-12s bis T+5s, 100ms Intervall) ──
+            # Liest CLOB WS Books fuer beide Tokens + Binance-Preis → JSONL
+            # Rein diagnostisch: kein Einfluss auf Trading-Logik
+            if "5m" in slug:  # Nur 5m — 15m ignorieren
+                asyncio.create_task(
+                    self._log_ws_ask_timeline(slug, asset, end_ts, up_tid, down_tid, symbol)
+                )
+
             # Momentum wird NACH Phase 2 berechnet (braucht current_price von T+0s)
 
             # ── PHASE 2: Sleep bis T-15ms, dann BURST-FIRE ──
@@ -906,6 +914,109 @@ class OracleDelayArbStrategy(StrategyBase):
             logger.error(f"ODA Timer Error ({slug}): {e}")
 
     # (Legacy loop code removed — execution happens in _window_timer tasks)
+
+    # ═══════════════════════════════════════════════════════════════
+    # WS-ASK TIMELINE LOGGER (rein diagnostisch)
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _log_ws_ask_timeline(
+        self, slug: str, asset: str, end_ts: float,
+        up_tid: str, down_tid: str, symbol: str,
+    ) -> None:
+        """Diagnostischer WS-Ask-Verlauf: T-12s bis T+5s, alle 100ms.
+
+        Schreibt Snapshots in data/ws_ask_timeline.jsonl.
+        Rein diagnostisch — kein Einfluss auf Trading-Logik.
+        Nur fuer 5m-Windows (15m ignoriert).
+        """
+        _TL_PATH = Path("data/ws_ask_timeline.jsonl")
+
+        try:
+            _TL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            log_start = end_ts - 12  # Start bei T-12s (= Pre-Sign Zeitpunkt)
+            log_end = end_ts + 5     # Ende bei T+5s
+
+            # Warte bis Logging-Fenster beginnt
+            now = time.time()
+            if now < log_start:
+                await asyncio.sleep(log_start - now)
+
+            samples = []
+            while time.time() < log_end and self._running:
+                now = time.time()
+                secs_to_close = end_ts - now
+
+                # WS Books lesen (O(1), <1µs)
+                up_ask = 0.0
+                up_bid = 0.0
+                dn_ask = 0.0
+                dn_bid = 0.0
+                if self._clob_ws:
+                    ub = self._clob_ws.get_book(up_tid)
+                    db = self._clob_ws.get_book(down_tid)
+                    if ub:
+                        up_ask = ub.best_ask
+                        up_bid = ub.best_bid
+                    if db:
+                        dn_ask = db.best_ask
+                        dn_bid = db.best_bid
+
+                # Binance-Preis fuer Winner-Bestimmung
+                binance_mid = 0.0
+                if self._oracle:
+                    tick = self._oracle.get_latest(symbol)
+                    if tick:
+                        binance_mid = tick.mid
+
+                # Winner aus Binance-Sicht (gleiche Logik wie _window_timer)
+                snapshot = self._price_at_window_start.get(slug)
+                inferred_winner = "?"
+                if snapshot and binance_mid > 0:
+                    start_p = snapshot[0]
+                    if start_p > 0:
+                        inferred_winner = "UP" if binance_mid > start_p else "DOWN"
+
+                winner_ask = up_ask if inferred_winner == "UP" else dn_ask
+                loser_ask = dn_ask if inferred_winner == "UP" else up_ask
+
+                sample = {
+                    "ts": round(now, 3),
+                    "slug": slug,
+                    "asset": asset,
+                    "secs_to_close": round(secs_to_close, 2),
+                    "up_ask": round(up_ask, 4),
+                    "up_bid": round(up_bid, 4),
+                    "dn_ask": round(dn_ask, 4),
+                    "dn_bid": round(dn_bid, 4),
+                    "winner": inferred_winner,
+                    "winner_ask": round(winner_ask, 4),
+                    "loser_ask": round(loser_ask, 4),
+                    "binance_mid": round(binance_mid, 2),
+                }
+                samples.append(sample)
+
+                await asyncio.sleep(0.1)  # 100ms Intervall
+
+            # Batch-Write: alle Samples auf einmal (1 File-Open statt 170x)
+            if samples:
+                try:
+                    with open(_TL_PATH, "a") as f:
+                        for s in samples:
+                            f.write(json.dumps(s) + "\n")
+                    logger.info(
+                        f"ODA WS-TIMELINE: {asset} {slug[-15:]} | "
+                        f"{len(samples)} samples | "
+                        f"winner_ask range: "
+                        f"${min(s['winner_ask'] for s in samples):.3f}"
+                        f"-${max(s['winner_ask'] for s in samples):.3f}"
+                    )
+                except Exception:
+                    pass
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"WS-Timeline error ({slug}): {e}")
 
     # ═══════════════════════════════════════════════════════════════
     # WINDOW DISCOVERY
