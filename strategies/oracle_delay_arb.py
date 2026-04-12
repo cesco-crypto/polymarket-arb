@@ -936,15 +936,30 @@ class OracleDelayArbStrategy(StrategyBase):
             log_start = end_ts - 12  # Start bei T-12s (= Pre-Sign Zeitpunkt)
             log_end = end_ts + 5     # Ende bei T+5s
 
+            # Explizit subscriben damit WS diese Tokens waehrend des
+            # gesamten Logging-Fensters trackt (additiv, verdraengt nichts)
+            if self._clob_ws:
+                self._clob_ws.subscribe([up_tid, down_tid])
+
             # Warte bis Logging-Fenster beginnt
             now = time.time()
             if now < log_start:
                 await asyncio.sleep(log_start - now)
 
+            # Kurze Pause damit WS nach Subscribe ein erstes Book liefern kann
+            await asyncio.sleep(0.5)
+
             samples = []
+            _resub_counter = 0
             while time.time() < log_end and self._running:
                 now = time.time()
                 secs_to_close = end_ts - now
+
+                # Alle 50 Samples (~5s): Re-Subscribe falls set_active_tokens()
+                # unsere Tokens zwischenzeitlich verdraengt hat
+                _resub_counter += 1
+                if _resub_counter % 50 == 0 and self._clob_ws:
+                    self._clob_ws.subscribe([up_tid, down_tid])
 
                 # WS Books lesen (O(1), <1µs)
                 up_ask = 0.0
