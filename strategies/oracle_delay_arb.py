@@ -285,30 +285,32 @@ class OracleDelayArbStrategy(StrategyBase):
             self._oracle = None
 
     async def _subscribe_clob_tokens(self) -> None:
-        """Subscribed NUR aktive Window-Tokens auf dem CLOB WS.
+        """Subscribed NUR BTC 5m Window-Tokens auf dem CLOB WS.
 
-        Polymarket WS Limit: ~10 Instrumente. Wir subscriben nur die
-        naechsten 2 Windows (5m) × 2 Assets (BTC+ETH) × 2 Tokens (UP+DOWN) = 8 Tokens.
-        Alte abgelaufene Tokens werden entfernt.
+        Learn-Test Isolation: Nur BTC 5m. Kein ETH, kein 15m.
+        Reduziert WS-Footprint auf 2-4 Tokens → stabilere Books.
         """
         try:
-            # Nur Tokens fuer Windows die in den naechsten 310s schliessen
             active_tokens = []
             now = time.time()
             for w in self._compute_next_window_closes():
+                # LEARN-TEST: Nur BTC 5m subscriben
+                if w.get("asset", "").upper() != "BTC":
+                    continue
+                if w.get("timeframe", "") != "5m":
+                    continue
                 secs = w["seconds_to_close"]
-                if 0 < secs <= 310:  # Nur aktive Windows
+                if 0 < secs <= 310:
                     tids = await self._get_token_ids(w["slug"], w["asset"])
                     if tids:
                         active_tokens.extend([tids[0], tids[1]])
 
-            # Deduplizieren
             active_tokens = list(set(active_tokens))
 
             if self._clob_ws:
                 if active_tokens:
                     self._clob_ws.set_active_tokens(active_tokens)
-                logger.info(f"ODA: {len(active_tokens)} aktive Token-IDs auf CLOB WS (max 8)")
+                logger.info(f"ODA: {len(active_tokens)} BTC-5m Token-IDs auf CLOB WS")
         except Exception as e:
             logger.warning(f"ODA: Token subscription failed: {e}")
 
@@ -1130,7 +1132,7 @@ class OracleDelayArbStrategy(StrategyBase):
                 winner_tid = down_tid
                 loser_tid = up_tid
 
-            # WS-Books lesen
+            # WS-Books lesen (Primaer)
             ws_winner_ask = 0.0
             ws_loser_ask = 0.0
             ws_winner_bid = 0.0
@@ -1143,9 +1145,40 @@ class OracleDelayArbStrategy(StrategyBase):
                 if lb:
                     ws_loser_ask = lb.best_ask
 
+            # REST-Fallback wenn WS kein Book hat (bei T-8s sind ~100ms akzeptabel)
+            rest_winner_ask = 0.0
+            rest_loser_ask = 0.0
+            rest_fallback_used = False
+            ask_source = "ws"
+
+            if ws_winner_ask <= 0:
+                try:
+                    rest_winner_ask = await self._fetch_ask(winner_tid)
+                    if rest_winner_ask > 0:
+                        rest_fallback_used = True
+                        ask_source = "rest_fallback"
+                        logger.info(
+                            f"ODA PRECLOSE REST-FALLBACK: {asset} winner "
+                            f"ws=$0.00 -> rest=${rest_winner_ask:.3f} | {slug[-15:]}"
+                        )
+                    else:
+                        ask_source = "rest_failed"
+                except Exception:
+                    ask_source = "rest_failed"
+
+            if ws_loser_ask <= 0 and rest_fallback_used:
+                try:
+                    rest_loser_ask = await self._fetch_ask(loser_tid)
+                except Exception:
+                    pass
+
+            # Effektiver Ask: WS wenn vorhanden, sonst REST
+            effective_winner_ask = ws_winner_ask if ws_winner_ask > 0 else rest_winner_ask
+            effective_loser_ask = ws_loser_ask if ws_loser_ask > 0 else rest_loser_ask
+
             spread_pct = 0.0
-            if ws_winner_ask > 0 and ws_winner_bid > 0:
-                spread_pct = (ws_winner_ask - ws_winner_bid) / ws_winner_ask * 100
+            if effective_winner_ask > 0 and ws_winner_bid > 0:
+                spread_pct = (effective_winner_ask - ws_winner_bid) / effective_winner_ask * 100
 
             # ═══ FILTER-KETTE ═══
             abs_delta_t8 = abs(delta_t8)
@@ -1165,7 +1198,7 @@ class OracleDelayArbStrategy(StrategyBase):
             )
 
             # Ask-Zone
-            ask = ws_winner_ask
+            ask = effective_winner_ask
             if ask <= self._PRECLOSE_IDEAL:
                 ask_zone = "ideal"
             elif ask <= self._PRECLOSE_CAP:
@@ -1207,15 +1240,18 @@ class OracleDelayArbStrategy(StrategyBase):
                     dir_consistent=direction_all_consistent,
                     acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
                     stable_samples=stable_count, all_same=all_same_dir,
-                    winner_ask=ask, loser_ask=ws_loser_ask,
+                    winner_ask=ask, loser_ask=effective_loser_ask,
                     ask_zone=ask_zone, spread=spread_pct,
                     winner_tid=winner_tid, binance_mid=price_t8,
                     binance_start=start_price, tick_age=tick_age_ms,
                     secs_to_close=end_ts - time.time(),
+                    ask_source=ask_source, ws_winner_ask=ws_winner_ask,
+                    ws_loser_ask=ws_loser_ask, rest_winner_ask=rest_winner_ask,
+                    rest_loser_ask=rest_loser_ask, rest_fallback_used=rest_fallback_used,
                 )
                 logger.info(
                     f"ODA PRECLOSE SKIP: {asset} {direction_t8} | "
-                    f"ask=${ask:.3f} delta={delta_t8:+.3f}% | {skip_reason}"
+                    f"ask=${ask:.3f} src={ask_source} delta={delta_t8:+.3f}% | {skip_reason}"
                 )
                 return False
 
@@ -1235,11 +1271,14 @@ class OracleDelayArbStrategy(StrategyBase):
                     dir_consistent=direction_all_consistent,
                     acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
                     stable_samples=stable_count, all_same=all_same_dir,
-                    winner_ask=ask, loser_ask=ws_loser_ask,
+                    winner_ask=ask, loser_ask=effective_loser_ask,
                     ask_zone=ask_zone, spread=spread_pct,
                     winner_tid=winner_tid, binance_mid=price_t8,
                     binance_start=start_price, tick_age=tick_age_ms,
                     secs_to_close=end_ts - time.time(),
+                    ask_source=ask_source, ws_winner_ask=ws_winner_ask,
+                    ws_loser_ask=ws_loser_ask, rest_winner_ask=rest_winner_ask,
+                    rest_loser_ask=rest_loser_ask, rest_fallback_used=rest_fallback_used,
                 )
                 return False
             self._sniped_windows.add(slug)
@@ -1289,13 +1328,16 @@ class OracleDelayArbStrategy(StrategyBase):
                 dir_consistent=direction_all_consistent,
                 acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
                 stable_samples=stable_count, all_same=all_same_dir,
-                winner_ask=ask, loser_ask=ws_loser_ask,
+                winner_ask=ask, loser_ask=effective_loser_ask,
                 ask_zone=ask_zone, spread=spread_pct,
                 winner_tid=winner_tid, binance_mid=price_t8,
                 binance_start=start_price, tick_age=tick_age_ms,
                 secs_to_close=end_ts - time.time(),
                 fill_price=fill_price, live_order_id=live_order_id,
                 outcome=outcome,
+                ask_source=ask_source, ws_winner_ask=ws_winner_ask,
+                ws_loser_ask=ws_loser_ask, rest_winner_ask=rest_winner_ask,
+                rest_loser_ask=rest_loser_ask, rest_fallback_used=rest_fallback_used,
             )
 
             logger.info(
@@ -1324,6 +1366,9 @@ class OracleDelayArbStrategy(StrategyBase):
         secs_to_close: float = 0,
         fill_price: float = 0, live_order_id: str = "",
         outcome: str = "",
+        ask_source: str = "", ws_winner_ask: float = 0, ws_loser_ask: float = 0,
+        rest_winner_ask: float = 0, rest_loser_ask: float = 0,
+        rest_fallback_used: bool = False,
     ) -> None:
         """Schreibt einen Preclose-Test-Eintrag in data/preclose_test.jsonl."""
         entry = {
@@ -1356,6 +1401,12 @@ class OracleDelayArbStrategy(StrategyBase):
             "fill_price": round(fill_price, 3),
             "live_order_id": live_order_id[:20] if live_order_id else "",
             "outcome": outcome,
+            "ask_source": ask_source,
+            "ws_winner_ask": round(ws_winner_ask, 3),
+            "ws_loser_ask": round(ws_loser_ask, 3),
+            "rest_winner_ask": round(rest_winner_ask, 3),
+            "rest_loser_ask": round(rest_loser_ask, 3),
+            "rest_fallback_used": rest_fallback_used,
         }
         try:
             self._PRECLOSE_LOG.parent.mkdir(parents=True, exist_ok=True)
