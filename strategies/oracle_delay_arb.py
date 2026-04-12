@@ -1030,244 +1030,164 @@ class OracleDelayArbStrategy(StrategyBase):
 
     _PRECLOSE_LOG = Path("data/preclose_test.jsonl")
     _PRECLOSE_SIZE = 2.0      # $2 Learn-Test Size
-    _PRECLOSE_CAP = 0.80      # Hartes Ask-Maximum
-    _PRECLOSE_IDEAL = 0.70    # Bevorzugter Zielbereich
-    _PRECLOSE_MIN_ASK = 0.05  # Minimum (Stale-Guard)
-    _PRECLOSE_MIN_DELTA = 0.10  # 0.10% Mindestbewegung
-    _PRECLOSE_MARGINAL_DELTA = 0.15  # 0.15% fuer Ask 0.70-0.80
-    _PRECLOSE_MAX_SPREAD = 15.0  # 15% Spread-Limit
-    _PRECLOSE_MAX_TICK_AGE = 500  # 500ms Tick-Freshness
+    _PRECLOSE_MIN_CLOB_ASK = 0.65  # Markt muss mind. 65% sicher sein
+    _PRECLOSE_MAX_CLOB_ASK = 0.93  # Nicht ueber 93c kaufen (Break-Even ~93% WR)
+    _PRECLOSE_MAX_TICK_AGE = 500   # 500ms Binance-Freshness
 
     async def _preclose_test(
         self, slug: str, asset: str, symbol: str, end_ts: float,
         up_tid: str, down_tid: str, condition_id: str, w: dict,
     ) -> bool:
-        """BTC-only Preclose Learn-Test: Entry bei T-8s mit Dreierfilter.
+        """BTC-only Preclose: Entry bei T-2s, CLOB-Signal + Binance-Bestaetigung.
 
-        Returns True wenn gefeuert wurde (kein T+0ms Burst mehr noetig).
-        Returns False wenn geskippt (Fallback auf Legacy-Burst).
+        Logik:
+        1. Sleep bis T-2s
+        2. Lies CLOB-Ask fuer UP und DOWN
+        3. Die teurere Seite = vermuteter Winner (Markt-Konsens)
+        4. Binance-Check: zeigt Binance dieselbe Richtung?
+        5. Wenn beides stimmt UND Ask im profitablen Bereich → FIRE
+
+        Returns True wenn gefeuert wurde.
         """
         try:
-            # ── Snapshot T-12s: Binance-Preis + Richtung ──
             snapshot = self._price_at_window_start.get(slug)
             if not snapshot:
                 self._log_preclose(slug, asset, "SKIP", "no_start_snapshot")
                 return False
             start_price, _ = snapshot
 
-            tick_t12 = self._oracle.get_latest(symbol) if self._oracle else None
-            if not tick_t12 or tick_t12.mid <= 0:
-                self._log_preclose(slug, asset, "SKIP", "no_binance_t12")
-                return False
-
-            price_t12 = tick_t12.mid
-            delta_t12 = (price_t12 - start_price) / start_price * 100
-            direction_t12 = "UP" if price_t12 > start_price else "DOWN"
-
-            # ── Sleep bis T-10s ──
+            # ── Sleep bis T-2s ──
             now = time.time()
-            t10_target = end_ts - 10
-            if now < t10_target:
-                await asyncio.sleep(t10_target - now)
+            t2_target = end_ts - 2.0
+            if now < t2_target:
+                await asyncio.sleep(t2_target - now)
 
             if not self._running:
                 return False
 
-            # ── Snapshot T-10s ──
-            tick_t10 = self._oracle.get_latest(symbol) if self._oracle else None
-            if not tick_t10 or tick_t10.mid <= 0:
-                self._log_preclose(slug, asset, "SKIP", "no_binance_t10")
-                return False
-
-            price_t10 = tick_t10.mid
-            delta_t10 = (price_t10 - start_price) / start_price * 100
-            direction_t10 = "UP" if price_t10 > start_price else "DOWN"
-
-            # ── Nahbereichs-Sampling T-10s → T-8s (100ms Intervall) ──
-            nearfield_directions = []
-            t8_target = end_ts - 8
-            while time.time() < t8_target and self._running:
-                _tick = self._oracle.get_latest(symbol) if self._oracle else None
-                if _tick and _tick.mid > 0:
-                    _dir = "UP" if _tick.mid > start_price else "DOWN"
-                    nearfield_directions.append(_dir)
-                await asyncio.sleep(0.1)
-
-            if not self._running:
-                return False
-
-            # ── Snapshot T-8s: Entry-Decision ──
-            tick_t8 = self._oracle.get_latest(symbol) if self._oracle else None
-            if not tick_t8 or tick_t8.mid <= 0:
-                self._log_preclose(slug, asset, "SKIP", "no_binance_t8")
-                return False
-
-            price_t8 = tick_t8.mid
-            delta_t8 = (price_t8 - start_price) / start_price * 100
-            direction_t8 = "UP" if price_t8 > start_price else "DOWN"
-            tick_age_ms = (time.time() - tick_t8.timestamp) * 1000
-
-            # Winner-Token bestimmen
-            if direction_t8 == "UP":
-                winner_tid = up_tid
-                loser_tid = down_tid
-            else:
-                winner_tid = down_tid
-                loser_tid = up_tid
-
-            # WS-Books lesen (Primaer)
-            ws_winner_ask = 0.0
-            ws_loser_ask = 0.0
-            ws_winner_bid = 0.0
-            if self._clob_ws:
-                wb = self._clob_ws.get_book(winner_tid)
-                lb = self._clob_ws.get_book(loser_tid)
-                if wb:
-                    ws_winner_ask = wb.best_ask
-                    ws_winner_bid = wb.best_bid
-                if lb:
-                    ws_loser_ask = lb.best_ask
-
-            # REST-Fallback wenn WS kein Book hat (bei T-8s sind ~100ms akzeptabel)
-            rest_winner_ask = 0.0
-            rest_loser_ask = 0.0
-            rest_fallback_used = False
+            # ── CLOB-Preise lesen: beide Seiten ──
+            up_ask = 0.0
+            dn_ask = 0.0
             ask_source = "ws"
 
-            if ws_winner_ask <= 0:
-                try:
-                    rest_winner_ask = await self._fetch_ask(winner_tid)
-                    if rest_winner_ask > 0:
-                        rest_fallback_used = True
-                        ask_source = "rest_fallback"
-                        logger.info(
-                            f"ODA PRECLOSE REST-FALLBACK: {asset} winner "
-                            f"ws=$0.00 -> rest=${rest_winner_ask:.3f} | {slug[-15:]}"
-                        )
-                    else:
-                        ask_source = "rest_failed"
-                except Exception:
-                    ask_source = "rest_failed"
+            if self._clob_ws:
+                ub = self._clob_ws.get_book(up_tid)
+                db = self._clob_ws.get_book(down_tid)
+                if ub and ub.best_ask > 0:
+                    up_ask = ub.best_ask
+                if db and db.best_ask > 0:
+                    dn_ask = db.best_ask
 
-            if ws_loser_ask <= 0 and rest_fallback_used:
+            # REST-Fallback fuer fehlende Seiten
+            rest_up_ask = 0.0
+            rest_dn_ask = 0.0
+            if up_ask <= 0:
                 try:
-                    rest_loser_ask = await self._fetch_ask(loser_tid)
+                    rest_up_ask = await self._fetch_ask(up_tid)
+                    if rest_up_ask > 0:
+                        up_ask = rest_up_ask
+                        ask_source = "rest_fallback"
+                except Exception:
+                    pass
+            if dn_ask <= 0:
+                try:
+                    rest_dn_ask = await self._fetch_ask(down_tid)
+                    if rest_dn_ask > 0:
+                        dn_ask = rest_dn_ask
+                        ask_source = "rest_fallback"
                 except Exception:
                     pass
 
-            # Effektiver Ask: WS wenn vorhanden, sonst REST
-            effective_winner_ask = ws_winner_ask if ws_winner_ask > 0 else rest_winner_ask
-            effective_loser_ask = ws_loser_ask if ws_loser_ask > 0 else rest_loser_ask
+            # ── CLOB-SIGNAL: Teurere Seite = Winner laut Markt ──
+            if up_ask <= 0 and dn_ask <= 0:
+                self._log_preclose(slug, asset, "SKIP", "no_clob_data",
+                    winner_ask=0, loser_ask=0, ask_source="none",
+                    ws_winner_ask=0, ws_loser_ask=0,
+                    rest_winner_ask=rest_up_ask, rest_loser_ask=rest_dn_ask)
+                return False
 
-            spread_pct = 0.0
-            if effective_winner_ask > 0 and ws_winner_bid > 0:
-                spread_pct = (effective_winner_ask - ws_winner_bid) / effective_winner_ask * 100
-
-            # ═══ FILTER-KETTE ═══
-            abs_delta_t8 = abs(delta_t8)
-            abs_delta_t12 = abs(delta_t12)
-            abs_delta_t10 = abs(delta_t10)
-
-            direction_all_consistent = (direction_t12 == direction_t10 == direction_t8)
-            delta_acc_12_8 = abs_delta_t8 >= abs_delta_t12
-            delta_acc_10_8 = abs_delta_t8 >= abs_delta_t10
-
-            # Nahbereichs-Stabilität: alle Samples T-10 bis T-8 gleiche Richtung
-            stable_count = len(nearfield_directions)
-            all_same_dir = (
-                stable_count >= 5  # Mindestens 5 Samples (~500ms Abdeckung)
-                and len(set(nearfield_directions)) == 1
-                and nearfield_directions[0] == direction_t8
-            )
-
-            # Ask-Zone
-            ask = effective_winner_ask
-            if ask <= self._PRECLOSE_IDEAL:
-                ask_zone = "ideal"
-            elif ask <= self._PRECLOSE_CAP:
-                ask_zone = "marginal"
+            if up_ask >= dn_ask:
+                clob_winner = "UP"
+                winner_ask = up_ask
+                loser_ask = dn_ask
+                winner_tid = up_tid
             else:
-                ask_zone = "rejected"
+                clob_winner = "DOWN"
+                winner_ask = dn_ask
+                loser_ask = up_ask
+                winner_tid = down_tid
 
-            # ── Filter anwenden ──
+            # ── BINANCE-BESTAETIGUNG: Zeigt Binance dieselbe Richtung? ──
+            tick = self._oracle.get_latest(symbol) if self._oracle else None
+            if not tick or tick.mid <= 0:
+                self._log_preclose(slug, asset, "SKIP", "no_binance",
+                    winner_ask=winner_ask, loser_ask=loser_ask,
+                    ask_source=ask_source, ws_winner_ask=up_ask if clob_winner=="UP" else dn_ask,
+                    ws_loser_ask=dn_ask if clob_winner=="UP" else up_ask)
+                return False
+
+            binance_mid = tick.mid
+            tick_age_ms = (time.time() - tick.timestamp) * 1000
+            binance_direction = "UP" if binance_mid > start_price else "DOWN"
+            binance_delta = (binance_mid - start_price) / start_price * 100
+
+            # ── FILTER-KETTE (3 simple Checks) ──
             skip_reason = ""
 
-            if abs_delta_t8 < self._PRECLOSE_MIN_DELTA:
-                skip_reason = "delta_too_small"
-            elif not direction_all_consistent:
-                skip_reason = "direction_inconsistent"
-            elif not delta_acc_12_8:
-                skip_reason = "delta_decelerating_12_8"
-            elif not delta_acc_10_8:
-                skip_reason = "delta_decelerating_10_8"
-            elif not all_same_dir:
-                skip_reason = "nearfield_unstable"
-            elif ask < self._PRECLOSE_MIN_ASK:
-                skip_reason = "ask_too_low"
-            elif ask > self._PRECLOSE_CAP:
+            # Check 1: CLOB-Signal stark genug? (Markt mind. 65% sicher)
+            if winner_ask < self._PRECLOSE_MIN_CLOB_ASK:
+                skip_reason = "clob_signal_weak"
+            # Check 2: Ask nicht zu teuer? (max 93c, sonst kein Edge)
+            elif winner_ask > self._PRECLOSE_MAX_CLOB_ASK:
                 skip_reason = "ask_above_cap"
-            elif ask_zone == "marginal" and abs_delta_t8 < self._PRECLOSE_MARGINAL_DELTA:
-                skip_reason = "marginal_ask_weak_delta"
-            elif spread_pct > self._PRECLOSE_MAX_SPREAD:
-                skip_reason = "spread_too_wide"
-            elif not (self._clob_ws and self._clob_ws.get_book(winner_tid) and self._clob_ws.get_book(loser_tid)):
-                skip_reason = "ws_book_missing"
+            # Check 3: Binance bestaetigt? (gleiche Richtung)
+            elif binance_direction != clob_winner:
+                skip_reason = "binance_disagrees"
+            # Check 4: Binance-Tick frisch?
             elif tick_age_ms > self._PRECLOSE_MAX_TICK_AGE:
                 skip_reason = "tick_too_stale"
+
+            secs_to_close = end_ts - time.time()
 
             if skip_reason:
                 self._log_preclose(
                     slug, asset, "SKIP", skip_reason,
-                    delta_t12=delta_t12, delta_t10=delta_t10, delta_t8=delta_t8,
-                    dir_t12=direction_t12, dir_t10=direction_t10, dir_t8=direction_t8,
-                    dir_consistent=direction_all_consistent,
-                    acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
-                    stable_samples=stable_count, all_same=all_same_dir,
-                    winner_ask=ask, loser_ask=effective_loser_ask,
-                    ask_zone=ask_zone, spread=spread_pct,
-                    winner_tid=winner_tid, binance_mid=price_t8,
+                    delta_t8=binance_delta,
+                    dir_t8=binance_direction,
+                    winner_ask=winner_ask, loser_ask=loser_ask,
+                    ask_zone="clob_signal",
+                    winner_tid=winner_tid, binance_mid=binance_mid,
                     binance_start=start_price, tick_age=tick_age_ms,
-                    secs_to_close=end_ts - time.time(),
-                    ask_source=ask_source, ws_winner_ask=ws_winner_ask,
-                    ws_loser_ask=ws_loser_ask, rest_winner_ask=rest_winner_ask,
-                    rest_loser_ask=rest_loser_ask, rest_fallback_used=rest_fallback_used,
+                    secs_to_close=secs_to_close,
+                    ask_source=ask_source,
+                    ws_winner_ask=up_ask if clob_winner=="UP" else dn_ask,
+                    ws_loser_ask=dn_ask if clob_winner=="UP" else up_ask,
+                    rest_winner_ask=rest_up_ask if clob_winner=="UP" else rest_dn_ask,
+                    rest_loser_ask=rest_dn_ask if clob_winner=="UP" else rest_up_ask,
                 )
                 logger.info(
-                    f"ODA PRECLOSE SKIP: {asset} {direction_t8} | "
-                    f"ask=${ask:.3f} src={ask_source} delta={delta_t8:+.3f}% | {skip_reason}"
+                    f"ODA PRECLOSE SKIP: {asset} | "
+                    f"clob={clob_winner}(${winner_ask:.2f}) binance={binance_direction} | "
+                    f"T{secs_to_close:+.1f}s | {skip_reason}"
                 )
                 return False
 
-            # ═══ FIRE: Einzelner FAK-Shot ═══
+            # ═══ ALLE CHECKS BESTANDEN → FIRE! ═══
             logger.info(
-                f"ODA PRECLOSE FIRE: {asset} {direction_t8} | "
-                f"ask=${ask:.3f} delta={delta_t8:+.3f}% | "
-                f"zone={ask_zone} | {slug[-15:]}"
+                f"ODA PRECLOSE FIRE: {asset} {clob_winner} @ ${winner_ask:.2f} | "
+                f"binance={binance_direction}({binance_delta:+.3f}%) | "
+                f"T{secs_to_close:+.1f}s | {slug[-15:]}"
             )
 
             # Dedup
             if slug in self._sniped_windows:
-                self._log_preclose(
-                    slug, asset, "SKIP", "already_sniped",
-                    delta_t12=delta_t12, delta_t10=delta_t10, delta_t8=delta_t8,
-                    dir_t12=direction_t12, dir_t10=direction_t10, dir_t8=direction_t8,
-                    dir_consistent=direction_all_consistent,
-                    acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
-                    stable_samples=stable_count, all_same=all_same_dir,
-                    winner_ask=ask, loser_ask=effective_loser_ask,
-                    ask_zone=ask_zone, spread=spread_pct,
-                    winner_tid=winner_tid, binance_mid=price_t8,
-                    binance_start=start_price, tick_age=tick_age_ms,
-                    secs_to_close=end_ts - time.time(),
-                    ask_source=ask_source, ws_winner_ask=ws_winner_ask,
-                    ws_loser_ask=ws_loser_ask, rest_winner_ask=rest_winner_ask,
-                    rest_loser_ask=rest_loser_ask, rest_fallback_used=rest_fallback_used,
-                )
+                self._log_preclose(slug, asset, "SKIP", "already_sniped",
+                    winner_ask=winner_ask, loser_ask=loser_ask,
+                    secs_to_close=secs_to_close)
                 return False
             self._sniped_windows.add(slug)
 
-            # Order vorbereiten
-            order_price = min(ask, self._PRECLOSE_CAP)
+            # Order
             window_data = {
                 "slug": slug, "asset": asset,
                 "question": f"{asset} Up or Down {w.get('timeframe', '5m')}",
@@ -1281,20 +1201,18 @@ class OracleDelayArbStrategy(StrategyBase):
 
             _orig_size = self.trade_size_usd
             try:
-                # Temporaer Size auf $2 fuer Learn-Test
                 self.trade_size_usd = self._PRECLOSE_SIZE
                 await self._execute_snipe(
-                    window_data, direction_t8, winner_tid, order_price,
-                    entry_binance_price=price_t8,
+                    window_data, clob_winner, winner_tid, winner_ask,
+                    entry_binance_price=binance_mid,
                     tick_age_ms=tick_age_ms,
-                    price_change_pct=delta_t8,
-                    signal_tier="PRECLOSE",
+                    price_change_pct=binance_delta,
+                    signal_tier="PRECLOSE_T2",
                     regime_tag="PRECLOSE_TEST",
-                    spread_pct=spread_pct,
+                    spread_pct=0.0,
                 )
-                # Check if fill succeeded via last trade
                 if self._trades and self._trades[-1].live_success:
-                    fill_price = order_price
+                    fill_price = winner_ask
                     live_order_id = self._trades[-1].live_order_id
                     outcome = "FILLED"
                 else:
@@ -1306,28 +1224,27 @@ class OracleDelayArbStrategy(StrategyBase):
 
             self._log_preclose(
                 slug, asset, "FIRE", "",
-                delta_t12=delta_t12, delta_t10=delta_t10, delta_t8=delta_t8,
-                dir_t12=direction_t12, dir_t10=direction_t10, dir_t8=direction_t8,
-                dir_consistent=direction_all_consistent,
-                acc_12_8=delta_acc_12_8, acc_10_8=delta_acc_10_8,
-                stable_samples=stable_count, all_same=all_same_dir,
-                winner_ask=ask, loser_ask=effective_loser_ask,
-                ask_zone=ask_zone, spread=spread_pct,
-                winner_tid=winner_tid, binance_mid=price_t8,
+                delta_t8=binance_delta,
+                dir_t8=clob_winner,
+                winner_ask=winner_ask, loser_ask=loser_ask,
+                ask_zone="clob_signal",
+                winner_tid=winner_tid, binance_mid=binance_mid,
                 binance_start=start_price, tick_age=tick_age_ms,
-                secs_to_close=end_ts - time.time(),
+                secs_to_close=secs_to_close,
                 fill_price=fill_price, live_order_id=live_order_id,
                 outcome=outcome,
-                ask_source=ask_source, ws_winner_ask=ws_winner_ask,
-                ws_loser_ask=ws_loser_ask, rest_winner_ask=rest_winner_ask,
-                rest_loser_ask=rest_loser_ask, rest_fallback_used=rest_fallback_used,
+                ask_source=ask_source,
+                ws_winner_ask=up_ask if clob_winner=="UP" else dn_ask,
+                ws_loser_ask=dn_ask if clob_winner=="UP" else up_ask,
+                rest_winner_ask=rest_up_ask if clob_winner=="UP" else rest_dn_ask,
+                rest_loser_ask=rest_dn_ask if clob_winner=="UP" else rest_up_ask,
             )
 
             logger.info(
-                f"ODA PRECLOSE {outcome}: {asset} {direction_t8} @ ${fill_price:.3f} | "
-                f"ask=${ask:.3f} zone={ask_zone} | {slug[-15:]}"
+                f"ODA PRECLOSE {outcome}: {asset} {clob_winner} @ ${fill_price:.3f} | "
+                f"clob=${winner_ask:.2f} | T{secs_to_close:+.1f}s | {slug[-15:]}"
             )
-            return True  # Preclose hat gefeuert → kein T+0ms Burst
+            return True
 
         except asyncio.CancelledError:
             return False
