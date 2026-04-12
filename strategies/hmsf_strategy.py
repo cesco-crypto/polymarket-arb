@@ -57,7 +57,7 @@ class HMSFStrategy(StrategyBase):
     def description(self) -> str:
         return self.DESCRIPTION
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, **kwargs) -> None:
         self.settings = settings
 
         # Eigene Instanzen (kein Sharing mit v2.0)

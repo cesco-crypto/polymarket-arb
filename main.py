@@ -67,6 +67,15 @@ def _save_strategy_state(active: dict) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# GLOBAL LEARN MACHINE — Shared zwischen Strategy und Redeemer
+# ═══════════════════════════════════════════════════════════════════
+
+from core.learn_machine import LearnMachine
+
+_global_learn = LearnMachine()
+
+
+# ═══════════════════════════════════════════════════════════════════
 # GLOBAL AUTO-REDEEMER — Identisch mit web_ui.py
 # ═══════════════════════════════════════════════════════════════════
 
@@ -89,6 +98,7 @@ def _get_global_redeemer():
                 builder_api_key=os.environ.get('POLY_BUILDER_API_KEY', ''),
                 builder_secret=os.environ.get('POLY_BUILDER_SECRET', ''),
                 builder_passphrase=os.environ.get('POLY_BUILDER_PASSPHRASE', ''),
+                on_resolve=_global_learn.on_resolve,
             )
             mode = "GASLESS (Safe Relayer)" if safe else "EOA (Gas)"
             logger.info(f"Global AutoRedeemer initialisiert ({mode})")
@@ -166,12 +176,13 @@ async def _run_headless() -> None:
         logger.warning("NO STATE FILE — using config default")
 
     # 3. Strategien erstellen + starten
+    #    LearnMachine wird per DI an ODA durchgereicht (andere Strategien ignorieren den kwarg)
     for name in names_to_start:
         if name not in available:
             logger.warning(f"Strategy '{name}' not in registry — skip")
             continue
         try:
-            strat = create_strategy(name, settings)
+            strat = create_strategy(name, settings, learn_machine=_global_learn)
             active_strategies[name] = strat
             _strategy_tasks[name] = asyncio.create_task(strat.run())
             logger.info(f"Strategy started: {name} — {strat.description}")

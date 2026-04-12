@@ -67,7 +67,8 @@ class AutoRedeemer:
 
     def __init__(self, private_key: str, wallet_address: str,
                  safe_address: str = "", builder_api_key: str = "",
-                 builder_secret: str = "", builder_passphrase: str = ""):
+                 builder_secret: str = "", builder_passphrase: str = "",
+                 on_resolve=None):
         self._key = private_key
         self._wallet = wallet_address
         # Safe/Relayer config
@@ -81,6 +82,8 @@ class AutoRedeemer:
         self._ctf = None
         self._last_redeem_time = 0
         self._total_redeemed = 0
+        # Callback: LearnMachine.on_resolve(trade_id, pnl_usd, is_win)
+        self._on_resolve = on_resolve
         # Dynamischer Cooldown: cid -> {"until": float, "attempts": int}
         self._cooldown_cache: dict[str, dict] = {}
         # Pending Batch: Positions die Pre-Check bestanden, warten auf Flush
@@ -509,6 +512,14 @@ class AutoRedeemer:
                 ))
             except Exception:
                 pass  # Telegram darf nie den Redeemer blockieren
+
+            # LearnMachine Callback — sofortige Live-Counter-Updates
+            # Nur ODA-Trades (nicht REDEEM-UNKNOWN/CLEANUP)
+            if self._on_resolve and matched_trade_id.startswith("ODA-"):
+                try:
+                    self._on_resolve(matched_trade_id, pnl_usd, pnl_usd > 0)
+                except Exception as e:
+                    logger.warning(f"Redeemer: on_resolve callback error: {e}")
 
         except Exception as e:
             logger.error(f"Journal redeem write error: {e}")

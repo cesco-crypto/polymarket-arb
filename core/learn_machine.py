@@ -29,6 +29,8 @@ class LearnMachine:
     def __init__(self):
         self._burst_count = 0
         self._daily_pnl = 0.0
+        self._daily_win_pnl = 0.0   # Brutto-Gewinne (nur positive PnL)
+        self._daily_loss_pnl = 0.0  # Brutto-Verluste (nur negative PnL, als negativer Wert)
         self._daily_wins = 0
         self._daily_losses = 0
         self._daily_fires = 0
@@ -84,6 +86,56 @@ class LearnMachine:
         return False, ""
 
     # ══════════════════════════════════════════════════════
+    # RESOLVE CALLBACK (vom Redeemer)
+    # ══════════════════════════════════════════════════════
+
+    def on_resolve(self, trade_id: str, pnl_usd: float, is_win: bool) -> None:
+        """Callback vom Redeemer — aktualisiert Live-Counter sofort.
+
+        Wird direkt aus _log_redemption_to_journal() aufgerufen.
+        is_win basiert auf pnl_usd > 0 (oekonomisches Ergebnis).
+        """
+        # Live-Counter sofort aktualisieren
+        self._daily_pnl += pnl_usd
+        self._daily_fills += 1
+
+        if is_win:
+            self._daily_wins += 1
+            self._daily_win_pnl += pnl_usd
+            self._consecutive_losses = 0
+        else:
+            self._daily_losses += 1
+            self._daily_loss_pnl += pnl_usd  # Negativer Wert
+            self._consecutive_losses += 1
+
+        # Guardrail: Loss-Streak Warning bei 3
+        if self._consecutive_losses == 3:
+            self._send_loss_streak_warning()
+
+        # RESOLVE in burst_log.jsonl fuer Offline-Analyse
+        entry = {
+            "ts": round(time.time(), 3),
+            "event": "RESOLVE",
+            "trade_id": trade_id,
+            "pnl_usd": round(pnl_usd, 4),
+            "is_win": is_win,
+            "daily_pnl": round(self._daily_pnl, 4),
+            "consecutive_losses": self._consecutive_losses,
+        }
+        try:
+            BURST_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with open(BURST_LOG, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
+
+        logger.info(
+            f"LearnMachine RESOLVE: {trade_id} {'WIN' if is_win else 'LOSS'} "
+            f"${pnl_usd:+.2f} | daily=${self._daily_pnl:+.2f} "
+            f"streak={self._consecutive_losses}"
+        )
+
+    # ══════════════════════════════════════════════════════
     # BURST LOGGING
     # ══════════════════════════════════════════════════════
 
@@ -134,28 +186,18 @@ class LearnMachine:
         self._burst_count += 1
 
         # Update daily stats
+        # WICHTIG: _daily_fills, _daily_wins, _daily_losses, _daily_pnl
+        # werden NICHT hier gezaehlt — nur in on_resolve() beim RESOLVE-Callback.
+        # log_burst() zaehlt nur FIRE/SKIP und strukturelle Outcomes (CAP, NO_LIQ).
         if action == "FIRE":
             self._daily_fires += 1
             if outcome == "CAP_EXCEEDED":
                 self._daily_cap_exceeded += 1
             elif outcome == "NO_LIQUIDITY":
                 self._daily_no_liq += 1
-            elif outcome == "FILLED_WIN":
-                self._daily_fills += 1
-                self._daily_wins += 1
-                self._daily_pnl += pnl_usd
-                self._consecutive_losses = 0
-            elif outcome == "FILLED_LOSS":
-                self._daily_fills += 1
-                self._daily_losses += 1
-                self._daily_pnl += pnl_usd
-                self._consecutive_losses += 1
+            # FILLED: wird hier nur geloggt, Fill/Win/Loss-Counter kommen via on_resolve()
         elif action == "SKIP":
             self._daily_skips += 1
-
-        # Guardrail: Loss-Streak Warning
-        if self._consecutive_losses == 3:
-            self._send_loss_streak_warning()
 
     # ══════════════════════════════════════════════════════
     # REPORTS
@@ -180,11 +222,11 @@ class LearnMachine:
             f"FIRE Outcomes:",
             f"  ⬜ CAP_EXCEEDED:  {self._daily_cap_exceeded}",
             f"  🔲 NO_LIQUIDITY:  {self._daily_no_liq}",
-            f"  ✅ WIN:  {self._daily_wins}  (+${sum_wins:.2f})" if self._daily_wins else f"  ✅ WIN:  0",
-            f"  ❌ LOSS: {self._daily_losses}",
+            f"  ✅ WIN:  {self._daily_wins}  (+${self._daily_win_pnl:.2f})" if self._daily_wins else f"  ✅ WIN:  0",
+            f"  ❌ LOSS: {self._daily_losses}  (${self._daily_loss_pnl:.2f})" if self._daily_losses else f"  ❌ LOSS: 0",
             f"",
             f"P(fill|fire): {p_fill:.0f}% | P(win|fill): {p_win:.0f}%",
-            f"EV/Burst: ${ev:.2f} | PnL: ${self._daily_pnl:.2f}",
+            f"EV/Burst: ${ev:.2f} | Net PnL: ${self._daily_pnl:.2f}",
             f"Phase: {self._phase} | {self._burst_count}/200 Bursts",
             f"{'═'*50}",
         ]
@@ -213,12 +255,12 @@ class LearnMachine:
             f"━━━━━━━━━━━━━━━━━━\n"
             f"📊 Windows: {total}\n"
             f"🎯 Fired: {self._daily_fires} → Filled: {self._daily_fills} ({p_fill:.0f}%)\n"
-            f"  ✅ WIN:  {self._daily_wins}\n"
-            f"  ❌ LOSS: {self._daily_losses}\n"
+            f"  ✅ WIN:  {self._daily_wins}  (+${self._daily_win_pnl:.2f})\n"
+            f"  ❌ LOSS: {self._daily_losses}  (${self._daily_loss_pnl:.2f})\n"
             f"  ⬜ CAP:  {self._daily_cap_exceeded} | 🔲 NoLiq: {self._daily_no_liq}\n"
             f"🚫 Skipped: {self._daily_skips}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"💰 PnL: ${self._daily_pnl:+.2f}\n"
+            f"💰 Net PnL: ${self._daily_pnl:+.2f}\n"
             f"📈 P(fill): {p_fill:.0f}% | P(win|fill): {p_win:.0f}%\n"
             f"📐 EV/Burst: ${ev:+.2f}\n"
             f"🔬 Phase: {self._phase} | {self._burst_count} total Bursts"
@@ -231,6 +273,8 @@ class LearnMachine:
 
     def _reset_daily(self):
         self._daily_pnl = 0.0
+        self._daily_win_pnl = 0.0
+        self._daily_loss_pnl = 0.0
         self._daily_wins = 0
         self._daily_losses = 0
         self._daily_fires = 0

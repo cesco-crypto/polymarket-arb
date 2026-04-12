@@ -474,7 +474,7 @@ class CopyTradingStrategy(StrategyBase):
     def description(self) -> str:
         return self.DESCRIPTION
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, **kwargs) -> None:
         self.settings = settings
         self.executor = PolymarketExecutor(settings)
         self.journal = TradeJournal()

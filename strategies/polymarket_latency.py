@@ -70,7 +70,7 @@ class PolymarketLatencyStrategy(StrategyBase):
     def description(self) -> str:
         return self.DESCRIPTION
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, **kwargs) -> None:
         self.settings = settings
         self.oracle = BinanceWebSocketOracle(
             symbols=settings.oracle_symbols,

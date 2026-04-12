@@ -106,12 +106,17 @@ class OracleDelayArbStrategy(StrategyBase):
     def description(self) -> str:
         return self.DESCRIPTION
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, **kwargs) -> None:
         self.settings = settings
         self.executor = PolymarketExecutor(settings)
         self.journal = TradeJournal()
-        from core.learn_machine import LearnMachine
-        self._learn = LearnMachine()
+
+        # LearnMachine: per DI von main.py, Fallback fuer Standalone-Tests
+        if "learn_machine" in kwargs and kwargs["learn_machine"] is not None:
+            self._learn = kwargs["learn_machine"]
+        else:
+            from core.learn_machine import LearnMachine
+            self._learn = LearnMachine()
 
         # EIGENE MarketDiscovery — autark, keine Abhaengigkeit von anderen Strategien
         self.discovery = MarketDiscovery(
@@ -585,6 +590,73 @@ class OracleDelayArbStrategy(StrategyBase):
                 winner = "DOWN"
                 winner_tid = down_tid
 
+            # ═══ TOKEN-PATH DIAGNOSTIK (Phase 1: Sichtbarkeit, kein Fix) ═══
+            _tf = w.get("timeframe", "?")
+            _diag = {
+                "slug": slug, "asset": asset, "tf": _tf,
+                "winner": winner,
+                "up_tid": up_tid[:12] if up_tid else "NONE",
+                "down_tid": down_tid[:12] if down_tid else "NONE",
+                "winner_tid": winner_tid[:12] if winner_tid else "NONE",
+                "winner_is_up": winner_tid == up_tid,
+            }
+
+            # WS-Book Status fuer BEIDE Seiten
+            _ws_up_ask = 0.0
+            _ws_dn_ask = 0.0
+            _ws_has_up = False
+            _ws_has_dn = False
+            if self._clob_ws:
+                _ub = self._clob_ws.get_book(up_tid)
+                _db = self._clob_ws.get_book(down_tid)
+                if _ub and _ub.best_ask > 0:
+                    _ws_up_ask = _ub.best_ask
+                    _ws_has_up = True
+                if _db and _db.best_ask > 0:
+                    _ws_dn_ask = _db.best_ask
+                    _ws_has_dn = True
+
+            # Discovery-Cache Status fuer BEIDE Seiten
+            _disc_up_ask = 0.0
+            _disc_dn_ask = 0.0
+            try:
+                _dw = self.discovery.windows.get(slug)
+                if _dw:
+                    _disc_up_ask = _dw.up_best_ask
+                    _disc_dn_ask = _dw.down_best_ask
+            except Exception:
+                pass
+
+            _diag.update({
+                "ws_has_up": _ws_has_up, "ws_has_dn": _ws_has_dn,
+                "ws_up_ask": round(_ws_up_ask, 3), "ws_dn_ask": round(_ws_dn_ask, 3),
+                "disc_up_ask": round(_disc_up_ask, 3), "disc_dn_ask": round(_disc_dn_ask, 3),
+            })
+
+            # Diagnostische Warnungen (kein Skip, kein Fix — nur sichtbar machen)
+            if winner == "UP" and winner_tid != up_tid:
+                logger.warning(f"ODA DIAG-WARN: winner=UP but winner_tid != up_tid! | {slug}")
+            if winner == "DOWN" and winner_tid != down_tid:
+                logger.warning(f"ODA DIAG-WARN: winner=DOWN but winner_tid != down_tid! | {slug}")
+
+            _winner_ws_ask = _ws_up_ask if winner == "UP" else _ws_dn_ask
+            _loser_ws_ask = _ws_dn_ask if winner == "UP" else _ws_up_ask
+            if _winner_ws_ask <= 0.01 and _loser_ws_ask >= 0.90:
+                logger.warning(
+                    f"ODA DIAG-SUSPECT: {asset} {_tf} winner_ask=${_winner_ws_ask:.3f} "
+                    f"loser_ask=${_loser_ws_ask:.3f} — possible side inversion! | {slug}"
+                )
+            if not _ws_has_up or not _ws_has_dn:
+                logger.info(
+                    f"ODA DIAG-WS: {asset} {_tf} ws_up={_ws_has_up}(${_ws_up_ask:.3f}) "
+                    f"ws_dn={_ws_has_dn}(${_ws_dn_ask:.3f}) — fallback likely | {slug}"
+                )
+            if _disc_up_ask <= 0.01 or _disc_dn_ask <= 0.01:
+                logger.info(
+                    f"ODA DIAG-DISC: {asset} {_tf} disc_up=${_disc_up_ask:.3f} "
+                    f"disc_dn=${_disc_dn_ask:.3f} — stale/empty discovery | {slug}"
+                )
+
             # ═══ ANTI-NOISE GUARD (Deadzone) ═══
             # Bei < 0.05% Delta ist Winner-Bestimmung Rauschen → UMA Oracle unberechenbar
             if abs(price_change_pct) < self.deadzone_pct:
@@ -679,12 +751,14 @@ class OracleDelayArbStrategy(StrategyBase):
                 try:
                     # Lese Ask aus 3-Tier Fallback (RAM → Discovery → REST)
                     shot_ask = 0.0
+                    _tier_used = "none"
 
                     # Tier 1: CLOB WS RAM Orderbuch (O(1), <1µs)
                     if self._clob_ws:
                         book = self._clob_ws.get_book(winner_tid)
                         if book and book.best_ask > 0:
                             shot_ask = book.best_ask
+                            _tier_used = "ws"
 
                     # Tier 2: Eigene Discovery Cache
                     if shot_ask <= 0:
@@ -692,6 +766,7 @@ class OracleDelayArbStrategy(StrategyBase):
                             for s, wnd in self.discovery.windows.items():
                                 if wnd.condition_id == condition_id:
                                     shot_ask = wnd.up_best_ask if winner == "UP" else wnd.down_best_ask
+                                    _tier_used = "discovery"
                                     break
                         except Exception:
                             pass
@@ -699,6 +774,29 @@ class OracleDelayArbStrategy(StrategyBase):
                     # Tier 3: REST Fetch (langsam aber zuverlaessig, nur Shot#0)
                     if shot_ask <= 0 and shot == 0:
                         shot_ask = await self._fetch_ask(winner_tid)
+                        if shot_ask > 0:
+                            _tier_used = "rest"
+
+                    # ═══ TOKEN-PATH DEBUG SNAPSHOT (nur Shot#0, ~30µs) ═══
+                    if shot == 0:
+                        _diag["tier_used"] = _tier_used
+                        _diag["shot_ask"] = round(shot_ask, 3)
+                        _diag["ts"] = round(time.time(), 3)
+                        try:
+                            _dbg_path = Path("data/token_path_debug.jsonl")
+                            _dbg_path.parent.mkdir(parents=True, exist_ok=True)
+                            with open(_dbg_path, "a") as _dbg_f:
+                                _dbg_f.write(json.dumps(_diag) + "\n")
+                        except Exception:
+                            pass
+                        # Log-Zeile fuer Screen-Sichtbarkeit
+                        logger.info(
+                            f"ODA DIAG: {asset} {_tf} {winner} | "
+                            f"ask=${shot_ask:.3f} tier={_tier_used} | "
+                            f"ws_up=${_ws_up_ask:.3f} ws_dn=${_ws_dn_ask:.3f} | "
+                            f"disc_up=${_disc_up_ask:.3f} disc_dn=${_disc_dn_ask:.3f} | "
+                            f"winner_is_up={winner_tid == up_tid}"
+                        )
 
                     if shot_ask <= 0 or shot_ask > self.max_entry_price:
                         if shot == 0:
@@ -733,6 +831,27 @@ class OracleDelayArbStrategy(StrategyBase):
                     self._learn.log_burst(slug, asset, action="FIRE", abs_delta=abs(price_change_pct),
                                           tick_age_ms=tick_age_ms, best_ask=shot_ask, spread_pct=spread_pct,
                                           outcome="FILLED", fill_price=shot_ask)
+
+                    # FILL_VALIDATION Snapshot — 8 Felder, alle lokal, kein Netzwerk-Call
+                    try:
+                        last_trade = self._trades[-1] if self._trades else None
+                        _fv = {
+                            "ts": round(time.time(), 3),
+                            "trade_id": last_trade.trade_id if last_trade else f"ODA-{self._trade_count:04d}",
+                            "slug": slug,
+                            "condition_id": condition_id,
+                            "token_id": winner_tid,
+                            "asset": asset,
+                            "fill_price": round(shot_ask, 3),
+                            "live_order_id": last_trade.live_order_id if last_trade else "",
+                        }
+                        _fv_path = Path("data/fill_validation.jsonl")
+                        _fv_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(_fv_path, "a") as _fv_f:
+                            _fv_f.write(json.dumps(_fv) + "\n")
+                    except Exception:
+                        pass  # Snapshot darf nie den Trading-Loop blockieren
+
                     break  # Erster erfolgreicher Shot genuegt
 
                 except Exception as e:
