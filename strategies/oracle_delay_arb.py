@@ -523,17 +523,14 @@ class OracleDelayArbStrategy(StrategyBase):
             if now < window_start_ts:
                 await asyncio.sleep(window_start_ts - now)
 
-            # Primaer: Chainlink BTC/USD on-chain (exakt gleiche Quelle wie Polymarket)
-            chainlink_price = await self._read_chainlink_btc_usd()
-            if chainlink_price and chainlink_price > 0:
-                self._price_at_window_start[slug] = (chainlink_price, time.time())
-                logger.info(f"ODA PRICE-SYNC: {slug[-15:]} start=${chainlink_price:.2f} (CHAINLINK)")
-            elif self._oracle:
-                # Fallback: Binance
+            # Binance BTC/USDT als Startpreis — nachweislich <$1 Abweichung
+            # zu Polymarket's Price To Beat. Chainlink On-Chain war $80 daneben
+            # wegen 27s Heartbeat-Verzoegerung → falsche Richtungsentscheidungen.
+            if self._oracle:
                 tick = self._oracle.get_latest(symbol)
                 if tick and tick.mid > 0 and (time.time() - tick.timestamp) < 2.0:
                     self._price_at_window_start[slug] = (tick.mid, time.time())
-                    logger.info(f"ODA PRICE-SYNC: {slug[-15:]} start=${tick.mid:.2f} (BINANCE fallback)")
+                    logger.info(f"ODA PRICE-SYNC: {slug[-15:]} start=${tick.mid:.2f} (BINANCE)")
 
             if not self._running:
                 return
