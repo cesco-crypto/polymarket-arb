@@ -514,20 +514,26 @@ class OracleDelayArbStrategy(StrategyBase):
             return
 
         try:
-            # ── PHASE 0: Binance-Snapshot EXAKT bei Window-Start ──
-            # Price To Beat = Chainlink-Preis bei Window-Start.
-            # Wir nehmen Binance zum selben Zeitpunkt (Chainlink nicht direkt abrufbar).
-            # KRITISCH: Nicht bei Discovery (~T-310s), sondern exakt bei start_ts.
+            # ── PHASE 0: Price-To-Beat via Chainlink On-Chain Oracle ──
+            # Polymarket nutzt Chainlink BTC/USD fuer Resolution.
+            # Wir lesen denselben Smart Contract auf Polygon — kostenlos, gleiche Quelle.
+            # Fallback: Binance bei Window-Start.
             window_start_ts = w.get("window_start_ts", end_ts - 300)
             now = time.time()
             if now < window_start_ts:
                 await asyncio.sleep(window_start_ts - now)
-                # Snapshot exakt bei Window-Start
-                if self._oracle:
-                    tick = self._oracle.get_latest(symbol)
-                    if tick and tick.mid > 0 and (time.time() - tick.timestamp) < 2.0:
-                        self._price_at_window_start[slug] = (tick.mid, time.time())
-                        logger.debug(f"ODA PRICE-SYNC: {slug[-15:]} start_price=${tick.mid:.2f} at window_start")
+
+            # Primaer: Chainlink BTC/USD on-chain (exakt gleiche Quelle wie Polymarket)
+            chainlink_price = await self._read_chainlink_btc_usd()
+            if chainlink_price and chainlink_price > 0:
+                self._price_at_window_start[slug] = (chainlink_price, time.time())
+                logger.info(f"ODA PRICE-SYNC: {slug[-15:]} start=${chainlink_price:.2f} (CHAINLINK)")
+            elif self._oracle:
+                # Fallback: Binance
+                tick = self._oracle.get_latest(symbol)
+                if tick and tick.mid > 0 and (time.time() - tick.timestamp) < 2.0:
+                    self._price_at_window_start[slug] = (tick.mid, time.time())
+                    logger.info(f"ODA PRICE-SYNC: {slug[-15:]} start=${tick.mid:.2f} (BINANCE fallback)")
 
             if not self._running:
                 return
@@ -1337,6 +1343,61 @@ class OracleDelayArbStrategy(StrategyBase):
                 f.write(json.dumps(entry) + "\n")
         except Exception:
             pass
+
+    # ═══════════════════════════════════════════════════════════════
+    # CHAINLINK ON-CHAIN ORACLE (Price To Beat)
+    # ═══════════════════════════════════════════════════════════════
+
+    # Chainlink BTC/USD Price Feed auf Polygon — gleiche Quelle wie Polymarket Resolution
+    _CHAINLINK_BTC_USD = "0xc907E116054Ad103354f2D350FD2514433D57F6f"
+    _CHAINLINK_ABI = [{"inputs":[],"name":"latestRoundData","outputs":[
+        {"name":"roundId","type":"uint80"},{"name":"answer","type":"int256"},
+        {"name":"startedAt","type":"uint256"},{"name":"updatedAt","type":"uint256"},
+        {"name":"answeredInRound","type":"uint80"}
+    ],"stateMutability":"view","type":"function"},
+    {"inputs":[],"name":"decimals","outputs":[
+        {"name":"","type":"uint8"}],"stateMutability":"view","type":"function"}]
+    _chainlink_contract = None
+    _chainlink_decimals = None
+
+    async def _read_chainlink_btc_usd(self) -> float:
+        """Liest BTC/USD direkt vom Chainlink Smart Contract auf Polygon.
+
+        Kostenlos (view function), gleiche Quelle wie Polymarket Resolution.
+        Latenz: ~50-100ms (RPC Call).
+        """
+        try:
+            if self._chainlink_contract is None:
+                from web3 import Web3
+                w3 = Web3(Web3.HTTPProvider(
+                    "https://polygon.gateway.tenderly.co",
+                    request_kwargs={"timeout": 5}
+                ))
+                self._chainlink_contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(self._CHAINLINK_BTC_USD),
+                    abi=self._CHAINLINK_ABI,
+                )
+                self._chainlink_decimals = self._chainlink_contract.functions.decimals().call()
+
+            loop = asyncio.get_running_loop()
+            round_data = await loop.run_in_executor(
+                None, self._chainlink_contract.functions.latestRoundData().call
+            )
+            price = round_data[1] / (10 ** self._chainlink_decimals)
+            updated_at = round_data[3]
+            age = int(time.time()) - updated_at
+
+            # Chainlink updated bei 0.5% Deviation oder 1h Heartbeat
+            # Preis gilt als frisch wenn < 120s alt
+            if age > 120:
+                logger.debug(f"Chainlink BTC/USD: ${price:.2f} but stale ({age}s old)")
+                return 0.0
+
+            return price
+
+        except Exception as e:
+            logger.debug(f"Chainlink read error: {e}")
+            return 0.0
 
     # ═══════════════════════════════════════════════════════════════
     # WINDOW DISCOVERY
