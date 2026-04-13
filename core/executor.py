@@ -448,14 +448,39 @@ class PolymarketExecutor:
             if status_code == 200 and "orderID" in resp_data:
                 order_id = resp_data.get("orderID", resp_data.get("id", "unknown"))
                 self._orders_placed += 1
-                self._total_volume_usd += size_usd
+
+                # 5. Echte Fill-Size abfragen (FAK = oft partielle Fills)
+                actual_filled = float(safe_size)  # Fallback: angenommen voll
+                try:
+                    await asyncio.sleep(0.5)  # Warten bis Order settled
+                    order_detail = await loop.run_in_executor(
+                        None, self._client.get_order, str(order_id)
+                    )
+                    if order_detail:
+                        size_matched = float(order_detail.get("size_matched", 0))
+                        if size_matched > 0:
+                            actual_filled = size_matched
+                            logger.info(
+                                f"FILL CHECK: {order_id[:20]} | "
+                                f"ordered={safe_size} matched={size_matched} "
+                                f"fill_rate={size_matched/safe_size*100:.0f}%"
+                            )
+                        else:
+                            logger.info(f"FILL CHECK: {order_id[:20]} | size_matched=0 (using ordered={safe_size})")
+                except Exception as e:
+                    logger.debug(f"Fill check failed: {e} (using ordered={safe_size})")
+
+                actual_filled_usd = actual_filled * price
+                self._total_volume_usd += actual_filled_usd
+
                 logger.info(
                     f"ASYNC ORDER OK: {asset} {direction} @ {price:.3f} | "
-                    f"${size_usd:.2f} | sign={sign_ms:.0f}ms net={network_ms:.0f}ms total={total_ms:.0f}ms | {order_id}"
+                    f"${actual_filled_usd:.2f} ({actual_filled:.1f} shares) | "
+                    f"sign={sign_ms:.0f}ms net={network_ms:.0f}ms total={total_ms:.0f}ms | {order_id}"
                 )
                 return ExecutionResult(
                     success=True, order_id=str(order_id),
-                    filled_price=price, filled_size=size_usd,
+                    filled_price=price, filled_size=actual_filled_usd,
                     latency_ms=round(total_ms, 1),
                 )
             else:
