@@ -514,6 +514,24 @@ class OracleDelayArbStrategy(StrategyBase):
             return
 
         try:
+            # ── PHASE 0: Binance-Snapshot EXAKT bei Window-Start ──
+            # Price To Beat = Chainlink-Preis bei Window-Start.
+            # Wir nehmen Binance zum selben Zeitpunkt (Chainlink nicht direkt abrufbar).
+            # KRITISCH: Nicht bei Discovery (~T-310s), sondern exakt bei start_ts.
+            window_start_ts = w.get("window_start_ts", end_ts - 300)
+            now = time.time()
+            if now < window_start_ts:
+                await asyncio.sleep(window_start_ts - now)
+                # Snapshot exakt bei Window-Start
+                if self._oracle:
+                    tick = self._oracle.get_latest(symbol)
+                    if tick and tick.mid > 0 and (time.time() - tick.timestamp) < 2.0:
+                        self._price_at_window_start[slug] = (tick.mid, time.time())
+                        logger.debug(f"ODA PRICE-SYNC: {slug[-15:]} start_price=${tick.mid:.2f} at window_start")
+
+            if not self._running:
+                return
+
             # ── PHASE 1: Pre-Sign bei T-12s ──
             pre_sign_time = end_ts - 12
             now = time.time()
