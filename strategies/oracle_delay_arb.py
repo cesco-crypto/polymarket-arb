@@ -1032,6 +1032,7 @@ class OracleDelayArbStrategy(StrategyBase):
     _PRECLOSE_SIZE = 2.0      # $2 Learn-Test Size
     _PRECLOSE_MIN_CLOB_ASK = 0.65  # Markt muss mind. 65% sicher sein
     _PRECLOSE_MAX_CLOB_ASK = 0.90  # Nicht ueber 90c kaufen (min 10% Edge)
+    _PRECLOSE_MIN_DELTA = 0.03    # 0.03% Mindest-Binance-Move (filtert Noise-Trades)
     _PRECLOSE_MAX_TICK_AGE = 500   # 500ms Binance-Freshness
 
     async def _preclose_test(
@@ -1131,19 +1132,23 @@ class OracleDelayArbStrategy(StrategyBase):
             binance_direction = "UP" if binance_mid > start_price else "DOWN"
             binance_delta = (binance_mid - start_price) / start_price * 100
 
-            # ── FILTER-KETTE (3 simple Checks) ──
+            # ── FILTER-KETTE (4 Checks) ──
             skip_reason = ""
+            abs_binance_delta = abs(binance_delta)
 
-            # Check 1: CLOB-Signal stark genug? (Markt mind. 65% sicher)
-            if winner_ask < self._PRECLOSE_MIN_CLOB_ASK:
+            # Check 1: Binance-Move gross genug? (filtert Noise/Zufall)
+            if abs_binance_delta < self._PRECLOSE_MIN_DELTA:
+                skip_reason = "delta_too_small"
+            # Check 2: CLOB-Signal stark genug? (Markt mind. 65% sicher)
+            elif winner_ask < self._PRECLOSE_MIN_CLOB_ASK:
                 skip_reason = "clob_signal_weak"
-            # Check 2: Ask nicht zu teuer? (max 93c, sonst kein Edge)
+            # Check 3: Ask nicht zu teuer? (max 90c, sonst kein Edge)
             elif winner_ask > self._PRECLOSE_MAX_CLOB_ASK:
                 skip_reason = "ask_above_cap"
-            # Check 3: Binance bestaetigt? (gleiche Richtung)
+            # Check 4: Binance bestaetigt? (gleiche Richtung)
             elif binance_direction != clob_winner:
                 skip_reason = "binance_disagrees"
-            # Check 4: Binance-Tick frisch?
+            # Check 5: Binance-Tick frisch?
             elif tick_age_ms > self._PRECLOSE_MAX_TICK_AGE:
                 skip_reason = "tick_too_stale"
 
