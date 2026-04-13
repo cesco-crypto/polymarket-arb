@@ -224,10 +224,10 @@ class OracleDelayArbStrategy(StrategyBase):
         from core.clob_ws import CLOBWebSocket
         self._clob_ws = CLOBWebSocket()
 
-        # Token-IDs: NUR BTC 5m (Learn-Test Isolation)
+        # Token-IDs: BTC 5m + 15m (Learn-Test Isolation, kein ETH)
         initial_tokens = []
         for w in self._compute_next_window_closes():
-            if w.get("asset", "").upper() != "BTC" or w.get("timeframe", "") != "5m":
+            if w.get("asset", "").upper() != "BTC" or w.get("timeframe", "") not in ("5m", "15m"):
                 continue
             if w["seconds_to_close"] > 0:
                 tids = await self._get_token_ids(w["slug"], w["asset"])
@@ -287,19 +287,17 @@ class OracleDelayArbStrategy(StrategyBase):
             self._oracle = None
 
     async def _subscribe_clob_tokens(self) -> None:
-        """Subscribed NUR BTC 5m Window-Tokens auf dem CLOB WS.
+        """Subscribed BTC 5m + 15m Window-Tokens auf dem CLOB WS.
 
-        Learn-Test Isolation: Nur BTC 5m. Kein ETH, kein 15m.
-        Reduziert WS-Footprint auf 2-4 Tokens → stabilere Books.
+        Learn-Test Isolation: Nur BTC. Kein ETH.
         """
         try:
             active_tokens = []
             now = time.time()
             for w in self._compute_next_window_closes():
-                # LEARN-TEST: Nur BTC 5m subscriben
                 if w.get("asset", "").upper() != "BTC":
                     continue
-                if w.get("timeframe", "") != "5m":
+                if w.get("timeframe", "") not in ("5m", "15m"):
                     continue
                 secs = w["seconds_to_close"]
                 if 0 < secs <= 310:
@@ -507,10 +505,9 @@ class OracleDelayArbStrategy(StrategyBase):
         end_ts = w["window_end_ts"]
         _tf = w.get("timeframe", "5m")
 
-        # ═══ LEARN-TEST ISOLATION: Nur BTC 5m aktiv ═══
-        # Alles andere (ETH, 15m, etc.) wird komplett stillgelegt.
-        # Kein Legacy-Burst, kein Echtgeld, kein Rauschen.
-        if asset != "BTC" or _tf != "5m":
+        # ═══ LEARN-TEST ISOLATION: Nur BTC 5m + 15m aktiv ═══
+        # ETH und alles andere bleibt stillgelegt.
+        if asset != "BTC" or _tf not in ("5m", "15m"):
             return
 
         try:
