@@ -1081,11 +1081,11 @@ class OracleDelayArbStrategy(StrategyBase):
                 return False
             start_price, _ = snapshot
 
-            # ── Sleep bis T-5s ──
+            # ── Sleep bis T-7s ──
             now = time.time()
-            t5_target = end_ts - 5.0
-            if now < t5_target:
-                await asyncio.sleep(t5_target - now)
+            t7_target = end_ts - 7.0
+            if now < t7_target:
+                await asyncio.sleep(t7_target - now)
 
             if not self._running:
                 return False
