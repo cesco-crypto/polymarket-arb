@@ -1163,15 +1163,13 @@ class OracleDelayArbStrategy(StrategyBase):
             # Check 1: Binance-Move gross genug? (filtert Noise/Zufall)
             if abs_binance_delta < self._PRECLOSE_MIN_DELTA:
                 skip_reason = "delta_too_small"
-            # Check 2: CLOB-Signal stark genug? (Markt mind. 65% sicher)
-            elif winner_ask < self._PRECLOSE_MIN_CLOB_ASK:
-                skip_reason = "clob_signal_weak"
-            # Check 3: Ask nicht zu teuer? (max 90c, sonst kein Edge)
-            elif winner_ask > self._PRECLOSE_MAX_CLOB_ASK:
-                skip_reason = "ask_above_cap"
-            # Check 4: Binance bestaetigt? (gleiche Richtung)
-            elif binance_direction != clob_winner:
-                skip_reason = "binance_disagrees"
+            # Check 2-4: TEMPORAER DEAKTIVIERT fuer Test
+            # elif winner_ask < self._PRECLOSE_MIN_CLOB_ASK:
+            #     skip_reason = "clob_signal_weak"
+            # elif winner_ask > self._PRECLOSE_MAX_CLOB_ASK:
+            #     skip_reason = "ask_above_cap"
+            # elif binance_direction != clob_winner:
+            #     skip_reason = "binance_disagrees"
             # Check 5: Binance-Tick frisch?
             elif tick_age_ms > self._PRECLOSE_MAX_TICK_AGE:
                 skip_reason = "tick_too_stale"
